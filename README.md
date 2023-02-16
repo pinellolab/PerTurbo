@@ -1,7 +1,8 @@
 # PerturbVI
 
 [![Tests][badge-tests]][link-tests]
-[![Documentation][badge-docs]][link-docs]
+
+<!-- [![Documentation][badge-docs]][link-docs] -->
 
 [badge-tests]: https://img.shields.io/github/actions/workflow/status/logan-blaine/PerturbVI/test.yaml?branch=main
 [link-tests]: https://github.com/logan-blaine/PerturbVI/actions/workflows/test.yml
@@ -11,9 +12,11 @@ Estimating perturbation effects on single cell phenotypes using variational infe
 
 ## Getting started
 
-Please refer to the [documentation][link-docs]. In particular, the
+Documentation suspended while private, check back soon :)
 
--   [API documentation][link-api].
+<!-- Please refer to the [documentation][link-docs]. In particular, the -->
+
+<!-- -   [API documentation][link-api]. -->
 
 ## Installation
 
