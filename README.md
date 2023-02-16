@@ -1,6 +1,6 @@
 # PerturbVI
 
-[![Tests][badge-tests]][link-tests]
+<!-- [![Tests][badge-tests]][link-tests] -->
 
 <!-- [![Documentation][badge-docs]][link-docs] -->
 
