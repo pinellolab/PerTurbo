@@ -1,12 +1,12 @@
-# PerturbVI
+# perturbvi
 
 <!-- [![Tests][badge-tests]][link-tests] -->
 
 <!-- [![Documentation][badge-docs]][link-docs] -->
 
-[badge-tests]: https://img.shields.io/github/actions/workflow/status/logan-blaine/PerturbVI/test.yaml?branch=main
-[link-tests]: https://github.com/logan-blaine/PerturbVI/actions/workflows/test.yml
-[badge-docs]: https://img.shields.io/readthedocs/PerturbVI
+[badge-tests]: https://img.shields.io/github/actions/workflow/status/logan-blaine/perturbvi/test.yaml?branch=main
+[link-tests]: https://github.com/logan-blaine/perturbvi/actions/workflows/test.yml
+[badge-docs]: https://img.shields.io/readthedocs/perturbvi
 
 Estimating perturbation effects on single cell phenotypes using variational inference.
 
@@ -23,20 +23,20 @@ Documentation suspended while private, check back soon :)
 You need to have Python 3.8 or newer installed on your system. If you don't have
 Python installed, we recommend installing [Mambaforge](https://github.com/conda-forge/miniforge#mambaforge).
 
-There are several alternative options to install PerturbVI:
+There are several alternative options to install perturbvi:
 
 <!--
-1) Install the latest release of `PerturbVI` from `PyPI <https://pypi.org/project/PerturbVI/>`_:
+1) Install the latest release of `perturbvi` from `PyPI <https://pypi.org/project/perturbvi/>`_:
 
 ```bash
-pip install PerturbVI
+pip install perturbvi
 ```
 -->
 
 1. Install the latest development version:
 
 ```bash
-pip install git+https://github.com/logan-blaine/PerturbVI.git@main
+pip install git+https://github.com/logan-blaine/perturbvi.git@main
 ```
 
 ## Release notes
@@ -53,7 +53,7 @@ If you found a bug, please use the [issue tracker][issue-tracker].
 > t.b.a
 
 [scverse-discourse]: https://discourse.scverse.org/
-[issue-tracker]: https://github.com/logan-blaine/PerturbVI/issues
-[changelog]: https://PerturbVI.readthedocs.io/latest/changelog.html
-[link-docs]: https://PerturbVI.readthedocs.io
-[link-api]: https://PerturbVI.readthedocs.io/latest/api.html
+[issue-tracker]: https://github.com/logan-blaine/perturbvi/issues
+[changelog]: https://perturbvi.readthedocs.io/latest/changelog.html
+[link-docs]: https://perturbvi.readthedocs.io
+[link-api]: https://perturbvi.readthedocs.io/latest/api.html

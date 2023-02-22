@@ -4,7 +4,7 @@ requires = ["hatchling"]
 
 
 [project]
-name = "PerturbVI"
+name = "perturbvi"
 version = "0.0.1"
 description = "Estimating perturbation effects on single cell phenotypes using variational inference."
 readme = "README.md"
