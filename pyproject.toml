@@ -16,11 +16,15 @@ authors = [
 maintainers = [
     {name = "Logan Blaine", email = "loganblaine@g.harvard.edu"},
 ]
-urls.Documentation = "https://PerturbVI.readthedocs.io/"
-urls.Source = "https://github.com/logan-blaine/PerturbVI"
-urls.Home-page = "https://github.com/logan-blaine/PerturbVI"
+urls.Documentation = "https://perturbvi.readthedocs.io/"
+urls.Source = "https://github.com/logan-blaine/perturbvi"
+urls.Home-page = "https://github.com/logan-blaine/perturbvi"
 dependencies = [
     "anndata",
+    "scvi-tools>=0.20.1",
+    "torch",
+    "numpy",
+    "mudata",
     # for debug logging (referenced from the issue template)
     "session-info"
 ]
@@ -30,7 +34,7 @@ dev = [
     # CLI for bumping the version number
     "bump2version",
     "pre-commit",
-    "twine>=4.0.2"
+    "twine>=4.0.2",
 ]
 doc = [
     "sphinx>=4",
@@ -101,4 +105,15 @@ skip = [
     "docs/references.bib",
     "docs/references.md",
     "docs/notebooks/example.ipynb"
+]
+
+[tool.hatch.envs.dev]
+dependencies = [
+    "perturbvi[test]",
+    # For notebooks
+    "ipykernel",
+    "ipython",
+    # For VSCode
+    "black",
+    "flake8",
 ]
