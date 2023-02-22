@@ -23,10 +23,10 @@ dependencies = [
     "anndata",
     "scvi-tools>=0.20.1",
     "torch",
-    "numpy",
+    "pyro-ppl",
     "mudata",
     # for debug logging (referenced from the issue template)
-    "session-info"
+    "session-info",
 ]
 
 [project.optional-dependencies]
