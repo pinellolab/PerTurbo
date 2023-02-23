@@ -2,20 +2,24 @@
 A pyro model
 """
 import logging
-from typing import List, Optional, Union
+from typing import Dict, List, Optional, Union
 
 import numpy as np
 import torch
-from mudata import MuData
+from mudata import AnnData, MuData
+from scvi import REGISTRY_KEYS
+from scvi.data import AnnDataManager, fields
 from scvi.dataloaders import DataSplitter
 from scvi.model.base import BaseModelClass
 from scvi.train import PyroTrainingPlan, TrainRunner
+from scvi.utils._docstrings import setup_anndata_dsp
 
 from ._module import PerturbVIPyroModule
 
 logger = logging.getLogger(__name__)
 
-class PerturbVIPyroModel(BaseModelClass):
+
+class PerturbVIModel(BaseModelClass):
     def __init__(
         self,
         mdata: MuData,
@@ -27,9 +31,7 @@ class PerturbVIPyroModel(BaseModelClass):
 
         self.module = PerturbVIPyroModule()
 
-        self._model_summary_string = (
-            f"MyPyroModel Model with params:\n{self.summary_stats}"
-        )
+        self._model_summary_string = f"MyPyroModel Model with params:\n{self.summary_stats}"
 
         # necessary line to get params that will be used for saving/loading
         self.init_params_ = self._get_init_params(locals())
@@ -40,7 +42,7 @@ class PerturbVIPyroModel(BaseModelClass):
         self,
         max_epochs: Optional[int] = None,
         use_gpu: Optional[Union[str, int, bool]] = None,
-        train_size: float = 1.,
+        train_size: float = 1.0,
         validation_size: Optional[float] = None,
         batch_size: int = 128,
         plan_kwargs: Optional[dict] = None,
@@ -95,5 +97,45 @@ class PerturbVIPyroModel(BaseModelClass):
         return runner()
 
     @classmethod
-    def setup_mudata():
-        pass
+    def setup_mudata(
+        cls,
+        mdata: MuData,
+        rna_layer: Optional[str] = None,
+        batch_key: Optional[str] = None,
+        perturbation_layer: Optional[str] = None,
+        modalities: Optional[Dict[str, str]] = None,
+        **kwargs,
+    ):
+        """%(summary_mdata)s.
+        Parameters
+        ----------
+        %(param_mdata)s
+        rna_layer
+            RNA layer key. If `None`, will use `.X` of specified modality key.
+        protein_layer
+            Protein layer key. If `None`, will use `.X` of specified modality key.
+        %(param_batch_key)s
+        %(param_size_factor_key)s
+        %(param_cat_cov_keys)s
+        %(param_cont_cov_keys)s
+        %(param_modalities)s
+        """
+
+        setup_method_args = cls._get_setup_method_args(**locals())
+
+        if modalities is None:
+            raise ValueError("Modalities cannot be None.")
+        modalities = cls._create_modalities_attr_dict(modalities, setup_method_args)
+
+        batch_field = fields.MuDataCategoricalObsField(
+            REGISTRY_KEYS.BATCH_KEY,
+            batch_key,
+            mod_key=modalities.batch_key,
+        )
+
+        mudata_fields = batch_field
+
+        adata_manager = AnnDataManager(fields=mudata_fields, setup_method_args=setup_method_args)
+
+        adata_manager.register_fields(mdata, **kwargs)
+        cls.register_manager(adata_manager)
