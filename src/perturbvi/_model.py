@@ -25,9 +25,7 @@ class PerturbVIPyroModel(BaseModelClass):
 
         # self.summary_stats provides information about dimensions and other tensor info
 
-        self.module = PerturbVIPyroModule(
-            **model_kwargs,
-        )
+        self.module = PerturbVIPyroModule()
 
         self._model_summary_string = (
             f"MyPyroModel Model with params:\n{self.summary_stats}"
