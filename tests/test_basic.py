@@ -12,11 +12,13 @@ def test_package_has_version():
 
 def test_model_init():
     rna_key = "rna"
-    perturb_key = "perturbation"
+    perturb_key = "grna"
 
-    rna_adata = AnnData(np.random.poisson(size=(20, 10)))
-    perturb_adata = AnnData(np.random.binomial(1, 0.5, size=(20, 5)))
+    rna_adata = AnnData(np.random.poisson(size=(20, 10)), dtype=np.float64)
+    perturb_adata = AnnData(np.random.binomial(1, 0.5, size=(20, 5)), dtype=np.float64)
+    perturb_adata.var_names = 'guide' + perturb_adata.var_names
     mdata = MuData({rna_key: rna_adata, perturb_key: perturb_adata})
+
     perturbvi.PERTURBVI.setup_mudata(
         mdata,
         modalities={
