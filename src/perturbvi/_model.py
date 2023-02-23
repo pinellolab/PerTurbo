@@ -5,7 +5,6 @@ import logging
 from typing import Dict, List, Optional, Union
 
 import numpy as np
-import torch
 from mudata import AnnData, MuData
 from scvi import REGISTRY_KEYS
 from scvi.data import AnnDataManager, fields
@@ -18,18 +17,19 @@ from ._module import PerturbVIPyroModule
 
 logger = logging.getLogger(__name__)
 
+PERTURBATION_REGISTRY_KEY = "perturbations"
 
-class PerturbVIModel(BaseModelClass):
+
+class PERTURBVI(BaseModelClass):
     def __init__(
         self,
         mdata: MuData,
         **model_kwargs,
     ):
-        super(PerturbVIPyroModel, self).__init__(mdata)
+        super(PERTURBVI, self).__init__(mdata)
 
         # self.summary_stats provides information about dimensions and other tensor info
-
-        self.module = PerturbVIPyroModule()
+        self.module = PerturbVIPyroModule(perturbation_key=PERTURBATION_REGISTRY_KEY)
 
         self._model_summary_string = f"MyPyroModel Model with params:\n{self.summary_stats}"
 
@@ -97,6 +97,63 @@ class PerturbVIModel(BaseModelClass):
         return runner()
 
     @classmethod
+    @setup_anndata_dsp.dedent
+    def setup_anndata(
+        cls,
+        adata: AnnData,
+        perturbation_obsm_key: str,
+        perturbation_names_uns_key: Optional[str] = None,
+        batch_key: Optional[str] = None,
+        layer: Optional[str] = None,
+        size_factor_key: Optional[str] = None,
+        categorical_covariate_keys: Optional[List[str]] = None,
+        continuous_covariate_keys: Optional[List[str]] = None,
+        **kwargs,
+    ):
+        """%(summary)s.
+        Parameters
+        ----------
+        %(param_adata)s
+        perturbation_expression_obsm_key
+            key in `adata.obsm` for binarized perturbation status.
+        perturbation_names_uns_key
+            key in `adata.uns` for perturbation names. If None, will use the column names of `adata.obsm[protein_expression_obsm_key]`
+            if it is a DataFrame, else will assign sequential names to perturbations.
+        %(param_batch_key)s
+        %(param_layer)s
+        %(param_size_factor_key)s
+        %(param_cat_cov_keys)s
+        %(param_cont_cov_keys)s
+        Returns
+        -------
+        %(returns)s
+        """
+        setup_method_args = cls._get_setup_method_args(**locals())
+        batch_field = fields.CategoricalObsField(REGISTRY_KEYS.BATCH_KEY, batch_key)
+        anndata_fields = [
+            fields.LayerField(REGISTRY_KEYS.X_KEY, layer, is_count_data=True),
+            fields.CategoricalObsField(
+                REGISTRY_KEYS.LABELS_KEY, None
+            ),  # Default labels field for compatibility with TOTALVAE
+            batch_field,
+            fields.NumericalObsField(REGISTRY_KEYS.SIZE_FACTOR_KEY, size_factor_key, required=False),
+            fields.CategoricalJointObsField(REGISTRY_KEYS.CAT_COVS_KEY, categorical_covariate_keys),
+            fields.NumericalJointObsField(REGISTRY_KEYS.CONT_COVS_KEY, continuous_covariate_keys),
+            fields.ObsmField(
+                PERTURBATION_REGISTRY_KEY,
+                perturbation_obsm_key,
+                use_batch_mask=True,
+                batch_field=batch_field,
+                colnames_uns_key=perturbation_names_uns_key,
+                is_count_data=True,
+            ),
+        ]
+        adata_manager = AnnDataManager(fields=anndata_fields, setup_method_args=setup_method_args)
+        adata_manager.register_fields(adata, **kwargs)
+        cls.register_manager(adata_manager)
+
+    @classmethod
+    @setup_anndata_dsp.dedent
     def setup_mudata(
         cls,
         mdata: MuData,
@@ -112,8 +169,8 @@ class PerturbVIModel(BaseModelClass):
         %(param_mdata)s
         rna_layer
             RNA layer key. If `None`, will use `.X` of specified modality key.
-        protein_layer
-            Protein layer key. If `None`, will use `.X` of specified modality key.
+        perturbation_layer
+            perturbation_layer layer key. If `None`, will use `.X` of specified modality key.
         %(param_batch_key)s
         %(param_size_factor_key)s
         %(param_cat_cov_keys)s
@@ -133,9 +190,20 @@ class PerturbVIModel(BaseModelClass):
             mod_key=modalities.batch_key,
         )
 
-        mudata_fields = batch_field
+        mudata_fields = [
+            batch_field,
+            fields.MuDataLayerField(
+                PERTURBATION_REGISTRY_KEY,
+                perturbation_layer,
+                mod_key=modalities.perturbation_layer,
+                is_count_data=True,
+                mod_required=True,
+            ),
+        ]
 
-        adata_manager = AnnDataManager(fields=mudata_fields, setup_method_args=setup_method_args)
-
+        adata_manager = AnnDataManager(
+            fields=mudata_fields,
+            setup_method_args=setup_method_args,
+        )
         adata_manager.register_fields(mdata, **kwargs)
         cls.register_manager(adata_manager)

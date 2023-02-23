@@ -10,15 +10,24 @@ def test_package_has_version():
     logging.info("version: " + perturbvi.__version__)
 
 
-# @pytest.mark.skip(reason="This decorator should be removed when test passes.")
 def test_model_init():
     rna_key = "rna"
-    perturb_key = "guide"
+    perturb_key = "perturbation"
 
-    adata1 = AnnData(np.random.normal(size=(20, 10)))
-    adata2 = AnnData(np.random.normal(size=(20, 5)))
-    mdata = MuData({rna_key: adata1, perturb_key: adata2})
-    model = perturbvi.PerturbVIModel(mdata)
-    model.setup_mudata(mdata, rna_layer=rna_key, perturbation_layer=perturb_key)
-
+    rna_adata = AnnData(np.random.poisson(size=(20, 10)))
+    perturb_adata = AnnData(np.random.binomial(1, 0.5, size=(20, 5)))
+    mdata = MuData({rna_key: rna_adata, perturb_key: perturb_adata})
+    perturbvi.PERTURBVI.setup_mudata(
+        mdata,
+        modalities={
+            "rna_layer": rna_key,
+            "perturbation_layer": perturb_key,
+        },
+    )
+    model = perturbvi.PERTURBVI(mdata)
     logging.info(model)
+
+
+@pytest.mark.skip(reason="This decorator should be removed when test passes.")
+def test_fail():
+    assert 1 == 0

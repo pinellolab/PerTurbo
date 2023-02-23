@@ -10,7 +10,6 @@ from scvi.module.base import PyroBaseModuleClass
 class PerturbVIPyroModule(PyroBaseModuleClass):
     def __init__(self, **module_kwargs) -> None:
         super().__init__()
-        self.guide = None
 
     @staticmethod
     def _get_fn_args_from_batch(tensor_dict):
@@ -19,4 +18,8 @@ class PerturbVIPyroModule(PyroBaseModuleClass):
 
     @property
     def model(self, x):
+        pass
+
+    @property
+    def guide(self, x):
         pass
