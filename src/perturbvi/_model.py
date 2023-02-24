@@ -2,15 +2,14 @@
 A pyro model
 """
 import logging
-from typing import Dict, List, Optional, Union
+from typing import Dict, List, Optional
 
-import numpy as np
-from mudata import AnnData, MuData
+from mudata import MuData, AnnData
 from scvi import REGISTRY_KEYS
 from scvi.data import AnnDataManager, fields
-from scvi.dataloaders import DataSplitter
-from scvi.model.base import BaseModelClass
-from scvi.train import PyroTrainingPlan, TrainRunner
+from scvi.model.base import BaseModelClass, PyroSviTrainMixin, PyroSampleMixin
+
+# from scvi.train import PyroTrainingPlan, TrainRunner
 from scvi.utils._docstrings import setup_anndata_dsp
 
 from ._module import PerturbVIPyroModule
@@ -20,7 +19,7 @@ logger = logging.getLogger(__name__)
 PERTURBATION_REGISTRY_KEY = "perturbations"
 
 
-class PERTURBVI(BaseModelClass):
+class PERTURBVI(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
     def __init__(
         self,
         mdata: MuData,
@@ -38,119 +37,13 @@ class PERTURBVI(BaseModelClass):
 
         logger.info("The model has been initialized")
 
-    def train(
-        self,
-        max_epochs: Optional[int] = None,
-        use_gpu: Optional[Union[str, int, bool]] = None,
-        train_size: float = 1.0,
-        validation_size: Optional[float] = None,
-        batch_size: int = 128,
-        plan_kwargs: Optional[dict] = None,
-        **trainer_kwargs,
-    ):
-        """
-        Train the model.
-
-        Parameters
-        ----------
-        max_epochs
-            Number of passes through the dataset. If `None`, defaults to
-            `np.min([round((20000 / n_cells) * 400), 400])`
-        use_gpu
-            Use default GPU if available (if None or True), or index of GPU to use (if int),
-            or name of GPU (if str), or use CPU (if False).
-        train_size
-            Size of training set in the range [0.0, 1.0].
-        validation_size
-            Size of the test set. If `None`, defaults to 1 - `train_size`. If
-            `train_size + validation_size < 1`, the remaining cells belong to a test set.
-        batch_size
-            Minibatch size to use during training.
-        plan_kwargs
-            Keyword args for :class:`~scvi.lightning.TrainingPlan`. Keyword arguments passed to
-            `train()` will overwrite values present in `plan_kwargs`, when appropriate.
-        **trainer_kwargs
-            Other keyword args for :class:`~scvi.lightning.Trainer`.
-        """
-        if max_epochs is None:
-            n_cells = self.adata.n_obs
-            max_epochs = np.min([round((20000 / n_cells) * 400), 400])
-
-        plan_kwargs = plan_kwargs if isinstance(plan_kwargs, dict) else {}
-
-        data_splitter = DataSplitter(
-            self.adata_manager,
-            train_size=train_size,
-            validation_size=validation_size,
-            batch_size=batch_size,
-            use_gpu=use_gpu,
-        )
-        training_plan = PyroTrainingPlan(self.module, **plan_kwargs)
-        runner = TrainRunner(
-            self,
-            training_plan=training_plan,
-            data_splitter=data_splitter,
-            max_epochs=max_epochs,
-            use_gpu=use_gpu,
-            **trainer_kwargs,
-        )
-        return runner()
-
-    @classmethod
-    @setup_anndata_dsp.dedent
     def setup_anndata(
         cls,
         adata: AnnData,
-        perturbation_obsm_key: str,
-        perturbation_names_uns_key: Optional[str] = None,
-        batch_key: Optional[str] = None,
-        layer: Optional[str] = None,
-        size_factor_key: Optional[str] = None,
-        categorical_covariate_keys: Optional[List[str]] = None,
-        continuous_covariate_keys: Optional[List[str]] = None,
+        *args,
         **kwargs,
     ):
-        """%(summary)s.
-        Parameters
-        ----------
-        %(param_adata)s
-        perturbation_expression_obsm_key
-            key in `adata.obsm` for binarized perturbation status.
-        perturbation_names_uns_key
-            key in `adata.uns` for perturbation names. If None, will use the column names of `adata.obsm[protein_expression_obsm_key]`
-            if it is a DataFrame, else will assign sequential names to perturbations.
-        %(param_batch_key)s
-        %(param_layer)s
-        %(param_size_factor_key)s
-        %(param_cat_cov_keys)s
-        %(param_cont_cov_keys)s
-        Returns
-        -------
-        %(returns)s
-        """
-        setup_method_args = cls._get_setup_method_args(**locals())
-        batch_field = fields.CategoricalObsField(REGISTRY_KEYS.BATCH_KEY, batch_key)
-        anndata_fields = [
-            fields.LayerField(REGISTRY_KEYS.X_KEY, layer, is_count_data=True),
-            fields.CategoricalObsField(
-                REGISTRY_KEYS.LABELS_KEY, None
-            ),  # Default labels field for compatibility with TOTALVAE
-            batch_field,
-            fields.NumericalObsField(REGISTRY_KEYS.SIZE_FACTOR_KEY, size_factor_key, required=False),
-            fields.CategoricalJointObsField(REGISTRY_KEYS.CAT_COVS_KEY, categorical_covariate_keys),
-            fields.NumericalJointObsField(REGISTRY_KEYS.CONT_COVS_KEY, continuous_covariate_keys),
-            fields.ObsmField(
-                PERTURBATION_REGISTRY_KEY,
-                perturbation_obsm_key,
-                use_batch_mask=True,
-                batch_field=batch_field,
-                colnames_uns_key=perturbation_names_uns_key,
-                is_count_data=True,
-            ),
-        ]
-        adata_manager = AnnDataManager(fields=anndata_fields, setup_method_args=setup_method_args)
-        adata_manager.register_fields(adata, **kwargs)
-        cls.register_manager(adata_manager)
+        raise NotImplementedError("Use setup_mudata instead.")
 
     @classmethod
     @setup_anndata_dsp.dedent
@@ -161,6 +54,8 @@ class PERTURBVI(BaseModelClass):
         batch_key: Optional[str] = None,
         perturbation_layer: Optional[str] = None,
         modalities: Optional[Dict[str, str]] = None,
+        cat_cov_keys: Optional[List[str]] = None,
+        cont_cov_keys: Optional[List[str]] = None,
         **kwargs,
     ):
         """%(summary_mdata)s.
@@ -198,6 +93,23 @@ class PERTURBVI(BaseModelClass):
                 mod_key=modalities.perturbation_layer,
                 is_count_data=True,
                 mod_required=True,
+            ),
+            fields.MuDataLayerField(
+                REGISTRY_KEYS.X_KEY,
+                rna_layer,
+                mod_key=modalities.rna_layer,
+                is_count_data=True,
+                mod_required=True,
+            ),
+            fields.MuDataCategoricalJointObsField(
+                REGISTRY_KEYS.CAT_COVS_KEY,
+                cat_cov_keys,
+                mod_key=modalities.cat_cov_keys,
+            ),
+            fields.MuDataNumericalJointObsField(
+                REGISTRY_KEYS.CONT_COVS_KEY,
+                cont_cov_keys,
+                mod_key=modalities.cont_cov_keys,
             ),
         ]
 
