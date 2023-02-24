@@ -13,7 +13,7 @@ class PerturbVIPyroModule(PyroBaseModuleClass):
 
     @staticmethod
     def _get_fn_args_from_batch(tensor_dict):
-        x = tensor_dict
+        x = tensor_dict[REGISTRY_KEYS.X_KEY]
         return x
 
     @property
