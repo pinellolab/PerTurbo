@@ -27,7 +27,7 @@ def test_model_init():
         },
     )
     model = perturbvi.PERTURBVI(mdata)
-    logging.info(model)
+    print(model.summary_stats)
 
 
 @pytest.mark.skip(reason="This decorator should be removed when test passes.")
