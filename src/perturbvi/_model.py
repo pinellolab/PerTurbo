@@ -1,6 +1,3 @@
-"""
-A pyro model
-"""
 import logging
 from typing import Dict, List, Optional
 
@@ -54,6 +51,7 @@ class PERTURBVI(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
         batch_key: Optional[str] = None,
         perturbation_layer: Optional[str] = None,
         modalities: Optional[Dict[str, str]] = None,
+        size_factor_key: Optional[str] = None,
         cat_cov_keys: Optional[List[str]] = None,
         cont_cov_keys: Optional[List[str]] = None,
         **kwargs,
@@ -100,6 +98,13 @@ class PERTURBVI(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
                 mod_key=modalities.rna_layer,
                 is_count_data=True,
                 mod_required=True,
+            ),
+            fields.MuDataNumericalObsField(
+                REGISTRY_KEYS.OBSERVED_LIB_SIZE,
+                size_factor_key,
+                mod_key=modalities.rna_layer,
+                mod_required=True,
+
             ),
             fields.MuDataCategoricalJointObsField(
                 REGISTRY_KEYS.CAT_COVS_KEY,
