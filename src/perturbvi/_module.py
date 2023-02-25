@@ -1,10 +1,9 @@
-from typing import Optional
-
 import pyro
 import pyro.distributions as dist
 import torch
-from scvi import REGISTRY_KEYS
 from scvi.module.base import PyroBaseModuleClass
+
+from ._constants import REGISTRY_KEYS
 
 
 class PerturbVIPyroModule(PyroBaseModuleClass):
@@ -13,13 +12,31 @@ class PerturbVIPyroModule(PyroBaseModuleClass):
 
     @staticmethod
     def _get_fn_args_from_batch(tensor_dict):
-        x = tensor_dict[REGISTRY_KEYS.X_KEY]
-        return x
+        return (
+            tensor_dict[REGISTRY_KEYS.X_KEY],
+            tensor_dict[REGISTRY_KEYS.PERTURBATION_KEY],
+            tensor_dict[REGISTRY_KEYS.OBSERVED_LIB_SIZE],
+        ), {}
 
-    @property
-    def model(self, x):
-        pass
+    def model(self, x, perturbations, library_size):
+        n_cells, n_vars = x.shape
+        with pyro.plate("vars", n_vars):
+            log_var_mean = pyro.sample("log_var_mean", dist.Normal(0, 4))
+            log_var_dispersion = pyro.sample("log_var_dispersion", dist.Normal(2, 1))
+            with pyro.plate("cells", n_cells):
+                pyro.sample(
+                    "obs",
+                    dist.NegativeBinomial(
+                        total_count=log_var_dispersion.exp(),
+                        logits=log_var_mean + library_size.log(),
+                    ),
+                    obs=x,
+                )
 
-    @property
-    def guide(self, x):
-        pass
+    def guide(self, x, perturbations, library_size):
+        _, n_vars = x.shape
+        log_var_mean_mu = pyro.param("log_var_mean.mu", lambda: torch.full((n_vars,), 0.0))
+        log_var_disp_mu = pyro.param("log_var_disp.mu", lambda: torch.full((n_vars,), 0.0))
+        with pyro.plate("vars", n_vars):
+            pyro.sample("log_var_mean", dist.Delta(log_var_mean_mu))
+            pyro.sample("log_var_dispersion", dist.Delta(log_var_disp_mu))
