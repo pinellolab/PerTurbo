@@ -1,11 +1,9 @@
 import pyro
 import pyro.distributions as dist
 import torch
-from scvi import REGISTRY_KEYS
 from scvi.module.base import PyroBaseModuleClass
 
-
-PERTURBATION_REGISTRY_KEY = "perturbations"
+from ._constants import REGISTRY_KEYS
 
 
 class PerturbVIPyroModule(PyroBaseModuleClass):
@@ -16,7 +14,7 @@ class PerturbVIPyroModule(PyroBaseModuleClass):
     def _get_fn_args_from_batch(tensor_dict):
         return (
             tensor_dict[REGISTRY_KEYS.X_KEY],
-            tensor_dict[PERTURBATION_REGISTRY_KEY],
+            tensor_dict[REGISTRY_KEYS.PERTURBATION_KEY],
             tensor_dict[REGISTRY_KEYS.OBSERVED_LIB_SIZE],
         ), {}
 

@@ -1,19 +1,17 @@
 import logging
 from typing import Dict, List, Optional
 
-from mudata import MuData, AnnData
-from scvi import REGISTRY_KEYS
+from mudata import AnnData, MuData
 from scvi.data import AnnDataManager, fields
-from scvi.model.base import BaseModelClass, PyroSviTrainMixin, PyroSampleMixin
+from scvi.model.base import BaseModelClass, PyroSampleMixin, PyroSviTrainMixin
 
 # from scvi.train import PyroTrainingPlan, TrainRunner
 from scvi.utils._docstrings import setup_anndata_dsp
 
+from ._constants import REGISTRY_KEYS
 from ._module import PerturbVIPyroModule
 
 logger = logging.getLogger(__name__)
-
-PERTURBATION_REGISTRY_KEY = "perturbations"
 
 
 class PERTURBVI(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
@@ -25,7 +23,7 @@ class PERTURBVI(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
         super(PERTURBVI, self).__init__(mdata)
 
         # self.summary_stats provides information about dimensions and other tensor info
-        self.module = PerturbVIPyroModule(perturbation_key=PERTURBATION_REGISTRY_KEY)
+        self.module = PerturbVIPyroModule(perturbation_key=REGISTRY_KEYS.PERTURBATION_KEY)
 
         self._model_summary_string = f"MyPyroModel Model with params:\n{self.summary_stats}"
 
@@ -86,7 +84,7 @@ class PERTURBVI(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
         mudata_fields = [
             batch_field,
             fields.MuDataLayerField(
-                PERTURBATION_REGISTRY_KEY,
+                REGISTRY_KEYS.PERTURBATION_KEY,
                 perturbation_layer,
                 mod_key=modalities.perturbation_layer,
                 is_count_data=True,
@@ -104,7 +102,6 @@ class PERTURBVI(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
                 size_factor_key,
                 mod_key=modalities.rna_layer,
                 mod_required=True,
-
             ),
             fields.MuDataCategoricalJointObsField(
                 REGISTRY_KEYS.CAT_COVS_KEY,
