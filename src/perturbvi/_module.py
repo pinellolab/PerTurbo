@@ -37,7 +37,7 @@ class PerturbVIPyroModule(PyroBaseModuleClass):
             log_var_dispersion = pyro.sample("log_var_dispersion", dist.Normal(2.0, 1.0))
 
             nb_log_dispersion = log_var_dispersion.exp() + perturbations @ perturb_disp_lfc
-            nb_log_mean = log_var_mean + perturbations @ perturb_mean_lfc + library_size.log()
+            nb_log_mean = log_var_mean + perturbations @ perturb_mean_lfc + library_size.log1p()
 
             with cell_plate:
                 return pyro.sample(

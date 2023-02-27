@@ -79,9 +79,10 @@ class PERTURBVI(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
         # add library size if not present
         if size_factor_key is None:
             size_factor_key = "_library_size"
-            mdata[modalities.rna_layer].obs = mdata[modalities.rna_layer].obs.assign(
-                _library_size=mdata[modalities.rna_layer].X.sum(axis=1)
-            )
+            lib_size = mdata[modalities.rna_layer].X.sum(axis=1)
+            if not lib_size.all():
+                raise ValueError("Cannot infer library size: cells with zero counts. Set size_factor_key instead.")
+            mdata[modalities.rna_layer]["_library_size"] = lib_size
 
         # add indices to enable pyro subsampling of local vars
         mdata[modalities.rna_layer].obs = mdata[modalities.rna_layer].obs.assign(_ind_x=lambda x: np.arange(len(x)))
