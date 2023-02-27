@@ -76,6 +76,13 @@ class PERTURBVI(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
             raise ValueError("Modalities cannot be None.")
         modalities = cls._create_modalities_attr_dict(modalities, setup_method_args)
 
+        # add library size if not present
+        if size_factor_key is None:
+            size_factor_key = "_library_size"
+            mdata[modalities.rna_layer].obs = mdata[modalities.rna_layer].obs.assign(
+                _library_size=mdata[modalities.rna_layer].X.sum(axis=1)
+            )
+
         # add indices to enable pyro subsampling of local vars
         mdata[modalities.rna_layer].obs = mdata[modalities.rna_layer].obs.assign(_ind_x=lambda x: np.arange(len(x)))
         index_field = fields.MuDataNumericalObsField(
