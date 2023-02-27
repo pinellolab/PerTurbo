@@ -5,8 +5,6 @@ import numpy as np
 from mudata import AnnData, MuData
 from scvi.data import AnnDataManager, fields
 from scvi.model.base import BaseModelClass, PyroSampleMixin, PyroSviTrainMixin
-
-# from scvi.train import PyroTrainingPlan, TrainRunner
 from scvi.utils._docstrings import setup_anndata_dsp
 
 from ._constants import REGISTRY_KEYS
@@ -39,7 +37,7 @@ class PERTURBVI(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
         *args,
         **kwargs,
     ):
-        raise NotImplementedError("Use setup_mudata instead.")
+        raise NotImplementedError("Not implemented: use setup_mudata instead.")
 
     @classmethod
     @setup_anndata_dsp.dedent
@@ -139,3 +137,4 @@ class PERTURBVI(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
         )
         adata_manager.register_fields(mdata, **kwargs)
         cls.register_manager(adata_manager)
+

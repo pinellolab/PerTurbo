@@ -51,14 +51,16 @@ class PerturbVIPyroModule(PyroBaseModuleClass):
 
     def guide(self, idx, init_scale=0.1, **tensor_dict):
         pyro.module("perturbvi", self)
+
+        scale_factor = pyro.param("scale_factor", torch.tensor(init_scale).log()).exp()
         _, perturbation_plate, var_plate = self.create_plates(idx)
         log_var_mean_mu = pyro.param("log_var_mean.mu", lambda: torch.zeros((self.n_vars,)))
         log_var_disp_mu = pyro.param("log_var_disp.mu", lambda: torch.zeros((self.n_vars,)))
         log_var_mean_sigma = pyro.param(
-            "log_var_mean.sigma", lambda: torch.full((self.n_vars,), init_scale), constraint=dist.constraints.positive
+            "log_var_mean.sigma", lambda: torch.ones((self.n_vars,)), constraint=dist.constraints.positive
         )
         log_var_disp_sigma = pyro.param(
-            "log_var_disp.sigma", lambda: torch.full((self.n_vars,), init_scale), constraint=dist.constraints.positive
+            "log_var_disp.sigma", lambda: torch.ones((self.n_vars,)), constraint=dist.constraints.positive
         )
 
         perturb_mean_lfc_mu = pyro.param(
@@ -70,23 +72,34 @@ class PerturbVIPyroModule(PyroBaseModuleClass):
         perturb_lfc_mu = torch.stack((perturb_mean_lfc_mu, perturb_disp_lfc_mu), dim=-1)
 
         perturb_lfc_scale_tril = pyro.param(
-            "perturb_mean_lfc.scale_tril",
+            "perturb_lfc.scale_tril",
             lambda: torch.eye(2).repeat((self.n_perturbations, self.n_vars, 1, 1)),
             constraint=dist.constraints.corr_cholesky_constraint,
         )
 
         with var_plate:
-            pyro.sample("log_var_mean", dist.Normal(log_var_mean_mu, log_var_mean_sigma))
-            pyro.sample("log_var_dispersion", dist.Normal(log_var_disp_mu, log_var_disp_sigma))
+            pyro.sample("log_var_mean", dist.Normal(log_var_mean_mu, log_var_mean_sigma * scale_factor))
+            pyro.sample("log_var_dispersion", dist.Normal(log_var_disp_mu, log_var_disp_sigma * scale_factor))
 
             with perturbation_plate:
                 perturb_lfc = pyro.sample(
                     "perturb_lfc",
                     dist.MultivariateNormal(
                         perturb_lfc_mu,
-                        scale_tril=perturb_lfc_scale_tril,
+                        scale_tril=perturb_lfc_scale_tril * scale_factor,
                     ),
                     infer={"is_auxiliary": True},
                 )
                 pyro.sample("perturb_mean_lfc", dist.Delta(perturb_lfc[..., 0]))
                 pyro.sample("perturb_disp_lfc", dist.Delta(perturb_lfc[..., 1]))
+
+    @staticmethod
+    def get_perturbation_effects():
+        """
+        Return the perturbation effects on each variable's mean and variance
+        """
+        store = pyro.get_param_store()
+        return (
+            store["perturb_mean_lfc.mu"].detach().cpu().numpy(),
+            store["perturb_disp_lfc.mu"].detach().cpu().numpy(),
+        )
