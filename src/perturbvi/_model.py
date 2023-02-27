@@ -1,11 +1,10 @@
 import logging
 from typing import Dict, List, Optional
 
+import numpy as np
 from mudata import AnnData, MuData
 from scvi.data import AnnDataManager, fields
 from scvi.model.base import BaseModelClass, PyroSampleMixin, PyroSviTrainMixin
-
-# from scvi.train import PyroTrainingPlan, TrainRunner
 from scvi.utils._docstrings import setup_anndata_dsp
 
 from ._constants import REGISTRY_KEYS
@@ -23,7 +22,7 @@ class PERTURBVI(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
         super(PERTURBVI, self).__init__(mdata)
 
         # self.summary_stats provides information about dimensions and other tensor info
-        self.module = PerturbVIPyroModule(perturbation_key=REGISTRY_KEYS.PERTURBATION_KEY)
+        self.module = PerturbVIPyroModule(self.summary_stats)
 
         self._model_summary_string = f"MyPyroModel Model with params:\n{self.summary_stats}"
 
@@ -38,7 +37,7 @@ class PERTURBVI(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
         *args,
         **kwargs,
     ):
-        raise NotImplementedError("Use setup_mudata instead.")
+        raise NotImplementedError("Not implemented: use setup_mudata instead.")
 
     @classmethod
     @setup_anndata_dsp.dedent
@@ -75,6 +74,22 @@ class PERTURBVI(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
             raise ValueError("Modalities cannot be None.")
         modalities = cls._create_modalities_attr_dict(modalities, setup_method_args)
 
+        # add library size if not present
+        if size_factor_key is None:
+            size_factor_key = "_library_size"
+            lib_size = mdata[modalities.rna_layer].X.sum(axis=1)
+            if not lib_size.all():
+                raise ValueError("Cannot infer library size: cells with zero counts. Set size_factor_key instead.")
+            mdata[modalities.rna_layer]["_library_size"] = lib_size
+
+        # add indices to enable pyro subsampling of local vars
+        mdata[modalities.rna_layer].obs = mdata[modalities.rna_layer].obs.assign(_ind_x=lambda x: np.arange(len(x)))
+        index_field = fields.MuDataNumericalObsField(
+            REGISTRY_KEYS.INDICES_KEY,
+            "_ind_x",
+            mod_key=modalities.rna_layer,
+        )
+
         batch_field = fields.MuDataCategoricalObsField(
             REGISTRY_KEYS.BATCH_KEY,
             batch_key,
@@ -82,6 +97,7 @@ class PERTURBVI(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
         )
 
         mudata_fields = [
+            index_field,
             batch_field,
             fields.MuDataLayerField(
                 REGISTRY_KEYS.PERTURBATION_KEY,
@@ -121,3 +137,4 @@ class PERTURBVI(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
         )
         adata_manager.register_fields(mdata, **kwargs)
         cls.register_manager(adata_manager)
+
