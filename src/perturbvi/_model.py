@@ -1,6 +1,7 @@
 import logging
 from typing import Dict, List, Optional
 
+import numpy as np
 from mudata import AnnData, MuData
 from scvi.data import AnnDataManager, fields
 from scvi.model.base import BaseModelClass, PyroSampleMixin, PyroSviTrainMixin
@@ -23,7 +24,7 @@ class PERTURBVI(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
         super(PERTURBVI, self).__init__(mdata)
 
         # self.summary_stats provides information about dimensions and other tensor info
-        self.module = PerturbVIPyroModule(perturbation_key=REGISTRY_KEYS.PERTURBATION_KEY)
+        self.module = PerturbVIPyroModule(self.summary_stats)
 
         self._model_summary_string = f"MyPyroModel Model with params:\n{self.summary_stats}"
 
@@ -75,6 +76,14 @@ class PERTURBVI(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
             raise ValueError("Modalities cannot be None.")
         modalities = cls._create_modalities_attr_dict(modalities, setup_method_args)
 
+        # add indices to enable pyro subsampling of local vars
+        mdata[modalities.rna_layer].obs = mdata[modalities.rna_layer].obs.assign(_ind_x=lambda x: np.arange(len(x)))
+        index_field = fields.MuDataNumericalObsField(
+            REGISTRY_KEYS.INDICES_KEY,
+            "_ind_x",
+            mod_key=modalities.rna_layer,
+        )
+
         batch_field = fields.MuDataCategoricalObsField(
             REGISTRY_KEYS.BATCH_KEY,
             batch_key,
@@ -82,6 +91,7 @@ class PERTURBVI(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
         )
 
         mudata_fields = [
+            index_field,
             batch_field,
             fields.MuDataLayerField(
                 REGISTRY_KEYS.PERTURBATION_KEY,
