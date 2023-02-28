@@ -62,6 +62,12 @@ class PerturbVIPyroModule(PyroBaseModuleClass):
         cell_plate, perturbation_plate, batch_plate, var_plate = self.create_plates(idx)
         log_var_mean_mu = pyro.param("log_var_mean.mu", lambda: torch.zeros((self.n_vars,)))
         log_var_disp_mu = pyro.param("log_var_disp.mu", lambda: torch.zeros((self.n_vars,)))
+
+        batch_effect_mu = pyro.param("batch_effect.mu", lambda: torch.zeros((self.n_batches, 1)))
+        batch_effect_sigma = pyro.param(
+            "batch_effect.sigma", lambda: torch.ones((self.n_batches, 1)), constraint=dist.constraints.positive
+        )
+
         log_var_mean_sigma = pyro.param(
             "log_var_mean.sigma", lambda: torch.ones((self.n_vars,)), constraint=dist.constraints.positive
         )
@@ -86,6 +92,9 @@ class PerturbVIPyroModule(PyroBaseModuleClass):
         with var_plate:
             pyro.sample("log_var_mean", dist.Normal(log_var_mean_mu, log_var_mean_sigma * scale_factor))
             pyro.sample("log_var_dispersion", dist.Normal(log_var_disp_mu, log_var_disp_sigma * scale_factor))
+
+            with batch_plate:
+                pyro.sample("batch_effect", dist.Normal(batch_effect_mu, batch_effect_sigma * scale_factor))
 
             with perturbation_plate:
                 perturb_lfc = pyro.sample(
