@@ -37,8 +37,8 @@ class PerturbVIPyroModule(PyroBaseModuleClass):
                 batch_effect_size = pyro.sample("batch_effect", dist.Normal(0.0, 1.0))
                 batch_effects = batch_effect_size[batch.long().squeeze(), ...]
             with perturbation_plate:
-                perturb_mean_lfc = pyro.sample("perturb_mean_lfc", dist.Cauchy(0.0, 0.1))
-                perturb_disp_lfc = pyro.sample("perturb_disp_lfc", dist.Cauchy(0.0, 0.1))
+                perturb_mean_lfc = pyro.sample("perturb_mean_lfc", dist.Cauchy(0.0, 0.05))
+                perturb_disp_lfc = pyro.sample("perturb_disp_lfc", dist.Cauchy(0.0, 0.05))
             log_var_mean = pyro.sample("log_var_mean", dist.Normal(0.0, 4.0))
             log_var_dispersion = pyro.sample("log_var_dispersion", dist.Normal(2.0, 1.0))
 

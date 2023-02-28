@@ -49,8 +49,6 @@ class PERTURBVI(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
         perturbation_layer: Optional[str] = None,
         modalities: Optional[Dict[str, str]] = None,
         size_factor_key: Optional[str] = None,
-        cat_cov_keys: Optional[List[str]] = None,
-        cont_cov_keys: Optional[List[str]] = None,
         **kwargs,
     ):
         """%(summary_mdata)s.
@@ -63,8 +61,6 @@ class PERTURBVI(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
             perturbation_layer layer key. If `None`, will use `.X` of specified modality key.
         %(param_batch_key)s
         %(param_size_factor_key)s
-        %(param_cat_cov_keys)s
-        %(param_cont_cov_keys)s
         %(param_modalities)s
         """
 
@@ -118,16 +114,6 @@ class PERTURBVI(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
                 size_factor_key,
                 mod_key=modalities.rna_layer,
                 mod_required=True,
-            ),
-            fields.MuDataCategoricalJointObsField(
-                REGISTRY_KEYS.CAT_COVS_KEY,
-                cat_cov_keys,
-                mod_key=modalities.cat_cov_keys,
-            ),
-            fields.MuDataNumericalJointObsField(
-                REGISTRY_KEYS.CONT_COVS_KEY,
-                cont_cov_keys,
-                mod_key=modalities.cont_cov_keys,
             ),
         ]
 
