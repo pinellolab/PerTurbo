@@ -93,7 +93,7 @@ class PERTURBVI(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
         batch_field = fields.MuDataCategoricalObsField(
             REGISTRY_KEYS.BATCH_KEY,
             batch_key,
-            mod_key=modalities.batch_key,
+            mod_key=modalities.rna_layer,
         )
 
         mudata_fields = [
