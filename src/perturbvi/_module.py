@@ -37,8 +37,14 @@ class PerturbVIPyroModule(PyroBaseModuleClass):
                 batch_effect_size = pyro.sample("batch_effect", dist.Normal(0.0, 1.0))
                 batch_effects = batch_effect_size[batch.long().squeeze(), ...]
             with perturbation_plate:
-                perturb_mean_lfc = pyro.sample("perturb_mean_lfc", dist.Cauchy(0.0, 0.05))
-                perturb_disp_lfc = pyro.sample("perturb_disp_lfc", dist.Cauchy(0.0, 0.05))
+                spike_slab_mix = dist.Categorical(torch.tensor((0.99, 0.01)))
+                spike_slab_means = torch.tensor((0., 0.))
+                spike_slab_vars = torch.tensor((0.01, 1.))
+                spike_slab_comp = dist.Normal(spike_slab_means, spike_slab_vars)
+                spike_slab_dist = dist.MixtureSameFamily(spike_slab_mix, spike_slab_comp)
+                perturb_mean_lfc = pyro.sample("perturb_mean_lfc", spike_slab_dist)
+                perturb_disp_lfc = pyro.sample("perturb_disp_lfc", dist.Normal(0.0, 0.01))
+                # perturb_disp_lfc = torch.zeros_like(perturb_mean_lfc)
             log_var_mean = pyro.sample("log_var_mean", dist.Normal(0.0, 4.0))
             log_var_dispersion = pyro.sample("log_var_dispersion", dist.Normal(2.0, 1.0))
 
