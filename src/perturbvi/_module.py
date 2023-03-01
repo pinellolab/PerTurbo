@@ -47,16 +47,18 @@ class PerturbVIPyroModule(PyroBaseModuleClass):
             pyro.plate("perturbations", self.n_perturbations, dim=-2),
             pyro.plate("batches", self.n_batches, dim=-2),
             pyro.plate("vars", self.n_vars, dim=-1, subsample_size=subsample_size),
+            # pyro.plate("covariates", self.n_batches, dim=-2),
         )
 
     def model(self, idx, **tensor_dict):
         pyro.module("perturbvi", self)
         cell_plate, perturbation_plate, batch_plate, var_plate = self.create_plates(idx)
         batch = tensor_dict[REGISTRY_KEYS.BATCH_KEY]
-        library_size = tensor_dict[REGISTRY_KEYS.OBSERVED_LIB_SIZE]
+        size_factor = tensor_dict[REGISTRY_KEYS.SIZE_FACTOR_KEY]
         perturbations = tensor_dict[REGISTRY_KEYS.PERTURBATION_KEY]
 
         with var_plate:
+            library_size_effect = pyro.sample("library_size_effect", dist.Normal(1.0, 0.1))
             if self.likelihood == "nb_mix":
                 mixture_logits = pyro.sample("mixture_logits", dist.Normal(-1.0, 0.01))
                 mixture_logits = -1.0
@@ -73,10 +75,14 @@ class PerturbVIPyroModule(PyroBaseModuleClass):
                 perturb_disp_lfc = pyro.sample("perturb_disp_lfc", dist.Normal(0.0, 0.01))
 
             log_var_mean = pyro.sample("log_var_mean", dist.Normal(0.0, 4.0))
-            log_var_dispersion = pyro.sample("log_var_dispersion", dist.Normal(2.0, 1.0))
+            # mean_disp_slope = pyro.sample("mean_disp_slope", dist.Normal(0.0, 4.0))
+            # mean_disp_offset = pyro.sample("mean_disp_offset", dist.Normal(0.0, 4.0))
+            log_var_dispersion = pyro.sample("log_var_dispersion", dist.Normal(log_var_mean, 1.0))
 
             nb_log_dispersion = log_var_dispersion + perturbations @ perturb_disp_lfc
-            nb_log_mean = log_var_mean + perturbations @ perturb_mean_lfc + library_size.log1p() + batch_effects
+            nb_log_mean = (
+                log_var_mean + perturbations @ perturb_mean_lfc + size_factor * library_size_effect + batch_effects
+            )
 
             with cell_plate:
                 if self.likelihood == "nb_mix":
@@ -108,6 +114,13 @@ class PerturbVIPyroModule(PyroBaseModuleClass):
         # scale_factor = pyro.param("scale_factor", torch.tensor(init_scale).log()).exp()
         scale_factor = init_scale
         cell_plate, perturbation_plate, batch_plate, var_plate = self.create_plates(idx)
+        library_size_effect_mu = pyro.param("library_size_effect.mu", lambda: torch.ones((self.n_vars,)))
+        library_size_effect_sigma = pyro.param(
+            "library_size_effect.sigma",
+            lambda: torch.ones((self.n_vars,)),
+            constraint=dist.constraints.positive,
+        )
+
         log_var_mean_mu = pyro.param("log_var_mean.mu", lambda: torch.zeros((self.n_vars,)))
         log_var_disp_mu = pyro.param("log_var_disp.mu", lambda: torch.zeros((self.n_vars,)))
         if self.likelihood == "nb_mix":
@@ -150,7 +163,15 @@ class PerturbVIPyroModule(PyroBaseModuleClass):
             constraint=dist.constraints.corr_cholesky_constraint,
         )
 
+        # mean_disp_slope_mu = pyro.param("mean_disp_slope.mu", lambda: torch.zeros((self.n_vars,)))
+        # mean_disp_offset_mu = pyro.param("mean_disp_offset.mu", lambda: torch.zeros((self.n_vars,)))
+
         with var_plate:
+            # pyro.sample("mean_disp_slope", dist.Delta(mean_disp_slope_mu))
+            # pyro.sample("mean_disp_offset", dist.Delta(mean_disp_offset_mu))
+            pyro.sample(
+                "library_size_effect", dist.Normal(library_size_effect_mu, library_size_effect_sigma * scale_factor)
+            )
             pyro.sample("log_var_mean", dist.Normal(log_var_mean_mu, log_var_mean_sigma * scale_factor))
             pyro.sample("log_var_dispersion", dist.Normal(log_var_disp_mu, log_var_disp_sigma * scale_factor))
             if self.likelihood == "nb_mix":

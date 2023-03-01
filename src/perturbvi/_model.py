@@ -60,6 +60,7 @@ class PERTURBVI(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
         perturbation_layer: Optional[str] = None,
         modalities: Optional[Dict[str, str]] = None,
         size_factor_key: Optional[str] = None,
+        library_size_key: Optional[str] = None,
         **kwargs,
     ):
         """%(summary_mdata)s.
@@ -82,12 +83,20 @@ class PERTURBVI(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
         modalities = cls._create_modalities_attr_dict(modalities, setup_method_args)
 
         # add library size if not present
+        if library_size_key is None:
+            library_size_key = "_library_size"
+            library_size = mdata[modalities.rna_layer].X.sum(axis=1)
+            if not library_size.all():
+                raise ValueError("Cannot infer library size: cells with zero counts. Set library_size_key manually instead.")
+            mdata[modalities.rna_layer].obs[library_size_key] = library_size
+
+        # add size factor if not present
         if size_factor_key is None:
-            size_factor_key = "_library_size"
-            lib_size = mdata[modalities.rna_layer].X.sum(axis=1)
-            if not lib_size.all():
-                raise ValueError("Cannot infer library size: cells with zero counts. Set size_factor_key instead.")
-            mdata[modalities.rna_layer]["_library_size"] = lib_size
+            size_factor_key = "_size_factor"
+            library_size = mdata[modalities.rna_layer].obs[library_size_key]
+            if not library_size.all():
+                raise ValueError("Cannot infer size factors from library size: cells with zero counts. Set size_factor_key manually instead.")
+            mdata[modalities.rna_layer].obs[size_factor_key] = np.log1p(library_size)
 
         # add indices to enable pyro subsampling of local vars
         mdata[modalities.rna_layer].obs = mdata[modalities.rna_layer].obs.assign(_ind_x=lambda x: np.arange(len(x)))
@@ -121,7 +130,7 @@ class PERTURBVI(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
                 mod_required=True,
             ),
             fields.MuDataNumericalObsField(
-                REGISTRY_KEYS.OBSERVED_LIB_SIZE,
+                REGISTRY_KEYS.SIZE_FACTOR_KEY,
                 size_factor_key,
                 mod_key=modalities.rna_layer,
                 mod_required=True,
@@ -206,7 +215,7 @@ class PERTURBVI(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
 
         data_and_attrs = {
             REGISTRY_KEYS.X_KEY: np.float32,
-            REGISTRY_KEYS.OBSERVED_LIB_SIZE: np.float32,
+            REGISTRY_KEYS.SIZE_FACTOR_KEY: np.float32,
             REGISTRY_KEYS.PERTURBATION_KEY: np.float32,
             REGISTRY_KEYS.BATCH_KEY: np.int64,
             REGISTRY_KEYS.INDICES_KEY: np.int64,
