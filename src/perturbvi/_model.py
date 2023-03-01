@@ -55,7 +55,8 @@ class PERTURBVI(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
         mdata: MuData,
         rna_layer: Optional[str] = None,
         batch_key: Optional[str] = None,
-        element_key: Optional[str] = None,
+        var_by_element_key: Optional[str] = None,
+        perturb_by_element_key: Optional[str] = None,
         perturbation_layer: Optional[str] = None,
         modalities: Optional[Dict[str, str]] = None,
         size_factor_key: Optional[str] = None,
@@ -127,15 +128,23 @@ class PERTURBVI(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
             ),
         ]
 
-        if element_key is None:
-            print("Warning: no elements selected")
-        else:
-            element_by_guide_field = fields.MuDataVarmField(
-                REGISTRY_KEYS.ELEMENT_KEY,
-                element_key,
-                mod_key=modalities.perturbation_layer,
+        if var_by_element_key is not None:
+            mudata_fields.append(
+                fields.MuDataVarmField(
+                    REGISTRY_KEYS.VAR_BY_ELEMENT_KEY,
+                    var_by_element_key,
+                    mod_key=modalities.rna_layer,
+                )
             )
-            mudata_fields.append(element_by_guide_field)
+
+        if perturb_by_element_key is not None:
+            mudata_fields.append(
+                fields.MuDataVarmField(
+                    REGISTRY_KEYS.PERTURB_BY_ELEMENT_KEY,
+                    perturb_by_element_key,
+                    mod_key=modalities.perturbation_layer,
+                )
+            ),
 
         adata_manager = AnnDataManager(
             fields=mudata_fields,
@@ -146,9 +155,9 @@ class PERTURBVI(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
 
     def train(
         self,
-        max_epochs: Optional[int] = None,
+        max_epochs: int,
         use_gpu: Optional[Union[str, int, bool]] = None,
-        train_size: float = 0.9,
+        train_size: float = 1.0,
         validation_size: Optional[float] = None,
         batch_size: int = 128,
         early_stopping: bool = False,
@@ -158,7 +167,7 @@ class PERTURBVI(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
         **trainer_kwargs,
     ):
         """
-        Train the model. Taken from SCBASSET implementation.
+        Train the model. Modified from scVI scBASSET implementation.
 
         Parameters
         ----------
@@ -190,9 +199,6 @@ class PERTURBVI(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
         **trainer_kwargs
             Other keyword args for :class:`~scvi.train.Trainer`.
         """
-        if max_epochs is None:
-            n_obs = self.adata.n_obs
-            max_epochs = int(np.min([round((20000 / n_obs) * 1000), 1000]))
 
         plan_kwargs = plan_kwargs if isinstance(plan_kwargs, dict) else dict()
         if lr is not None and "optim" not in plan_kwargs.keys():
