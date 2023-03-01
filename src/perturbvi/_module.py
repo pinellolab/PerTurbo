@@ -1,6 +1,5 @@
 import pyro
 import pyro.distributions as dist
-from sklearn import mixture
 import torch
 from pyro.distributions.torch_distribution import TorchDistribution
 from scvi.distributions import NegativeBinomial, NegativeBinomialMixture
@@ -39,12 +38,15 @@ class PerturbVIPyroModule(PyroBaseModuleClass):
     def _get_fn_args_from_batch(tensor_dict):
         return (tensor_dict[REGISTRY_KEYS.INDICES_KEY],), tensor_dict
 
-    def create_plates(self, idx, **tensor_dict):
+    def create_plates(self, idx, subsample_size=None, **tensor_dict):
+        # if self.n_vars < subsample_size:
+        #     subsample_size = None
+
         return (
             pyro.plate("cells", self.n_cells, dim=-2, subsample=idx),
             pyro.plate("perturbations", self.n_perturbations, dim=-2),
             pyro.plate("batches", self.n_batches, dim=-2),
-            pyro.plate("vars", self.n_vars, dim=-1),
+            pyro.plate("vars", self.n_vars, dim=-1, subsample_size=subsample_size),
         )
 
     def model(self, idx, **tensor_dict):
@@ -53,7 +55,7 @@ class PerturbVIPyroModule(PyroBaseModuleClass):
         batch = tensor_dict[REGISTRY_KEYS.BATCH_KEY]
         library_size = tensor_dict[REGISTRY_KEYS.OBSERVED_LIB_SIZE]
         perturbations = tensor_dict[REGISTRY_KEYS.PERTURBATION_KEY]
-        with var_plate:
+        with var_plate as var_idx:
             if self.likelihood == "nb_mix":
                 mixture_logits = pyro.sample("mixture_logits", dist.Normal(-1.0, 0.01))
                 mixture_logits = -1.0
@@ -115,10 +117,10 @@ class PerturbVIPyroModule(PyroBaseModuleClass):
                 constraint=dist.constraints.positive,
             )
 
-        batch_effect_mu = pyro.param("batch_effect.mu", lambda: torch.zeros((self.n_batches, 1)))
+        batch_effect_mu = pyro.param("batch_effect.mu", lambda: torch.zeros((self.n_batches, self.n_vars)))
         batch_effect_sigma = pyro.param(
             "batch_effect.sigma",
-            lambda: torch.ones((self.n_batches, 1)),
+            lambda: torch.ones((self.n_batches, self.n_vars)),
             constraint=dist.constraints.positive,
         )
 
@@ -147,7 +149,7 @@ class PerturbVIPyroModule(PyroBaseModuleClass):
             constraint=dist.constraints.corr_cholesky_constraint,
         )
 
-        with var_plate:
+        with var_plate as var_idx:
             pyro.sample("log_var_mean", dist.Normal(log_var_mean_mu, log_var_mean_sigma * scale_factor))
             pyro.sample("log_var_dispersion", dist.Normal(log_var_disp_mu, log_var_disp_sigma * scale_factor))
             if self.likelihood == "nb_mix":
