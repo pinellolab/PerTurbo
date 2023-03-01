@@ -1,9 +1,15 @@
 import pyro
 import pyro.distributions as dist
 import torch
+from pyro.distributions.torch_distribution import TorchDistribution
+from scvi.distributions import NegativeBinomial
 from scvi.module.base import PyroBaseModuleClass
 
 from ._constants import REGISTRY_KEYS
+
+
+class SCVINegativeBinomial(NegativeBinomial, TorchDistribution):
+    pass
 
 
 class PerturbVIPyroModule(PyroBaseModuleClass):
@@ -38,12 +44,12 @@ class PerturbVIPyroModule(PyroBaseModuleClass):
                 batch_effects = batch_effect_size[batch.squeeze(), ...]
             with perturbation_plate:
                 spike_slab_mix = dist.Categorical(torch.tensor((0.999, 0.001)))
-                spike_slab_means = torch.tensor((0., 0.))
-                spike_slab_vars = torch.tensor((0.1, 1.))
+                spike_slab_means = torch.tensor((0.0, 0.0))
+                spike_slab_vars = torch.tensor((0.1, 1.0))
                 spike_slab_comp = dist.Normal(spike_slab_means, spike_slab_vars)
                 spike_slab_dist = dist.MixtureSameFamily(spike_slab_mix, spike_slab_comp)
                 perturb_mean_lfc = pyro.sample("perturb_mean_lfc", spike_slab_dist)
-                perturb_disp_lfc = pyro.sample("perturb_disp_lfc", dist.Normal(0.,0.01))  # freeze pretty low for now
+                perturb_disp_lfc = pyro.sample("perturb_disp_lfc", dist.Normal(0.0, 0.01))  # freeze pretty low for now
 
             log_var_mean = pyro.sample("log_var_mean", dist.Normal(0.0, 4.0))
             log_var_dispersion = pyro.sample("log_var_dispersion", dist.Normal(2.0, 1.0))
@@ -54,9 +60,9 @@ class PerturbVIPyroModule(PyroBaseModuleClass):
             with cell_plate:
                 return pyro.sample(
                     "obs",
-                    dist.NegativeBinomial(
-                        total_count=log_var_dispersion.exp(),
-                        logits=nb_log_mean - nb_log_dispersion,
+                    SCVINegativeBinomial(
+                        theta=(-nb_log_dispersion).exp(),
+                        mu=nb_log_mean.exp(),
                     ),
                     obs=tensor_dict[REGISTRY_KEYS.X_KEY],
                 )
@@ -73,14 +79,20 @@ class PerturbVIPyroModule(PyroBaseModuleClass):
 
         batch_effect_mu = pyro.param("batch_effect.mu", lambda: torch.zeros((self.n_batches, 1), device=device))
         batch_effect_sigma = pyro.param(
-            "batch_effect.sigma", lambda: torch.ones((self.n_batches, 1), device=device), constraint=dist.constraints.positive
+            "batch_effect.sigma",
+            lambda: torch.ones((self.n_batches, 1), device=device),
+            constraint=dist.constraints.positive,
         )
 
         log_var_mean_sigma = pyro.param(
-            "log_var_mean.sigma", lambda: torch.ones((self.n_vars,), device=device), constraint=dist.constraints.positive
+            "log_var_mean.sigma",
+            lambda: torch.ones((self.n_vars,), device=device),
+            constraint=dist.constraints.positive,
         )
         log_var_disp_sigma = pyro.param(
-            "log_var_disp.sigma", lambda: torch.ones((self.n_vars,), device=device), constraint=dist.constraints.positive
+            "log_var_disp.sigma",
+            lambda: torch.ones((self.n_vars,), device=device),
+            constraint=dist.constraints.positive,
         )
 
         perturb_mean_lfc_mu = pyro.param(
