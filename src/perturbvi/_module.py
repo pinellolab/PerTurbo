@@ -38,12 +38,12 @@ class PerturbVIPyroModule(PyroBaseModuleClass):
                 batch_effects = batch_effect_size[batch.squeeze(), ...]
             with perturbation_plate:
                 spike_slab_mix = dist.Categorical(torch.tensor((0.999, 0.001)))
-                spike_slab_means = torch.tensor((0.0, 0.0))
-                spike_slab_vars = torch.tensor((0.01, 1.0))
+                spike_slab_means = torch.tensor((0., 0.))
+                spike_slab_vars = torch.tensor((0.1, 1.))
                 spike_slab_comp = dist.Normal(spike_slab_means, spike_slab_vars)
                 spike_slab_dist = dist.MixtureSameFamily(spike_slab_mix, spike_slab_comp)
                 perturb_mean_lfc = pyro.sample("perturb_mean_lfc", spike_slab_dist)
-                perturb_disp_lfc = pyro.sample("perturb_disp_lfc", dist.Normal(0.0, 0.01))  # freeze pretty low for now
+                perturb_disp_lfc = pyro.sample("perturb_disp_lfc", dist.Normal(0.,0.01))  # freeze pretty low for now
 
             log_var_mean = pyro.sample("log_var_mean", dist.Normal(0.0, 4.0))
             log_var_dispersion = pyro.sample("log_var_dispersion", dist.Normal(2.0, 1.0))
@@ -64,34 +64,36 @@ class PerturbVIPyroModule(PyroBaseModuleClass):
     def guide(self, idx, init_scale=0.1, **tensor_dict):
         pyro.module("perturbvi", self)
 
+        device = idx.device
+
         scale_factor = pyro.param("scale_factor", torch.tensor(init_scale).log()).exp()
         cell_plate, perturbation_plate, batch_plate, var_plate = self.create_plates(idx)
-        log_var_mean_mu = pyro.param("log_var_mean.mu", lambda: torch.zeros((self.n_vars,)))
-        log_var_disp_mu = pyro.param("log_var_disp.mu", lambda: torch.zeros((self.n_vars,)))
+        log_var_mean_mu = pyro.param("log_var_mean.mu", lambda: torch.zeros((self.n_vars,), device=device))
+        log_var_disp_mu = pyro.param("log_var_disp.mu", lambda: torch.zeros((self.n_vars,), device=device))
 
-        batch_effect_mu = pyro.param("batch_effect.mu", lambda: torch.zeros((self.n_batches, 1)))
+        batch_effect_mu = pyro.param("batch_effect.mu", lambda: torch.zeros((self.n_batches, 1), device=device))
         batch_effect_sigma = pyro.param(
-            "batch_effect.sigma", lambda: torch.ones((self.n_batches, 1)), constraint=dist.constraints.positive
+            "batch_effect.sigma", lambda: torch.ones((self.n_batches, 1), device=device), constraint=dist.constraints.positive
         )
 
         log_var_mean_sigma = pyro.param(
-            "log_var_mean.sigma", lambda: torch.ones((self.n_vars,)), constraint=dist.constraints.positive
+            "log_var_mean.sigma", lambda: torch.ones((self.n_vars,), device=device), constraint=dist.constraints.positive
         )
         log_var_disp_sigma = pyro.param(
-            "log_var_disp.sigma", lambda: torch.ones((self.n_vars,)), constraint=dist.constraints.positive
+            "log_var_disp.sigma", lambda: torch.ones((self.n_vars,), device=device), constraint=dist.constraints.positive
         )
 
         perturb_mean_lfc_mu = pyro.param(
-            "perturb_mean_lfc.mu", lambda: torch.zeros((self.n_perturbations, self.n_vars))
+            "perturb_mean_lfc.mu", lambda: torch.zeros((self.n_perturbations, self.n_vars), device=device)
         )
         perturb_disp_lfc_mu = pyro.param(
-            "perturb_disp_lfc.mu", lambda: torch.zeros((self.n_perturbations, self.n_vars))
+            "perturb_disp_lfc.mu", lambda: torch.zeros((self.n_perturbations, self.n_vars), device=device)
         )
         perturb_lfc_mu = torch.stack((perturb_mean_lfc_mu, perturb_disp_lfc_mu), dim=-1)
 
         perturb_lfc_scale_tril = pyro.param(
             "perturb_lfc.scale_tril",
-            lambda: torch.eye(2).repeat((self.n_perturbations, self.n_vars, 1, 1)),
+            lambda: torch.eye(2, device=device).repeat((self.n_perturbations, self.n_vars, 1, 1)),
             constraint=dist.constraints.corr_cholesky_constraint,
         )
 
