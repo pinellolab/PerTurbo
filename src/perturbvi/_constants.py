@@ -8,6 +8,7 @@ class _REGISTRY_KEYS_NT(NamedTuple):
     # PROTEIN_EXP_KEY: str = "proteins"
     CAT_COVS_KEY: str = "extra_categorical_covs"
     CONT_COVS_KEY: str = "extra_continuous_covs"
+    ELEMENT_KEY: str = "elements"
     INDICES_KEY: str = "ind_x"
     # SIZE_FACTOR_KEY: str = "size_factor"
     # MINIFY_TYPE_KEY: str = "minify_type"
