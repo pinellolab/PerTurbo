@@ -55,7 +55,8 @@ class PerturbVIPyroModule(PyroBaseModuleClass):
         batch = tensor_dict[REGISTRY_KEYS.BATCH_KEY]
         library_size = tensor_dict[REGISTRY_KEYS.OBSERVED_LIB_SIZE]
         perturbations = tensor_dict[REGISTRY_KEYS.PERTURBATION_KEY]
-        with var_plate as var_idx:
+
+        with var_plate:
             if self.likelihood == "nb_mix":
                 mixture_logits = pyro.sample("mixture_logits", dist.Normal(-1.0, 0.01))
                 mixture_logits = -1.0
@@ -149,7 +150,7 @@ class PerturbVIPyroModule(PyroBaseModuleClass):
             constraint=dist.constraints.corr_cholesky_constraint,
         )
 
-        with var_plate as var_idx:
+        with var_plate:
             pyro.sample("log_var_mean", dist.Normal(log_var_mean_mu, log_var_mean_sigma * scale_factor))
             pyro.sample("log_var_dispersion", dist.Normal(log_var_disp_mu, log_var_disp_sigma * scale_factor))
             if self.likelihood == "nb_mix":
