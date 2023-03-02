@@ -25,6 +25,7 @@ dependencies = [
     "torch",
     "pyro-ppl",
     "mudata",
+    "pandas >= 1.5.3",
     # for debug logging (referenced from the issue template)
     "session-info",
 ]
