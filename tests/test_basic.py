@@ -37,7 +37,7 @@ def test_package_has_version():
 def test_model_init(mdata):
     perturbvi.PERTURBVI.setup_mudata(
         mdata,
-        size_factor_key="lib_size",
+        # size_factor_key="lib_size",
         modalities={
             "rna_layer": rna_key,
             "perturbation_layer": perturb_key,
