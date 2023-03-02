@@ -5,6 +5,7 @@ import numpy as np
 from mudata import AnnData, MuData
 from pyro.infer import SVI, Trace_ELBO
 from pyro.optim import ClippedAdam
+from pyro import render_model
 from scvi.data import AnnDataManager, fields
 from scvi.dataloaders import AnnDataLoader, DataSplitter, DeviceBackedDataSplitter
 from scvi.model.base import (
@@ -23,6 +24,14 @@ logger = logging.getLogger(__name__)
 
 
 class PERTURBVI(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
+    data_and_attrs = {
+        REGISTRY_KEYS.X_KEY: np.float32,
+        REGISTRY_KEYS.SIZE_FACTOR_KEY: np.float32,
+        REGISTRY_KEYS.PERTURBATION_KEY: np.float32,
+        REGISTRY_KEYS.BATCH_KEY: np.int64,
+        REGISTRY_KEYS.INDICES_KEY: np.int64,
+    }
+
     def __init__(
         self,
         mdata: MuData,
@@ -87,7 +96,9 @@ class PERTURBVI(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
             library_size_key = "_library_size"
             library_size = mdata[modalities.rna_layer].X.sum(axis=1)
             if not library_size.all():
-                raise ValueError("Cannot infer library size: cells with zero counts. Set library_size_key manually instead.")
+                raise ValueError(
+                    "Cannot infer library size: cells with zero counts. Set library_size_key manually instead."
+                )
             mdata[modalities.rna_layer].obs[library_size_key] = library_size
 
         # add size factor if not present
@@ -95,7 +106,9 @@ class PERTURBVI(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
             size_factor_key = "_size_factor"
             library_size = mdata[modalities.rna_layer].obs[library_size_key]
             if not library_size.all():
-                raise ValueError("Cannot infer size factors from library size: cells with zero counts. Set size_factor_key manually instead.")
+                raise ValueError(
+                    "Cannot infer size factors from library size: cells with zero counts. Set size_factor_key manually instead."
+                )
             mdata[modalities.rna_layer].obs[size_factor_key] = np.log1p(library_size)
 
         # add indices to enable pyro subsampling of local vars
@@ -213,14 +226,6 @@ class PERTURBVI(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
         if lr is not None and "optim" not in plan_kwargs.keys():
             plan_kwargs.update({"optim_kwargs": {"lr": lr}})
 
-        data_and_attrs = {
-            REGISTRY_KEYS.X_KEY: np.float32,
-            REGISTRY_KEYS.SIZE_FACTOR_KEY: np.float32,
-            REGISTRY_KEYS.PERTURBATION_KEY: np.float32,
-            REGISTRY_KEYS.BATCH_KEY: np.int64,
-            REGISTRY_KEYS.INDICES_KEY: np.int64,
-        }
-
         if batch_size is None:
             # use data splitter which moves data to GPU once
             data_splitter = DeviceBackedDataSplitter(
@@ -229,7 +234,7 @@ class PERTURBVI(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
                 validation_size=validation_size,
                 batch_size=batch_size,
                 use_gpu=use_gpu,
-                data_and_attributes=data_and_attrs,
+                data_and_attributes=self.data_and_attrs,
             )
         else:
             data_splitter = self._data_splitter_cls(
@@ -238,7 +243,7 @@ class PERTURBVI(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
                 validation_size=validation_size,
                 batch_size=batch_size,
                 use_gpu=use_gpu,
-                data_and_attributes=data_and_attrs,
+                data_and_attributes=self.data_and_attrs,
             )
         training_plan = self._training_plan_cls(self.module, **plan_kwargs)
 
@@ -258,3 +263,10 @@ class PERTURBVI(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
             **trainer_kwargs,
         )
         return runner()
+
+    def show_model(self):
+        loader = AnnDataLoader(
+            adata_manager=self.adata_manager, indices=[1], batch_size=1, data_and_attributes=self.data_and_attrs
+        )
+        sample_args, sample_kwargs = self.module._get_fn_args_from_batch(next(iter(loader)))
+        return render_model(self.module, model_args=sample_args, model_kwargs=sample_kwargs)

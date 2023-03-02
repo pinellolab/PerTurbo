@@ -5,7 +5,7 @@ from pyro.distributions.torch_distribution import TorchDistribution
 from scvi.distributions import NegativeBinomial, NegativeBinomialMixture
 from scvi.module.base import PyroBaseModuleClass
 from torch.distributions.utils import broadcast_all
-
+from pyro.infer.autoguide import AutoNormal
 
 from ._constants import REGISTRY_KEYS
 
@@ -71,20 +71,20 @@ class PerturbVIPyroModule(PyroBaseModuleClass):
                 batch_effect_size = pyro.sample("batch_effect", dist.Normal(0.0, 1.0))
                 batch_effects = batch_effect_size[batch.squeeze(), ...]
             with perturbation_plate:
-                # spike_slab_mix = dist.Categorical(torch.tensor((0.999, 0.001)))
-                # spike_slab_means = torch.tensor((0.0, 0.0))
-                # spike_slab_vars = torch.tensor((0.1, 1.0))
-                # spike_slab_comp = dist.Normal(spike_slab_means, spike_slab_vars)
-                # spike_slab_dist = dist.MixtureSameFamily(spike_slab_mix, spike_slab_comp)
-                # perturb_mean_lfc = pyro.sample("perturb_mean_lfc", spike_slab_dist)
-                # perturb_disp_lfc = pyro.sample("perturb_disp_lfc", dist.Normal(0.0, 0.01))
-                perturb_mean_lfc = pyro.sample("perturb_mean_lfc", dist.Cauchy(0, 0.1))
-                perturb_disp_lfc = pyro.sample("perturb_disp_lfc", dist.Cauchy(0, 0.1))
+                spike_slab_mix = dist.Categorical(torch.tensor((0.999, 0.001)))
+                spike_slab_means = torch.tensor((0.0, 0.0))
+                spike_slab_vars = torch.tensor((0.1, 1.0))
+                spike_slab_comp = dist.Normal(spike_slab_means, spike_slab_vars)
+                spike_slab_dist = dist.MixtureSameFamily(spike_slab_mix, spike_slab_comp)
+                perturb_mean_lfc = pyro.sample("perturb_mean_lfc", spike_slab_dist)
+                perturb_disp_lfc = pyro.sample("perturb_disp_lfc", dist.Normal(0.0, 0.1))
+                # perturb_mean_lfc = pyro.sample("perturb_mean_lfc", dist.Cauchy(0, 0.1))
+                # perturb_disp_lfc = pyro.sample("perturb_disp_lfc", dist.Normal(0, 0.1))
 
             log_var_mean = pyro.sample("log_var_mean", dist.Normal(0.0, 4.0))
             # mean_disp_slope = pyro.sample("mean_disp_slope", dist.Normal(0.0, 4.0))
             # mean_disp_offset = pyro.sample("mean_disp_offset", dist.Normal(0.0, 4.0))
-            log_var_dispersion = pyro.sample("log_var_dispersion", dist.Normal(log_var_mean, 1.0))
+            log_var_dispersion = pyro.sample("log_var_dispersion", dist.Normal(0.0, 1.0))
 
             nb_log_dispersion = log_var_dispersion + perturbations @ perturb_disp_lfc
             nb_log_mean = (
@@ -115,18 +115,20 @@ class PerturbVIPyroModule(PyroBaseModuleClass):
                     obs=tensor_dict[REGISTRY_KEYS.X_KEY],
                 )
 
-    def guide(self, idx, init_scale=0.01, **tensor_dict):
-        pyro.module("perturbvi", self)
+    # def guide(self, idx, **tensor_dict):
 
+    def guide(self, idx, init_scale=0.2, **tensor_dict):
+        pyro.module("perturbvi", self)
         # scale_factor = pyro.param("scale_factor", torch.tensor(init_scale).log()).exp()
-        scale_factor = init_scale
         cell_plate, perturbation_plate, batch_plate, var_plate = self.create_plates(idx)
 
         if self.fit_lib_size_effect:
-            library_size_effect_mu = pyro.param("library_size_effect.mu", lambda: torch.ones((self.n_vars,)))
+            library_size_effect_mu = pyro.param(
+                "library_size_effect.mu", lambda: torch.full((self.n_vars,), init_scale)
+            )
             library_size_effect_sigma = pyro.param(
                 "library_size_effect.sigma",
-                lambda: torch.ones((self.n_vars,)),
+                lambda: torch.full((self.n_vars,), init_scale),
                 constraint=dist.constraints.positive,
             )
 
@@ -136,25 +138,25 @@ class PerturbVIPyroModule(PyroBaseModuleClass):
             mixture_logits_mu = pyro.param("mixture_logits.mu", lambda: torch.zeros((self.n_vars,)))
             mixture_logits_sigma = pyro.param(
                 "mixture_logits.sigma",
-                lambda: torch.ones((self.n_vars,)),
+                lambda: torch.full((self.n_vars,), init_scale),
                 constraint=dist.constraints.positive,
             )
 
         batch_effect_mu = pyro.param("batch_effect.mu", lambda: torch.zeros((self.n_batches, self.n_vars)))
         batch_effect_sigma = pyro.param(
             "batch_effect.sigma",
-            lambda: torch.ones((self.n_batches, self.n_vars)),
+            lambda: torch.full((self.n_batches, self.n_vars), init_scale),
             constraint=dist.constraints.positive,
         )
 
         log_var_mean_sigma = pyro.param(
             "log_var_mean.sigma",
-            lambda: torch.ones((self.n_vars,)),
+            lambda: torch.full((self.n_vars,), init_scale),
             constraint=dist.constraints.positive,
         )
         log_var_disp_sigma = pyro.param(
             "log_var_disp.sigma",
-            lambda: torch.ones((self.n_vars,)),
+            lambda: torch.full((self.n_vars,), init_scale),
             constraint=dist.constraints.positive,
         )
 
@@ -168,8 +170,8 @@ class PerturbVIPyroModule(PyroBaseModuleClass):
 
         perturb_lfc_scale_tril = pyro.param(
             "perturb_lfc.scale_tril",
-            lambda: torch.eye(2).repeat((self.n_perturbations, self.n_vars, 1, 1)),
-            constraint=dist.constraints.corr_cholesky_constraint,
+            lambda: torch.eye(2).repeat((self.n_perturbations, self.n_vars, 1, 1)) * init_scale,
+            constraint=dist.constraints.lower_cholesky,
         )
 
         # mean_disp_slope_mu = pyro.param("mean_disp_slope.mu", lambda: torch.zeros((self.n_vars,)))
@@ -179,25 +181,24 @@ class PerturbVIPyroModule(PyroBaseModuleClass):
             # pyro.sample("mean_disp_slope", dist.Delta(mean_disp_slope_mu))
             # pyro.sample("mean_disp_offset", dist.Delta(mean_disp_offset_mu))
             if self.fit_lib_size_effect:
-                pyro.sample(
-                    "library_size_effect", dist.Normal(library_size_effect_mu, library_size_effect_sigma * scale_factor)
-                )
-            pyro.sample("log_var_mean", dist.Normal(log_var_mean_mu, log_var_mean_sigma * scale_factor))
-            pyro.sample("log_var_dispersion", dist.Normal(log_var_disp_mu, log_var_disp_sigma * scale_factor))
+                pyro.sample("library_size_effect", dist.Normal(library_size_effect_mu, library_size_effect_sigma))
+            pyro.sample("log_var_mean", dist.Normal(log_var_mean_mu, log_var_mean_sigma))
+            pyro.sample("log_var_dispersion", dist.Normal(log_var_disp_mu, log_var_disp_sigma))
             if self.likelihood == "nb_mix":
-                pyro.sample("mixture_logits", dist.Normal(mixture_logits_mu, mixture_logits_sigma * scale_factor))
+                pyro.sample("mixture_logits", dist.Normal(mixture_logits_mu, mixture_logits_sigma))
             with batch_plate:
-                pyro.sample("batch_effect", dist.Normal(batch_effect_mu, batch_effect_sigma * scale_factor))
+                pyro.sample("batch_effect", dist.Normal(batch_effect_mu, batch_effect_sigma))
 
             with perturbation_plate:
                 perturb_lfc = pyro.sample(
                     "perturb_lfc",
                     dist.MultivariateNormal(
                         perturb_lfc_mu,
-                        scale_tril=perturb_lfc_scale_tril * scale_factor,
+                        scale_tril=perturb_lfc_scale_tril,
                     ),
                     infer={"is_auxiliary": True},
                 )
+
                 pyro.sample("perturb_mean_lfc", dist.Delta(perturb_lfc[..., 0]))
                 pyro.sample("perturb_disp_lfc", dist.Delta(perturb_lfc[..., 1]))
 
