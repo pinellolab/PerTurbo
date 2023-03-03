@@ -7,7 +7,6 @@ from scvi.distributions import NegativeBinomialMixture as SCVINegativeBinomialMi
 
 from scvi.module.base import PyroBaseModuleClass
 from torch.distributions.utils import broadcast_all
-from pyro.infer.autoguide import AutoNormal
 
 from ._constants import REGISTRY_KEYS
 

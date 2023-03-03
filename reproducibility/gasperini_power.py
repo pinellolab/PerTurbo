@@ -1,14 +1,12 @@
 import sys
 
 import anndata as ad
-import matplotlib.pyplot as plt
 import mudata as md
 import numpy as np
 import pandas as pd
 import pyro
 
 # import scanpy as sc
-import seaborn as sns
 
 import perturbvi
 

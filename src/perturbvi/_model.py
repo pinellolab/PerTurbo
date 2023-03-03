@@ -1,13 +1,11 @@
 import logging
-from typing import Dict, List, Optional, Union
+from typing import Dict, Optional, Union
 
 import numpy as np
 from mudata import AnnData, MuData
-from pyro.infer import SVI, Trace_ELBO
-from pyro.optim import ClippedAdam
 from pyro import render_model
 from scvi.data import AnnDataManager, fields
-from scvi.dataloaders import AnnDataLoader, DataSplitter, DeviceBackedDataSplitter
+from scvi.dataloaders import AnnDataLoader, DeviceBackedDataSplitter
 from scvi.model.base import BaseModelClass, PyroJitGuideWarmup, PyroSampleMixin, PyroSviTrainMixin
 from scvi.train import PyroTrainingPlan
 from scvi.utils._docstrings import setup_anndata_dsp
