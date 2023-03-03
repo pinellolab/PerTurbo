@@ -79,7 +79,7 @@ class PerturbVIPyroModule(PyroBaseModuleClass):
                 spike_slab_comp = dist.Normal(spike_slab_means, spike_slab_vars)
                 spike_slab_dist = dist.MixtureSameFamily(spike_slab_mix, spike_slab_comp)
                 perturb_mean_lfc = pyro.sample("perturb_mean_lfc", spike_slab_dist)
-                perturb_disp_lfc = pyro.sample("perturb_disp_lfc", dist.Normal(0.0, 0.1))
+                perturb_disp_lfc = pyro.sample("perturb_disp_lfc", dist.Cauchy(0.0, 0.1))
                 # perturb_mean_lfc = pyro.sample("perturb_mean_lfc", dist.Cauchy(0, 0.1))
                 # perturb_disp_lfc = pyro.sample("perturb_disp_lfc", dist.Normal(0, 0.1))
 
