@@ -8,12 +8,7 @@ from pyro.optim import ClippedAdam
 from pyro import render_model
 from scvi.data import AnnDataManager, fields
 from scvi.dataloaders import AnnDataLoader, DataSplitter, DeviceBackedDataSplitter
-from scvi.model.base import (
-    BaseModelClass,
-    PyroJitGuideWarmup,
-    PyroSampleMixin,
-    PyroSviTrainMixin,
-)
+from scvi.model.base import BaseModelClass, PyroJitGuideWarmup, PyroSampleMixin, PyroSviTrainMixin
 from scvi.train import PyroTrainingPlan
 from scvi.utils._docstrings import setup_anndata_dsp
 
@@ -192,6 +187,7 @@ class PERTURBVI(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
         lr: Optional[float] = None,
         training_plan: PyroTrainingPlan = PyroTrainingPlan,
         plan_kwargs: Optional[dict] = None,
+        data_splitter_kwargs: Optional[dict] = None,
         **trainer_kwargs,
     ):
         """
@@ -232,6 +228,11 @@ class PERTURBVI(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
         if lr is not None and "optim" not in plan_kwargs.keys():
             plan_kwargs.update({"optim_kwargs": {"lr": lr}})
 
+        if data_splitter_kwargs is None:
+            data_splitter_kwargs = dict()
+        if "data_and_attributes" not in data_splitter_kwargs:
+            data_splitter_kwargs["data_and_attributes"] = self.data_and_attrs
+
         if batch_size is None:
             # use data splitter which moves data to GPU once
             data_splitter = DeviceBackedDataSplitter(
@@ -240,7 +241,7 @@ class PERTURBVI(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
                 validation_size=validation_size,
                 batch_size=batch_size,
                 use_gpu=use_gpu,
-                data_and_attributes=self.data_and_attrs,
+                **data_splitter_kwargs,
             )
         else:
             data_splitter = self._data_splitter_cls(
@@ -249,7 +250,7 @@ class PERTURBVI(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
                 validation_size=validation_size,
                 batch_size=batch_size,
                 use_gpu=use_gpu,
-                data_and_attributes=self.data_and_attrs,
+                **data_splitter_kwargs,
             )
         training_plan = self._training_plan_cls(self.module, **plan_kwargs)
 
