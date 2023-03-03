@@ -3,7 +3,7 @@ from typing import Dict, Optional, Union
 
 import numpy as np
 from mudata import AnnData, MuData
-from pyro import render_model
+from pyro import render_model as pyro_render_model
 from scvi.data import AnnDataManager, fields
 from scvi.dataloaders import AnnDataLoader, DeviceBackedDataSplitter
 from scvi.model.base import BaseModelClass, PyroJitGuideWarmup, PyroSampleMixin, PyroSviTrainMixin
@@ -274,7 +274,7 @@ class PERTURBVI(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
             adata_manager=self.adata_manager, indices=[1], batch_size=1, data_and_attributes=self.data_and_attrs
         )
         sample_args, sample_kwargs = self.module._get_fn_args_from_batch(next(iter(loader)))
-        return render_model(
+        return pyro_render_model(
             model,
             model_args=sample_args,
             model_kwargs=sample_kwargs,
