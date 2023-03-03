@@ -1,19 +1,12 @@
 import logging
-from typing import Dict, List, Optional, Union
+from typing import Dict, Optional, Union
 
 import numpy as np
 from mudata import AnnData, MuData
-from pyro.infer import SVI, Trace_ELBO
-from pyro.optim import ClippedAdam
 from pyro import render_model
 from scvi.data import AnnDataManager, fields
-from scvi.dataloaders import AnnDataLoader, DataSplitter, DeviceBackedDataSplitter
-from scvi.model.base import (
-    BaseModelClass,
-    PyroJitGuideWarmup,
-    PyroSampleMixin,
-    PyroSviTrainMixin,
-)
+from scvi.dataloaders import AnnDataLoader, DeviceBackedDataSplitter
+from scvi.model.base import BaseModelClass, PyroJitGuideWarmup, PyroSampleMixin, PyroSviTrainMixin
 from scvi.train import PyroTrainingPlan
 from scvi.utils._docstrings import setup_anndata_dsp
 
@@ -35,12 +28,18 @@ class PERTURBVI(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
     def __init__(
         self,
         mdata: MuData,
+        likelihood="nb",
+        fit_lib_size=False,
         **model_kwargs,
     ):
         super(PERTURBVI, self).__init__(mdata)
 
         # self.summary_stats provides information about dimensions and other tensor info
-        self.module = PerturbVIPyroModule(self.summary_stats)
+        self.module = PerturbVIPyroModule(
+            self.summary_stats,
+            likelihood=likelihood,
+            fit_lib_size_effect=fit_lib_size,
+        )
 
         self._model_summary_string = f"MyPyroModel Model with params:\n{self.summary_stats}"
 
@@ -186,6 +185,7 @@ class PERTURBVI(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
         lr: Optional[float] = None,
         training_plan: PyroTrainingPlan = PyroTrainingPlan,
         plan_kwargs: Optional[dict] = None,
+        data_splitter_kwargs: Optional[dict] = None,
         **trainer_kwargs,
     ):
         """
@@ -226,6 +226,11 @@ class PERTURBVI(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
         if lr is not None and "optim" not in plan_kwargs.keys():
             plan_kwargs.update({"optim_kwargs": {"lr": lr}})
 
+        if data_splitter_kwargs is None:
+            data_splitter_kwargs = dict()
+        if "data_and_attributes" not in data_splitter_kwargs:
+            data_splitter_kwargs["data_and_attributes"] = self.data_and_attrs
+
         if batch_size is None:
             # use data splitter which moves data to GPU once
             data_splitter = DeviceBackedDataSplitter(
@@ -234,7 +239,7 @@ class PERTURBVI(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
                 validation_size=validation_size,
                 batch_size=batch_size,
                 use_gpu=use_gpu,
-                data_and_attributes=self.data_and_attrs,
+                **data_splitter_kwargs,
             )
         else:
             data_splitter = self._data_splitter_cls(
@@ -243,7 +248,7 @@ class PERTURBVI(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
                 validation_size=validation_size,
                 batch_size=batch_size,
                 use_gpu=use_gpu,
-                data_and_attributes=self.data_and_attrs,
+                **data_splitter_kwargs,
             )
         training_plan = self._training_plan_cls(self.module, **plan_kwargs)
 
@@ -264,9 +269,21 @@ class PERTURBVI(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
         )
         return runner()
 
-    def show_model(self):
+    def _render_pyro_model(self, model):
         loader = AnnDataLoader(
             adata_manager=self.adata_manager, indices=[1], batch_size=1, data_and_attributes=self.data_and_attrs
         )
         sample_args, sample_kwargs = self.module._get_fn_args_from_batch(next(iter(loader)))
-        return render_model(self.module, model_args=sample_args, model_kwargs=sample_kwargs)
+        return render_model(
+            model,
+            model_args=sample_args,
+            model_kwargs=sample_kwargs,
+            render_distributions=True,
+            render_params=True,
+        )
+
+    def render_model(self):
+        return self._render_pyro_model(self.module.model)
+
+    def render_guide(self):
+        return self._render_pyro_model(self.module.guide)
