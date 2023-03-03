@@ -2,7 +2,9 @@ import pyro
 import pyro.distributions as dist
 import torch
 from pyro.distributions.torch_distribution import TorchDistribution
-from scvi.distributions import NegativeBinomial, NegativeBinomialMixture
+from scvi.distributions import NegativeBinomial as SCVINegativeBinomial
+from scvi.distributions import NegativeBinomialMixture as SCVINegativeBinomialMixture
+
 from scvi.module.base import PyroBaseModuleClass
 from torch.distributions.utils import broadcast_all
 from pyro.infer.autoguide import AutoNormal
@@ -10,11 +12,11 @@ from pyro.infer.autoguide import AutoNormal
 from ._constants import REGISTRY_KEYS
 
 
-class SCVINegativeBinomial(NegativeBinomial, TorchDistribution):
+class NegativeBinomial(SCVINegativeBinomial, TorchDistribution):
     pass
 
 
-class SCVINegativeBinomialMixture(NegativeBinomialMixture, TorchDistribution):
+class NegativeBinomialMixture(SCVINegativeBinomialMixture, TorchDistribution):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         self.mu2, self.theta2 = broadcast_all(kwargs["mu2"], kwargs["theta2"])
@@ -95,7 +97,7 @@ class PerturbVIPyroModule(PyroBaseModuleClass):
                 if self.likelihood == "nb_mix":
                     return pyro.sample(
                         "obs",
-                        SCVINegativeBinomialMixture(
+                        NegativeBinomialMixture(
                             mu1=log_var_mean.exp(),
                             theta1=(-log_var_dispersion).exp(),
                             mu2=nb_log_mean.exp(),
@@ -108,7 +110,7 @@ class PerturbVIPyroModule(PyroBaseModuleClass):
 
                 return pyro.sample(
                     "obs",
-                    SCVINegativeBinomial(
+                    NegativeBinomial(
                         theta=(-nb_log_dispersion).exp(),
                         mu=nb_log_mean.exp(),
                     ),

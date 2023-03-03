@@ -271,9 +271,21 @@ class PERTURBVI(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
         )
         return runner()
 
-    def show_model(self):
+    def _render_pyro_model(self, model):
         loader = AnnDataLoader(
             adata_manager=self.adata_manager, indices=[1], batch_size=1, data_and_attributes=self.data_and_attrs
         )
         sample_args, sample_kwargs = self.module._get_fn_args_from_batch(next(iter(loader)))
-        return render_model(self.module, model_args=sample_args, model_kwargs=sample_kwargs)
+        return render_model(
+            model,
+            model_args=sample_args,
+            model_kwargs=sample_kwargs,
+            render_distributions=True,
+            render_params=True,
+        )
+
+    def render_model(self):
+        return self._render_pyro_model(self.module.model)
+
+    def render_guide(self):
+        return self._render_pyro_model(self.module.guide)
