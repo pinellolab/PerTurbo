@@ -4,7 +4,7 @@ OUTPUT_DIR=power_tests
 DATA_DIR=/Users/ljb80/Data/gasperini_pilot
 
 mkdir -p $OUTPUT_DIR
-echo * > $OUTPUT_DIR/.gitignore
+echo '*' > $OUTPUT_DIR/.gitignore
 
 SCRIPT=reproducibility/gasperini_power.py
 
