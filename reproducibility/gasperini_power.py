@@ -20,10 +20,14 @@ def construct_mudata(data_dir="."):
     rna_adata = ad.read_h5ad(f"{data_dir}/ann_exp.h5ad")
     rna_adata.obs["library_size"] = rna_adata.X.sum(axis=1)
     # rna_adata.obs["size_factor"] = rna_adata.obs["library_size"]
-    rna_adata.varm["element_tested"] = ad.read_h5ad(f"{data_dir}/ann_Element_x_tested_genes.h5ad").to_df().T
+    rna_adata.varm["element_tested"] = (
+        ad.read_h5ad(f"{data_dir}/ann_Element_x_tested_genes.h5ad").to_df().T
+    )
     # sc.pp.filter_genes(rna_adata, min_cells=len(rna_adata)*0.1) # need genes where at least 10% of cells with nonzero counts
     grna_adata = ad.read_h5ad(f"{data_dir}/ann_guide.h5ad")
-    grna_adata.varm["element_targeted"] = ad.read_h5ad(f"{data_dir}/ann_Element_guide.h5ad").to_df().T
+    grna_adata.varm["element_targeted"] = (
+        ad.read_h5ad(f"{data_dir}/ann_Element_guide.h5ad").to_df().T
+    )
     # assert (rna_adata.varm["element_tested"].columns == grna_adata.varm["element_targeted"].columns).all()
     mdata = md.MuData({"rna": rna_adata, "grna": grna_adata})
     # mask = np.zeros(len(grna_adata))
@@ -35,7 +39,9 @@ def construct_mudata(data_dir="."):
 
 
 def downsample_mudata(mdata, downsample_prob=1.0):
-    downsample_idx = np.random.choice(len(mdata), size=int(len(mdata) * downsample_prob), replace=False)
+    downsample_idx = np.random.choice(
+        len(mdata), size=int(len(mdata) * downsample_prob), replace=False
+    )
     return mdata[downsample_idx, :].copy()
 
 
@@ -44,7 +50,9 @@ def filter_mudata(mdata, selected_guides, selected_genes):
     # selected_guides = list(guides[guides.str.contains(r"TSS|random|scrambled", regex=True)])
 
     elements = list({guide.split("|")[0] for guide in selected_guides})
-    selected_elements = [e for e in elements if e in mdata["grna"].varm["element_targeted"].columns]
+    selected_elements = [
+        e for e in elements if e in mdata["grna"].varm["element_targeted"].columns
+    ]
     element_subset = mdata["grna"].varm["element_targeted"][selected_elements].copy()
 
     grna_subset = mdata["grna"].copy()
@@ -58,7 +66,9 @@ def filter_mudata(mdata, selected_guides, selected_genes):
     # assert grna_subset.varm["element_targeted"].shape == (len(selected_guides), len(selected_elements))
 
     rna_subset = mdata["rna"].copy()
-    rna_subset.varm["element_tested"] = rna_subset.varm["element_tested"][selected_elements].copy()
+    rna_subset.varm["element_tested"] = rna_subset.varm["element_tested"][
+        selected_elements
+    ].copy()
     rna_subset = rna_subset[:, selected_genes]
     mdata_subset = md.MuData({"rna": rna_subset.copy(), "grna": grna_subset.copy()})
     # assert (
@@ -90,13 +100,10 @@ def train_model(mdata_subset):
     max_epochs = 20
     model.train(max_epochs=max_epochs, lr=0.01, batch_size=8192)
 
-    # lfc_threshold = 0.05  # ~ at least 5% knockdown
-    # lfc_threshold = 0 # nonzero knockdown
-    # gene_index=45
-
-    scale_factor = 0.01
-    perturb_mean_lfc_mu = pyro.get_param_store()["perturb_mean_lfc.mu"].detach().cpu().numpy()
-    lfc_cov_tril = pyro.get_param_store()["perturb_lfc.scale_tril"] * scale_factor
+    perturb_mean_lfc_mu = (
+        pyro.get_param_store()["perturb_mean_lfc.mu"].detach().cpu().numpy()
+    )
+    lfc_cov_tril = pyro.get_param_store()["perturb_lfc.scale_tril"]
     lfc_cov = lfc_cov_tril @ lfc_cov_tril.transpose(dim0=-1, dim1=-2)
     perturb_mean_lfc_sigma = lfc_cov[..., 0, 0].sqrt().detach().cpu().numpy()
     assert perturb_mean_lfc_mu.shape == perturb_mean_lfc_sigma.shape
@@ -104,11 +111,15 @@ def train_model(mdata_subset):
     # perturb_p_vals = norm.cdf(lfc_threshold, loc=-perturb_mean_lfc_mu, scale=perturb_mean_lfc_sigma)
 
     results_all_df = (
-        pd.DataFrame(data=perturb_mean_lfc_mu, columns=selected_genes, index=selected_guides)
+        pd.DataFrame(
+            data=perturb_mean_lfc_mu, columns=selected_genes, index=selected_guides
+        )
         .melt(var_name="gene", ignore_index=False)
         .reset_index(names="guide")
         .sort_values("value")
-        .assign(is_target=lambda x: x["guide"].str.split("_", expand=True)[0] == x["gene"])
+        .assign(
+            is_target=lambda x: x["guide"].str.split("_", expand=True)[0] == x["gene"]
+        )
     )
 
     # sns.histplot(
@@ -126,7 +137,10 @@ def train_model(mdata_subset):
     element = f"{selected_genes[0]}_TSS"
     results_all_df.set_index("guide", inplace=True)
     # print(results_all_df)
-    return (results_all_df.loc[f"{element}|1"]["value"], results_all_df.loc[f"{element}|2"]["value"])
+    return (
+        results_all_df.loc[f"{element}|1"]["value"],
+        results_all_df.loc[f"{element}|2"]["value"],
+    )
 
 
 if __name__ == "__main__":
