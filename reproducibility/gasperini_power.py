@@ -23,10 +23,10 @@ else:
 
 # selected_guides = ["ACTG1_TSS|1", "ACTG1_TSS|2", "ACTB_TSS|1", "ACTB_TSS|2"]
 # selected_genes = ["ACTG1"]
-# selected_guides = ["TMED10_TSS|1", "TMED10_TSS|2"]
-# selected_genes = ["TMED10"]
-selected_guides = ["KRT18_TSS|1", "KRT18_TSS|2"]
-selected_genes = ["KRT18"]
+selected_guides = ["TMED10_TSS|1", "TMED10_TSS|2"]
+selected_genes = ["TMED10"]
+# selected_guides = ["KRT18_TSS|1", "KRT18_TSS|2"]
+# selected_genes = ["KRT18"]
 
 
 sceptre_df = pd.read_csv(f"{data_dir}/sceptre_results-2023_01_13.csv")
