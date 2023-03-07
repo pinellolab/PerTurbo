@@ -73,7 +73,6 @@ profile = "black"
 skip_glob = ["docs/*"]
 
 [tool.black]
-line-length = 120
 target-version = ['py38']
 include = '\.pyi?$'
 exclude = '''
@@ -116,5 +115,8 @@ dependencies = [
     "ipython",
     # For VSCode
     "black",
-    "flake8",
+    "ruff"
+    # "flake8",
 ]
+[tool.ruff]
+line-length = 120 # long comments are fine
