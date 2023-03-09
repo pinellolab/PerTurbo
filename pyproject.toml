@@ -83,8 +83,7 @@ exclude = '''
     | dist
   )/
 )
-'''
-=======
+
 line-length = 120
 target-version = ["py38"]
 
