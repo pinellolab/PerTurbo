@@ -24,6 +24,7 @@ dependencies = [
     "torch",
     "pyro-ppl",
     "mudata",
+    "pandas >= 1.5.3",
     # for debug logging (referenced from the issue template)
     "session-info",
 ]
@@ -65,6 +66,25 @@ addopts = [
 ]
 
 [tool.black]
+target-version = ['py38']
+include = '\.pyi?$'
+exclude = '''
+(
+  /(
+      \.eggs
+    | \.git
+    | \.hg
+    | \.mypy_cache
+    | \.tox
+    | \.venv
+    | _build
+    | buck-out
+    | build
+    | dist
+  )/
+)
+'''
+=======
 line-length = 120
 target-version = ["py38"]
 
@@ -141,5 +161,8 @@ dependencies = [
     "ipython",
     # For VSCode
     "black",
-    "flake8",
+    "ruff"
+    # "flake8",
 ]
+[tool.ruff]
+line-length = 120 # long comments are fine
