@@ -4,8 +4,8 @@
 
 <!-- [![Documentation][badge-docs]][link-docs] -->
 
-[badge-tests]: https://img.shields.io/github/actions/workflow/status/logan-blaine/perturbvi/test.yaml?branch=main
-[link-tests]: https://github.com/logan-blaine/perturbvi/actions/workflows/test.yml
+[badge-tests]: https://img.shields.io/github/actions/workflow/status/pinellolab/perturbvi/test.yaml?branch=main
+[link-tests]: https://github.com/pinellolab/perturbvi/actions/workflows/test.yml
 [badge-docs]: https://img.shields.io/readthedocs/perturbvi
 
 Estimating perturbation effects on single cell phenotypes using variational inference.
@@ -36,7 +36,7 @@ pip install perturbvi
 1. Install the latest development version:
 
 ```bash
-pip install git+https://github.com/logan-blaine/perturbvi.git@main
+pip install git+https://github.com/pinellolab/perturbvi.git@main
 ```
 
 ## Release notes
@@ -53,7 +53,7 @@ If you found a bug, please use the [issue tracker][issue-tracker].
 > t.b.a
 
 [scverse-discourse]: https://discourse.scverse.org/
-[issue-tracker]: https://github.com/logan-blaine/perturbvi/issues
+[issue-tracker]: https://github.com/pinellolab/perturbvi/issues
 [changelog]: https://perturbvi.readthedocs.io/latest/changelog.html
 [link-docs]: https://perturbvi.readthedocs.io
 [link-api]: https://perturbvi.readthedocs.io/latest/api.html
