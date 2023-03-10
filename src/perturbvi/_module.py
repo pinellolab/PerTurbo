@@ -4,7 +4,6 @@ import torch
 from pyro.distributions.torch_distribution import TorchDistribution
 from scvi.distributions import NegativeBinomial as SCVINegativeBinomial
 from scvi.distributions import NegativeBinomialMixture as SCVINegativeBinomialMixture
-
 from scvi.module.base import PyroBaseModuleClass
 from torch.distributions.utils import broadcast_all
 
@@ -132,8 +131,6 @@ class PerturbVIPyroModule(PyroBaseModuleClass):
                     obs=tensor_dict[REGISTRY_KEYS.X_KEY],
                 )
 
-    # def guide(self, idx, **tensor_dict):
-
     def guide(self, idx, init_scale=0.2, **tensor_dict):
         pyro.module("perturbvi", self)
         # scale_factor = pyro.param("scale_factor", torch.tensor(init_scale).log()).exp()
@@ -249,9 +246,7 @@ class PerturbVIPyroModule(PyroBaseModuleClass):
 
     @staticmethod
     def get_perturbation_effects():
-        """
-        Return the perturbation effects on each variable's mean and variance
-        """
+        """Return the perturbation effects on each variable's mean and variance."""
         store = pyro.get_param_store()
         return (
             store["perturb_mean_lfc.mu"].detach().cpu().numpy(),

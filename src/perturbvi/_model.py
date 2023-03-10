@@ -13,7 +13,6 @@ from scvi.model.base import (
     PyroSviTrainMixin,
 )
 from scvi.train import PyroTrainingPlan
-from scvi.utils._docstrings import setup_anndata_dsp
 
 from ._constants import REGISTRY_KEYS
 from ._module import PerturbVIPyroModule
@@ -37,7 +36,7 @@ class PERTURBVI(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
         fit_lib_size=False,
         **model_kwargs,
     ):
-        super(PERTURBVI, self).__init__(mdata)
+        super().__init__(mdata)
 
         # self.summary_stats provides information about dimensions and other tensor info
         self.module = PerturbVIPyroModule(
@@ -64,7 +63,6 @@ class PERTURBVI(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
         raise NotImplementedError("Not implemented: use setup_mudata instead.")
 
     @classmethod
-    @setup_anndata_dsp.dedent
     def setup_mudata(
         cls,
         mdata: MuData,
@@ -78,18 +76,6 @@ class PERTURBVI(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
         library_size_key: Optional[str] = None,
         **kwargs,
     ):
-        """%(summary_mdata)s.
-        Parameters
-        ----------
-        %(param_mdata)s
-        rna_layer
-            RNA layer key. If `None`, will use `.X` of specified modality key.
-        perturbation_layer
-            perturbation_layer layer key. If `None`, will use `.X` of specified modality key.
-        %(param_batch_key)s
-        %(param_size_factor_key)s
-        %(param_modalities)s
-        """
 
         setup_method_args = cls._get_setup_method_args(**locals())
 
@@ -197,8 +183,7 @@ class PERTURBVI(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
         data_splitter_kwargs: Optional[dict] = None,
         **trainer_kwargs,
     ):
-        """
-        Train the model. Modified from scVI scBASSET implementation.
+        """Train the model. Modified from scVI scBASSET implementation.
 
         Parameters
         ----------
@@ -227,16 +212,18 @@ class PERTURBVI(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
         plan_kwargs
             Keyword args for :class:`~scvi.train.PyroTrainingPlan`. Keyword arguments passed to
             `train()` will overwrite values present in `plan_kwargs`, when appropriate.
+        data_splitter_kwargs
+            Keyword args for :class:`~scvi.dataloaders.DataSplitter`. Keyword arguments passed to
+            `train()` will overwrite values present in `plan_kwargs`, when appropriate.
         **trainer_kwargs
             Other keyword args for :class:`~scvi.train.Trainer`.
         """
-
-        plan_kwargs = plan_kwargs if isinstance(plan_kwargs, dict) else dict()
+        plan_kwargs = plan_kwargs if isinstance(plan_kwargs, dict) else {}
         if lr is not None and "optim" not in plan_kwargs.keys():
             plan_kwargs.update({"optim_kwargs": {"lr": lr}})
 
         if data_splitter_kwargs is None:
-            data_splitter_kwargs = dict()
+            data_splitter_kwargs = {}
         if "data_and_attributes" not in data_splitter_kwargs:
             data_splitter_kwargs["data_and_attributes"] = self.data_and_attrs
 

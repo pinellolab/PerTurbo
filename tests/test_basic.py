@@ -1,11 +1,11 @@
+import logging
+
 import numpy as np
 import pandas as pd
 import pytest
-import logging
 from mudata import AnnData, MuData
 
 import perturbvi
-
 
 rna_key = "rna"
 perturb_key = "grna"
