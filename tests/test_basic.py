@@ -13,6 +13,7 @@ perturb_key = "grna"
 
 @pytest.fixture
 def mdata():
+    """Create an example MuData object representing a single cell perturbation screen"""
     n_cells = 20
     n_genes = 10
     n_grna = 5
@@ -34,6 +35,7 @@ def mdata():
 
 @pytest.fixture
 def adata():
+    """Create an example AnnData object representing a single cell perturbation screen"""
     n_cells = 20
     n_genes = 10
     n_grna = 5
@@ -50,10 +52,12 @@ def adata():
 
 
 def test_package_has_version():
+    """Check that our package has an associated version number"""
     logging.info("version: " + perturbvi.__version__)
 
 
-def test_model_mdata(mdata):
+def test_model_mdata(mdata: MuData):
+    """Check that we can register our MuData object with our model and perform training"""
     perturbvi.PERTURBVI.setup_mudata(
         mdata,
         # size_factor_key="lib_size",
@@ -70,8 +74,8 @@ def test_model_mdata(mdata):
     model.train(max_epochs=10, train_size=1, lr=0.1)
 
 
-# @pytest.mark.skip(reason="This decorator should be removed when test passes.")
-def test_model_adata(adata):
+def test_model_adata(adata: AnnData):
+    """Check that we can register our AnnData object with our model and perform training"""
     perturbvi.PERTURBVI.setup_anndata(
         adata,
         perturb_key,
