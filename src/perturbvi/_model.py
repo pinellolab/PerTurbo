@@ -54,13 +54,62 @@ class PERTURBVI(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
 
         logger.info("The model has been initialized")
 
+    @classmethod
     def setup_anndata(
         cls,
         adata: AnnData,
-        *args,
+        perturbation_key: str,
+        layer: Optional[str] = None,
+        batch_key: Optional[str] = None,
+        size_factor_key: Optional[str] = None,
+        library_size_key: Optional[str] = None,
         **kwargs,
     ):
-        raise NotImplementedError("Not implemented: use setup_mudata instead.")
+        setup_method_args = cls._get_setup_method_args(**locals())
+        adata.obs["_ind_x"] = np.arange(len(adata))
+
+        # add library size if not present
+        if library_size_key is None:
+            library_size_key = "_library_size"
+            if layer is None:
+                data = adata.X
+            else:
+                data = adata.layers[layer]
+            library_size = data.sum(axis=1)
+            if not library_size.all():
+                raise ValueError(
+                    "Cannot infer library size: cells with zero counts. Set library_size_key manually instead."
+                )
+            adata.obs[library_size_key] = library_size
+
+        # add size factor if not present
+        if size_factor_key is None:
+            size_factor_key = "_size_factor"
+            library_size = adata.obs[library_size_key]
+            if not library_size.all():
+                raise ValueError(
+                    "Cannot infer size factors: cells with zero library size. Set size_factor_key manually instead."
+                )
+            adata.obs[size_factor_key] = np.log1p(library_size)
+
+
+        anndata_fields = [
+            fields.NumericalObsField(REGISTRY_KEYS.INDICES_KEY, "_ind_x"),
+            fields.LayerField(REGISTRY_KEYS.X_KEY, layer, is_count_data=True),
+            fields.ObsmField(REGISTRY_KEYS.PERTURBATION_KEY, perturbation_key),
+            fields.CategoricalObsField(REGISTRY_KEYS.BATCH_KEY, batch_key),
+            fields.NumericalObsField(
+                REGISTRY_KEYS.SIZE_FACTOR_KEY, size_factor_key, required=False
+            ),
+        ]
+
+        adata_manager = AnnDataManager(
+            fields=anndata_fields,
+            setup_method_args=setup_method_args,
+        )
+        adata_manager.register_fields(adata, **kwargs)
+        cls.register_manager(adata_manager)
+
 
     @classmethod
     def setup_mudata(
@@ -76,7 +125,6 @@ class PERTURBVI(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
         library_size_key: Optional[str] = None,
         **kwargs,
     ):
-
         setup_method_args = cls._get_setup_method_args(**locals())
 
         if modalities is None:
