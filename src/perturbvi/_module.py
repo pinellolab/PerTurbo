@@ -10,13 +10,16 @@ from torch.distributions.utils import broadcast_all
 from ._constants import REGISTRY_KEYS
 
 
+# Wraps scvi NegativeBinomial implementation for use with Pyro
 class NegativeBinomial(SCVINegativeBinomial, TorchDistribution):
     pass
 
 
+# Wraps scvi NegativeBinomialMixture implementation for Pyro
 class NegativeBinomialMixture(SCVINegativeBinomialMixture, TorchDistribution):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
+        # fixes broadcasting error when theta2 is different from theta1
         self.mu2, self.theta2 = broadcast_all(kwargs["mu2"], kwargs["theta2"])
 
 
@@ -26,7 +29,6 @@ class PerturbVIPyroModule(PyroBaseModuleClass):
         summary_stats,
         likelihood="nb",
         fit_lib_size_effect=False,
-        fit_dispersion=False,
         **module_kwargs,
     ) -> None:
         super().__init__()
@@ -204,12 +206,7 @@ class PerturbVIPyroModule(PyroBaseModuleClass):
             constraint=dist.constraints.lower_cholesky,
         )
 
-        # mean_disp_slope_mu = pyro.param("mean_disp_slope.mu", lambda: torch.zeros((self.n_vars,)))
-        # mean_disp_offset_mu = pyro.param("mean_disp_offset.mu", lambda: torch.zeros((self.n_vars,)))
-
         with var_plate:
-            # pyro.sample("mean_disp_slope", dist.Delta(mean_disp_slope_mu))
-            # pyro.sample("mean_disp_offset", dist.Delta(mean_disp_offset_mu))
             if self.fit_lib_size_effect:
                 pyro.sample(
                     "library_size_effect",

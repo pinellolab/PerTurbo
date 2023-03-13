@@ -21,6 +21,8 @@ logger = logging.getLogger(__name__)
 
 
 class PERTURBVI(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
+
+    # fields and data types that will be loaded into the module during training
     data_and_attrs = {
         REGISTRY_KEYS.X_KEY: np.float32,
         REGISTRY_KEYS.SIZE_FACTOR_KEY: np.float32,
@@ -65,6 +67,25 @@ class PERTURBVI(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
         library_size_key: Optional[str] = None,
         **kwargs,
     ):
+        """Registers data from an AnnData object with the model.
+
+        Parameters
+        ----------
+        adata
+            (Required) An AnnData object containing the perturbations and observational data.
+        perturbation_key
+            (Required) .obsm field of the AnnData containing a matrix of cells x perturbations
+        layer
+            Layer of adata containing the observed RNA transcript counts
+        batch_key
+            Key within the RNA AnnData .obs corresponding to the experimental batch
+        library_size_key
+            .obs key of adata containing raw (not log-scaled) library size factors for each sample
+        size_factor_key
+            .obs key of adata containing library size factors for each sample (e.g. log-library size)
+        kwargs
+            Additional keyword arguments
+        """
         setup_method_args = cls._get_setup_method_args(**locals())
         adata.obs["_ind_x"] = np.arange(len(adata))
 
@@ -92,7 +113,6 @@ class PERTURBVI(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
                 )
             adata.obs[size_factor_key] = np.log1p(library_size)
 
-
         anndata_fields = [
             fields.NumericalObsField(REGISTRY_KEYS.INDICES_KEY, "_ind_x"),
             fields.LayerField(REGISTRY_KEYS.X_KEY, layer, is_count_data=True),
@@ -110,21 +130,45 @@ class PERTURBVI(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
         adata_manager.register_fields(adata, **kwargs)
         cls.register_manager(adata_manager)
 
-
     @classmethod
     def setup_mudata(
         cls,
         mdata: MuData,
         rna_layer: Optional[str] = None,
+        perturbation_layer: Optional[str] = None,
         batch_key: Optional[str] = None,
         var_by_element_key: Optional[str] = None,
         perturb_by_element_key: Optional[str] = None,
-        perturbation_layer: Optional[str] = None,
-        modalities: Optional[Dict[str, str]] = None,
-        size_factor_key: Optional[str] = None,
         library_size_key: Optional[str] = None,
+        size_factor_key: Optional[str] = None,
+        modalities: Optional[Dict[str, str]] = None,
         **kwargs,
     ):
+        """Registers data from a MuData object with the model.
+
+        Parameters
+        ----------
+        mdata
+            A MuData object containing the perturbations and observational data.
+        rna_layer
+            The key of the MuData modality containing the RNA counts
+        perturbation_layer
+            The key of the MuData modality containing the perturbations
+        batch_key
+            Key within the RNA AnnData .obs corresponding to the experimental batch
+        var_by_element_key
+            .varm key within the RNA AnnData object containing a mask of which genes can be affected by which genetic elements
+        perturb_by_element_key
+            .varm key within the perturbation AnnData object containing which perturbations target which genetic elements
+        library_size_key
+            .obs key within the RNA AnnData object containing raw (not log-scaled) library size factors for each sample
+        size_factor_key
+            .obs key within the RNA AnnData object containing library size factors for each sample (e.g. log-library size)
+        modalities
+            A dict containing these same setup arguments
+        kwargs
+            Additional keyword arguments
+        """
         setup_method_args = cls._get_setup_method_args(**locals())
 
         if modalities is None:
@@ -316,6 +360,7 @@ class PERTURBVI(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
         return runner()
 
     def _render_pyro_model(self, model):
+        """Helper function for running one sample through the model for plotting."""
         loader = AnnDataLoader(
             adata_manager=self.adata_manager,
             indices=[1],
@@ -334,7 +379,9 @@ class PERTURBVI(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
         )
 
     def render_model(self):
+        """Plot the graphical model structure of the generative model (requires graphviz)."""
         return self._render_pyro_model(self.module.model)
 
     def render_guide(self):
+        """Plot the graphical model structure of the guide/variational distribution (requires graphviz)."""
         return self._render_pyro_model(self.module.guide)
