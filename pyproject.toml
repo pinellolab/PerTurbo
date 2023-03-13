@@ -149,15 +149,3 @@ skip = [
     "docs/references.md",
     "docs/notebooks/example.ipynb"
 ]
-
-[tool.hatch.envs.dev]
-dependencies = [
-    "perturbvi[test]",
-    # For notebooks
-    "ipykernel",
-    "ipython",
-    # For VSCode
-    "black",
-    "ruff"
-    # "flake8",
-]

@@ -13,7 +13,6 @@ from scvi.model.base import (
     PyroSviTrainMixin,
 )
 from scvi.train import PyroTrainingPlan
-from scvi.utils._docstrings import setup_anndata_dsp
 
 from ._constants import REGISTRY_KEYS
 from ._module import PerturbVIPyroModule
@@ -22,6 +21,8 @@ logger = logging.getLogger(__name__)
 
 
 class PERTURBVI(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
+
+    # fields and data types that will be loaded into the module during training
     data_and_attrs = {
         REGISTRY_KEYS.X_KEY: np.float32,
         REGISTRY_KEYS.SIZE_FACTOR_KEY: np.float32,
@@ -37,7 +38,7 @@ class PERTURBVI(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
         fit_lib_size=False,
         **model_kwargs,
     ):
-        super(PERTURBVI, self).__init__(mdata)
+        super().__init__(mdata)
 
         # self.summary_stats provides information about dimensions and other tensor info
         self.module = PerturbVIPyroModule(
@@ -55,42 +56,119 @@ class PERTURBVI(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
 
         logger.info("The model has been initialized")
 
+    @classmethod
     def setup_anndata(
         cls,
         adata: AnnData,
-        *args,
-        **kwargs,
-    ):
-        raise NotImplementedError("Not implemented: use setup_mudata instead.")
-
-    @classmethod
-    @setup_anndata_dsp.dedent
-    def setup_mudata(
-        cls,
-        mdata: MuData,
-        rna_layer: Optional[str] = None,
+        perturbation_key: str,
+        layer: Optional[str] = None,
         batch_key: Optional[str] = None,
-        var_by_element_key: Optional[str] = None,
-        perturb_by_element_key: Optional[str] = None,
-        perturbation_layer: Optional[str] = None,
-        modalities: Optional[Dict[str, str]] = None,
         size_factor_key: Optional[str] = None,
         library_size_key: Optional[str] = None,
         **kwargs,
     ):
-        """%(summary_mdata)s.
+        """Registers data from an AnnData object with the model.
+
         Parameters
         ----------
-        %(param_mdata)s
-        rna_layer
-            RNA layer key. If `None`, will use `.X` of specified modality key.
-        perturbation_layer
-            perturbation_layer layer key. If `None`, will use `.X` of specified modality key.
-        %(param_batch_key)s
-        %(param_size_factor_key)s
-        %(param_modalities)s
+        adata
+            (Required) An AnnData object containing the perturbations and observational data.
+        perturbation_key
+            (Required) .obsm field of the AnnData containing a matrix of cells x perturbations
+        layer
+            Layer of adata containing the observed RNA transcript counts
+        batch_key
+            Key within the RNA AnnData .obs corresponding to the experimental batch
+        library_size_key
+            .obs key of adata containing raw (not log-scaled) library size factors for each sample
+        size_factor_key
+            .obs key of adata containing library size factors for each sample (e.g. log-library size)
+        kwargs
+            Additional keyword arguments
         """
+        setup_method_args = cls._get_setup_method_args(**locals())
+        adata.obs["_ind_x"] = np.arange(len(adata))
 
+        # add library size if not present
+        if library_size_key is None:
+            library_size_key = "_library_size"
+            if layer is None:
+                data = adata.X
+            else:
+                data = adata.layers[layer]
+            library_size = data.sum(axis=1)
+            if not library_size.all():
+                raise ValueError(
+                    "Cannot infer library size: cells with zero counts. Set library_size_key manually instead."
+                )
+            adata.obs[library_size_key] = library_size
+
+        # add size factor if not present
+        if size_factor_key is None:
+            size_factor_key = "_size_factor"
+            library_size = adata.obs[library_size_key]
+            if not library_size.all():
+                raise ValueError(
+                    "Cannot infer size factors: cells with zero library size. Set size_factor_key manually instead."
+                )
+            adata.obs[size_factor_key] = np.log1p(library_size)
+
+        anndata_fields = [
+            fields.NumericalObsField(REGISTRY_KEYS.INDICES_KEY, "_ind_x"),
+            fields.LayerField(REGISTRY_KEYS.X_KEY, layer, is_count_data=True),
+            fields.ObsmField(REGISTRY_KEYS.PERTURBATION_KEY, perturbation_key),
+            fields.CategoricalObsField(REGISTRY_KEYS.BATCH_KEY, batch_key),
+            fields.NumericalObsField(
+                REGISTRY_KEYS.SIZE_FACTOR_KEY, size_factor_key, required=False
+            ),
+        ]
+
+        adata_manager = AnnDataManager(
+            fields=anndata_fields,
+            setup_method_args=setup_method_args,
+        )
+        adata_manager.register_fields(adata, **kwargs)
+        cls.register_manager(adata_manager)
+
+    @classmethod
+    def setup_mudata(
+        cls,
+        mdata: MuData,
+        rna_layer: Optional[str] = None,
+        perturbation_layer: Optional[str] = None,
+        batch_key: Optional[str] = None,
+        var_by_element_key: Optional[str] = None,
+        perturb_by_element_key: Optional[str] = None,
+        library_size_key: Optional[str] = None,
+        size_factor_key: Optional[str] = None,
+        modalities: Optional[Dict[str, str]] = None,
+        **kwargs,
+    ):
+        """Registers data from a MuData object with the model.
+
+        Parameters
+        ----------
+        mdata
+            A MuData object containing the perturbations and observational data.
+        rna_layer
+            The key of the MuData modality containing the RNA counts
+        perturbation_layer
+            The key of the MuData modality containing the perturbations
+        batch_key
+            Key within the RNA AnnData .obs corresponding to the experimental batch
+        var_by_element_key
+            .varm key within the RNA AnnData object containing a mask of which genes can be affected by which genetic elements
+        perturb_by_element_key
+            .varm key within the perturbation AnnData object containing which perturbations target which genetic elements
+        library_size_key
+            .obs key within the RNA AnnData object containing raw (not log-scaled) library size factors for each sample
+        size_factor_key
+            .obs key within the RNA AnnData object containing library size factors for each sample (e.g. log-library size)
+        modalities
+            A dict containing these same setup arguments
+        kwargs
+            Additional keyword arguments
+        """
         setup_method_args = cls._get_setup_method_args(**locals())
 
         if modalities is None:
@@ -197,8 +275,7 @@ class PERTURBVI(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
         data_splitter_kwargs: Optional[dict] = None,
         **trainer_kwargs,
     ):
-        """
-        Train the model. Modified from scVI scBASSET implementation.
+        """Train the model. Modified from scVI scBASSET implementation.
 
         Parameters
         ----------
@@ -227,16 +304,18 @@ class PERTURBVI(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
         plan_kwargs
             Keyword args for :class:`~scvi.train.PyroTrainingPlan`. Keyword arguments passed to
             `train()` will overwrite values present in `plan_kwargs`, when appropriate.
+        data_splitter_kwargs
+            Keyword args for :class:`~scvi.dataloaders.DataSplitter`. Keyword arguments passed to
+            `train()` will overwrite values present in `plan_kwargs`, when appropriate.
         **trainer_kwargs
             Other keyword args for :class:`~scvi.train.Trainer`.
         """
-
-        plan_kwargs = plan_kwargs if isinstance(plan_kwargs, dict) else dict()
+        plan_kwargs = plan_kwargs if isinstance(plan_kwargs, dict) else {}
         if lr is not None and "optim" not in plan_kwargs.keys():
             plan_kwargs.update({"optim_kwargs": {"lr": lr}})
 
         if data_splitter_kwargs is None:
-            data_splitter_kwargs = dict()
+            data_splitter_kwargs = {}
         if "data_and_attributes" not in data_splitter_kwargs:
             data_splitter_kwargs["data_and_attributes"] = self.data_and_attrs
 
@@ -281,6 +360,7 @@ class PERTURBVI(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
         return runner()
 
     def _render_pyro_model(self, model):
+        """Helper function for running one sample through the model for plotting."""
         loader = AnnDataLoader(
             adata_manager=self.adata_manager,
             indices=[1],
@@ -299,7 +379,9 @@ class PERTURBVI(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
         )
 
     def render_model(self):
+        """Plot the graphical model structure of the generative model (requires graphviz)."""
         return self._render_pyro_model(self.module.model)
 
     def render_guide(self):
+        """Plot the graphical model structure of the guide/variational distribution (requires graphviz)."""
         return self._render_pyro_model(self.module.guide)
