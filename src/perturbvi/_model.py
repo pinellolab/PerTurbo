@@ -4,6 +4,7 @@ from typing import Dict, Optional, Union
 import numpy as np
 from mudata import AnnData, MuData
 from pyro import render_model as pyro_render_model
+from scvi._types import AnnOrMuData
 from scvi.data import AnnDataManager, fields
 from scvi.dataloaders import AnnDataLoader, DeviceBackedDataSplitter
 from scvi.model.base import (
@@ -21,30 +22,32 @@ logger = logging.getLogger(__name__)
 
 
 class PERTURBVI(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
-
     # fields and data types that will be loaded into the module during training
-    data_and_attrs = {
-        REGISTRY_KEYS.X_KEY: np.float32,
-        REGISTRY_KEYS.SIZE_FACTOR_KEY: np.float32,
-        REGISTRY_KEYS.PERTURBATION_KEY: np.float32,
-        REGISTRY_KEYS.BATCH_KEY: np.int64,
-        REGISTRY_KEYS.INDICES_KEY: np.int64,
-    }
 
     def __init__(
         self,
-        mdata: MuData,
+        mdata: AnnOrMuData,
         likelihood="nb",
-        fit_lib_size=False,
         **model_kwargs,
     ):
         super().__init__(mdata)
+
+        # set data fields that will be loaded/mini-batched into the module
+        self.data_and_attrs = {
+            REGISTRY_KEYS.X_KEY: np.float32,
+            REGISTRY_KEYS.SIZE_FACTOR_KEY: np.float32,
+            REGISTRY_KEYS.PERTURBATION_KEY: np.float32,
+            REGISTRY_KEYS.BATCH_KEY: np.int64,
+            REGISTRY_KEYS.INDICES_KEY: np.int64,
+        }
+
+        if "n_extra_continuous_covs" in self.summary_stats:
+            self.data_and_attrs.update({REGISTRY_KEYS.CONT_COVS_KEY: np.float32})
 
         # self.summary_stats provides information about dimensions and other tensor info
         self.module = PerturbVIPyroModule(
             self.summary_stats,
             likelihood=likelihood,
-            fit_lib_size_effect=fit_lib_size,
         )
 
         self._model_summary_string = (
@@ -64,6 +67,7 @@ class PERTURBVI(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
         layer: Optional[str] = None,
         batch_key: Optional[str] = None,
         size_factor_key: Optional[str] = None,
+        continuous_covariates_keys: Optional[str] = None,
         library_size_key: Optional[str] = None,
         **kwargs,
     ):
@@ -83,6 +87,8 @@ class PERTURBVI(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
             .obs key of adata containing raw (not log-scaled) library size factors for each sample
         size_factor_key
             .obs key of adata containing library size factors for each sample (e.g. log-library size)
+        continuous_covariates_keys
+            List of .obs keys within adata containing other continuous covariates to be "regressed out"
         kwargs
             Additional keyword arguments
         """
@@ -123,6 +129,13 @@ class PERTURBVI(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
             ),
         ]
 
+        if continuous_covariates_keys is not None:
+            anndata_fields += (
+                fields.NumericalJointObsField(
+                    REGISTRY_KEYS.CONT_COVS_KEY, continuous_covariates_keys
+                ),
+            )
+
         adata_manager = AnnDataManager(
             fields=anndata_fields,
             setup_method_args=setup_method_args,
@@ -141,6 +154,7 @@ class PERTURBVI(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
         perturb_by_element_key: Optional[str] = None,
         library_size_key: Optional[str] = None,
         size_factor_key: Optional[str] = None,
+        continuous_covariates_keys: Optional[str] = None,
         modalities: Optional[Dict[str, str]] = None,
         **kwargs,
     ):
@@ -164,6 +178,8 @@ class PERTURBVI(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
             .obs key within the RNA AnnData object containing raw (not log-scaled) library size factors for each sample
         size_factor_key
             .obs key within the RNA AnnData object containing library size factors for each sample (e.g. log-library size)
+        continuous_covariates_keys
+            List of .obs keys within the RNA AnnData object containing other continuous covariates to be "regressed out"
         modalities
             A dict containing these same setup arguments
         kwargs
@@ -211,6 +227,12 @@ class PERTURBVI(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
             mod_key=modalities.rna_layer,
         )
 
+        covariates_field = fields.MuDataNumericalJointObsField(
+            REGISTRY_KEYS.CONT_COVS_KEY,
+            continuous_covariates_keys,
+            mod_key=modalities.rna_layer,
+        )
+
         mudata_fields = [
             index_field,
             batch_field,
@@ -235,6 +257,9 @@ class PERTURBVI(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
                 mod_required=True,
             ),
         ]
+
+        if continuous_covariates_keys is not None:
+            mudata_fields.append(covariates_field)
 
         if var_by_element_key is not None:
             mudata_fields.append(
