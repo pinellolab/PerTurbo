@@ -10,9 +10,9 @@
 
 Estimating perturbation effects on single cell phenotypes using variational inference.
 
-## Getting started
+<!-- ## Getting started
 
-Documentation suspended while private, check back soon :)
+<!-- Documentation suspended while private, check back soon :) -->
 
 <!-- Please refer to the [documentation][link-docs]. In particular, the -->
 
@@ -23,21 +23,22 @@ Documentation suspended while private, check back soon :)
 You need to have Python 3.8 or newer installed on your system. If you don't have
 Python installed, we recommend installing [Mambaforge](https://github.com/conda-forge/miniforge#mambaforge).
 
-There are several alternative options to install perturbvi:
 
-<!--
-1) Install the latest release of `perturbvi` from `PyPI <https://pypi.org/project/perturbvi/>`_:
-
-```bash
-pip install perturbvi
-```
--->
-
-1. Install the latest development version:
+Install the latest development version directly from GitHub using pip:
 
 ```bash
 pip install git+https://github.com/pinellolab/perturbvi.git@main
 ```
+
+Alternatively, you can clone this repo and install locally.
+
+```bash
+git clone https://github.com/pinellolab/perturbvi.git
+cd perturbvi
+pip install -e .
+```
+
+We are preparing pip and conda packages to be available soon.
 
 ## Release notes
 

@@ -22,7 +22,6 @@ logger = logging.getLogger(__name__)
 
 
 class PERTURBVI(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
-    # fields and data types that will be loaded into the module during training
 
     def __init__(
         self,
@@ -32,7 +31,7 @@ class PERTURBVI(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
     ):
         super().__init__(mdata)
 
-        # set data fields that will be loaded/mini-batched into the module
+        # data fields that will be loaded/mini-batched into the module
         self.data_and_attrs = {
             REGISTRY_KEYS.X_KEY: np.float32,
             REGISTRY_KEYS.SIZE_FACTOR_KEY: np.float32,
