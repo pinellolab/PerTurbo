@@ -4,6 +4,7 @@ from typing import Dict, Optional, Union
 import numpy as np
 from mudata import AnnData, MuData
 from pyro import render_model as pyro_render_model
+from pyro.infer import TraceEnum_ELBO, infer_discrete
 from scvi._types import AnnOrMuData
 from scvi.data import AnnDataManager, fields
 from scvi.dataloaders import AnnDataLoader, DeviceBackedDataSplitter
@@ -22,7 +23,6 @@ logger = logging.getLogger(__name__)
 
 
 class PERTURBVI(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
-
     def __init__(
         self,
         mdata: AnnOrMuData,
@@ -362,7 +362,9 @@ class PERTURBVI(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
                 use_gpu=use_gpu,
                 **data_splitter_kwargs,
             )
-        training_plan = self._training_plan_cls(self.module, **plan_kwargs)
+        training_plan = self._training_plan_cls(
+            self.module, loss_fn=TraceEnum_ELBO(max_plate_nesting=2), **plan_kwargs
+        )
 
         es = "early_stopping"
         trainer_kwargs[es] = (
@@ -383,17 +385,19 @@ class PERTURBVI(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
         )
         return runner()
 
-    def _render_pyro_model(self, model):
-        """Helper function for running one sample through the model for plotting."""
+    def _test_dataset(self):
+        """Helper function to get a tiny subsample of the data."""
         loader = AnnDataLoader(
             adata_manager=self.adata_manager,
             indices=[1],
             batch_size=1,
             data_and_attributes=self.data_and_attrs,
         )
-        sample_args, sample_kwargs = self.module._get_fn_args_from_batch(
-            next(iter(loader))
-        )
+        return self.module._get_fn_args_from_batch(next(iter(loader)))
+
+    def _render_pyro_model(self, model):
+        """Helper function for running one sample through the model for plotting."""
+        sample_args, sample_kwargs = self._test_dataset()
         return pyro_render_model(
             model,
             model_args=sample_args,
@@ -409,3 +413,9 @@ class PERTURBVI(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
     def render_guide(self):
         """Plot the graphical model structure of the guide/variational distribution (requires graphviz)."""
         return self._render_pyro_model(self.module.guide)
+
+    def get_discrete_model(self):
+        """Return a version of the model that can sample the discrete latents."""
+        model_discrete = infer_discrete(self.module.model, first_available_dim=-3)
+        sample_args, sample_kwargs = self._test_dataset()
+        return model_discrete(sample_args, **sample_kwargs)

@@ -19,12 +19,11 @@ urls.Documentation = "https://perturbvi.readthedocs.io/"
 urls.Source = "https://github.com/logan-blaine/perturbvi"
 urls.Home-page = "https://github.com/logan-blaine/perturbvi"
 dependencies = [
-    "anndata",
     "scvi-tools>=0.20.1",
     "torch",
     "pyro-ppl",
     "mudata",
-    "pandas >= 1.5.3",
+    "anndata",
     # for debug logging (referenced from the issue template)
     "session-info",
 ]
