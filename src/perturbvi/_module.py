@@ -1,27 +1,10 @@
 import pyro
 import pyro.distributions as dist
 import torch
-from pyro.distributions.torch_distribution import TorchDistribution
 from pyro.infer import config_enumerate
-from scvi.distributions import NegativeBinomial as SCVINegativeBinomial
-from scvi.distributions import NegativeBinomialMixture as SCVINegativeBinomialMixture
 from scvi.module.base import PyroBaseModuleClass
-from torch.distributions.utils import broadcast_all
 
 from ._constants import REGISTRY_KEYS
-
-
-# Wraps scvi NegativeBinomial implementation for use with Pyro
-class NegativeBinomial(SCVINegativeBinomial, TorchDistribution):
-    pass
-
-
-# Wraps scvi NegativeBinomialMixture implementation for Pyro
-class NegativeBinomialMixture(SCVINegativeBinomialMixture, TorchDistribution):
-    def __init__(self, **kwargs):
-        super().__init__(**kwargs)
-        # fixes broadcasting error when theta2 is different from theta1
-        self.mu2, self.theta2 = broadcast_all(kwargs["mu2"], kwargs["theta2"])
 
 
 class PerturbVIPyroModule(PyroBaseModuleClass):
@@ -76,7 +59,6 @@ class PerturbVIPyroModule(PyroBaseModuleClass):
         size_factor = tensor_dict[REGISTRY_KEYS.SIZE_FACTOR_KEY]
         perturbations = tensor_dict[REGISTRY_KEYS.PERTURBATION_KEY]
         covariates = tensor_dict[REGISTRY_KEYS.CONT_COVS_KEY]
-        # log_var_mean_global = pyro.sample("log_var_mean_global", dist.Normal(0.0, 4.0))
 
         with var_plate:
             with batch_plate:
@@ -124,12 +106,8 @@ class PerturbVIPyroModule(PyroBaseModuleClass):
                     obs=tensor_dict[REGISTRY_KEYS.X_KEY],
                 )
 
-    # def guide(self, idx, **tensor_dict):
-    # return self._guide(idx, **tensor_dict)
-
     def guide(self, idx, init_scale=0.2, **tensor_dict):
         pyro.module("perturbvi", self)
-        # scale_factor = pyro.param("scale_factor", torch.tensor(init_scale).log()).exp()
         (
             cell_plate,
             perturbation_plate,
@@ -137,12 +115,6 @@ class PerturbVIPyroModule(PyroBaseModuleClass):
             var_plate,
             covariate_plate,
         ) = self.create_plates(idx)
-
-        # shared global mean parameters
-        # log_var_mean_global_mu = pyro.param(
-        #     "log_var_mean_global.mu", lambda: torch.tensor((0.0,))
-        # )
-        # pyro.sample("log_var_mean_global", dist.Delta(log_var_mean_global_mu))
 
         log_var_mean_mu = pyro.param(
             "log_var_mean.mu", lambda: torch.zeros((self.n_vars,))
