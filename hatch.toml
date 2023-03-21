@@ -12,6 +12,7 @@ dependencies = [
     # For notebooks
     "ipykernel",
     "ipython",
+    "notebook",
     # For VSCode
     "black",
     "ruff"
