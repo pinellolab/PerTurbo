@@ -416,6 +416,7 @@ class PERTURBVI(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
 
     def get_discrete_model(self):
         """Return a version of the model that can sample the discrete latents."""
-        model_discrete = infer_discrete(self.module.model, first_available_dim=-3)
-        sample_args, sample_kwargs = self._test_dataset()
-        return model_discrete(sample_args, **sample_kwargs)
+        model_discrete = infer_discrete(self.module.model, first_available_dim=-3, temperature=0)
+        return model_discrete
+        # sample_args, sample_kwargs = self._test_dataset()
+        # return model_discrete(sample_args, **sample_kwargs)

@@ -71,11 +71,11 @@ class PerturbVIPyroModule(PyroBaseModuleClass):
                     "covariate_effect", dist.Normal(0.0, 1.0)
                 )
             with perturbation_plate:
-                prior_inclusion_prob = 1e-3
+                prior_inclusion_prob = 1e-4
                 perturb_mean_mask = pyro.sample(
                     "perturb_include", dist.Bernoulli(prior_inclusion_prob)
                 )
-                epsilon = 1e-8
+                epsilon = 1e-2
                 perturb_mean_lfc = pyro.sample(
                     "perturb_mean_lfc",
                     dist.Normal(0, 1.0 * perturb_mean_mask + epsilon),
