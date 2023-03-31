@@ -1,5 +1,5 @@
 import logging
-from typing import Dict, Optional, Union
+from typing import Dict, List, Optional, Union
 
 import numpy as np
 from mudata import AnnData, MuData
@@ -22,11 +22,9 @@ logger = logging.getLogger(__name__)
 
 
 class PERTURBVI(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
-
     def __init__(
         self,
         mdata: AnnOrMuData,
-        likelihood="nb",
         **model_kwargs,
     ):
         super().__init__(mdata)
@@ -46,7 +44,6 @@ class PERTURBVI(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
         # self.summary_stats provides information about dimensions and other tensor info
         self.module = PerturbVIPyroModule(
             self.summary_stats,
-            likelihood=likelihood,
         )
 
         self._model_summary_string = (
@@ -383,17 +380,18 @@ class PERTURBVI(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
         )
         return runner()
 
-    def _render_pyro_model(self, model):
-        """Helper function for running one sample through the model for plotting."""
+    def _get_data_subset(self, indices: Optional[List] = None):
         loader = AnnDataLoader(
             adata_manager=self.adata_manager,
-            indices=[1],
-            batch_size=1,
+            indices=indices,
+            batch_size=len(indices) if indices is not None else len(self.adata),
             data_and_attributes=self.data_and_attrs,
         )
-        sample_args, sample_kwargs = self.module._get_fn_args_from_batch(
-            next(iter(loader))
-        )
+        return self.module._get_fn_args_from_batch(next(iter(loader)))
+
+    def _render_pyro_model(self, model):
+        """Helper function for running one sample through the model for plotting."""
+        sample_args, sample_kwargs = self._get_data_subset([0])
         return pyro_render_model(
             model,
             model_args=sample_args,
@@ -409,3 +407,39 @@ class PERTURBVI(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
     def render_guide(self):
         """Plot the graphical model structure of the guide/variational distribution (requires graphviz)."""
         return self._render_pyro_model(self.module.guide)
+
+    # def get_posterior_samples(self, num_samples=500):
+    #     MAX_CELLS = 100
+    #     n_cells = min(len(self.adata), MAX_CELLS)
+    #     sample_args, sample_kwargs = self._get_data_subset(list(range(n_cells)))
+    #     sample_kwargs[REGISTRY_KEYS.X_KEY] = None
+    #     # print(sample_kwargs)
+    #     predictive_model = Predictive(
+    #         self.module.model,
+    #         guide=self.module.guide,
+    #         num_samples=num_samples,
+    #     )
+    #     return predictive_model(*sample_args, **sample_kwargs)['obs'].detach().cpu().numpy().ravel()
+
+    def get_posterior_samples(self, num_samples=1):
+        # MAX_CELLS = 100
+        # n_cells = min(len(self.adata), MAX_CELLS)
+        sample_args, sample_kwargs = self._get_data_subset()
+        sample_kwargs[REGISTRY_KEYS.X_KEY] = None
+        return self._get_posterior_samples(
+            sample_args,
+            kwargs=sample_kwargs,
+            num_samples=num_samples
+        )
+
+    def get_posterior_conditional_samples(self, var_idx, num_samples=1):
+        # MAX_CELLS = 100
+        # n_cells = min(len(self.adata), MAX_CELLS)
+        sample_args, sample_kwargs = self._get_data_subset()
+        sample_kwargs[REGISTRY_KEYS.PERTURBATION_KEY][:, var_idx]=1.
+        sample_kwargs[REGISTRY_KEYS.X_KEY] = None
+        return self._get_posterior_samples(
+            sample_args,
+            kwargs=sample_kwargs,
+            num_samples=num_samples
+        )

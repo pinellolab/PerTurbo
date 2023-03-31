@@ -10,6 +10,18 @@ from torch.distributions.utils import broadcast_all
 from ._constants import REGISTRY_KEYS
 
 
+class LogNormalNegativeBinomial(dist.LogNormalNegativeBinomial):
+    def sample(self, sample_shape=torch.Size()):
+        normals = (
+            dist.Normal(0, self.multiplicative_noise_scale)
+            .expand(self.batch_shape)
+            .sample(sample_shape=sample_shape)
+        )
+        return dist.NegativeBinomial(
+            total_count=self.total_count, logits=self.logits + normals
+        ).sample()
+
+
 # Wraps scvi NegativeBinomial implementation for use with Pyro
 class NegativeBinomial(SCVINegativeBinomial, TorchDistribution):
     pass
@@ -27,7 +39,7 @@ class PerturbVIPyroModule(PyroBaseModuleClass):
     def __init__(
         self,
         summary_stats,
-        likelihood="nb",
+        likelihood="lnnb",
         **module_kwargs,
     ) -> None:
         super().__init__()
@@ -77,6 +89,7 @@ class PerturbVIPyroModule(PyroBaseModuleClass):
         perturbations = tensor_dict[REGISTRY_KEYS.PERTURBATION_KEY]
         covariates = tensor_dict[REGISTRY_KEYS.CONT_COVS_KEY]
         # log_var_mean_global = pyro.sample("log_var_mean_global", dist.Normal(0.0, 4.0))
+        noise_global = pyro.sample("noise_global", dist.Exponential(10.0))
 
         with var_plate:
             if self.likelihood == "nb_mix":
@@ -110,9 +123,7 @@ class PerturbVIPyroModule(PyroBaseModuleClass):
                 perturb_mean_lfc = pyro.sample("perturb_mean_lfc", dist.Cauchy(0, 0.1))
                 perturb_disp_lfc = pyro.sample("perturb_disp_lfc", dist.Normal(0, 0.1))
 
-            log_var_mean = (
-                pyro.sample("log_var_mean", dist.Normal(0.0, 3.0))
-            )
+            log_var_mean = pyro.sample("log_var_mean", dist.Normal(0.0, 3.0))
             log_var_dispersion = pyro.sample(
                 "log_var_dispersion", dist.Normal(0.0, 2.0)
             )
@@ -140,15 +151,28 @@ class PerturbVIPyroModule(PyroBaseModuleClass):
                         ),
                         obs=tensor_dict[REGISTRY_KEYS.X_KEY],
                     )
-
-                return pyro.sample(
-                    "obs",
-                    NegativeBinomial(
-                        theta=(-nb_log_dispersion).exp(),
-                        mu=nb_log_mean.exp(),
-                    ),
-                    obs=tensor_dict[REGISTRY_KEYS.X_KEY],
-                )
+                elif self.likelihood == "lnnb":
+                    return pyro.sample(
+                        "obs",
+                        LogNormalNegativeBinomial(
+                            logits=nb_log_mean
+                            - nb_log_dispersion
+                            - noise_global**2 / 2,
+                            total_count=nb_log_dispersion.exp(),
+                            multiplicative_noise_scale=noise_global,
+                            num_quad_points=8,
+                        ),
+                        obs=tensor_dict.get(REGISTRY_KEYS.X_KEY),
+                    )
+                elif self.likelihood == "nb":
+                    return pyro.sample(
+                        "obs",
+                        dist.NegativeBinomial(
+                            logits=nb_log_mean - nb_log_dispersion,
+                            total_count=nb_log_dispersion.exp(),
+                        ),
+                        obs=tensor_dict[REGISTRY_KEYS.X_KEY],
+                    )
 
     # def guide(self, idx, **tensor_dict):
     # return self._guide(idx, **tensor_dict)
@@ -169,6 +193,12 @@ class PerturbVIPyroModule(PyroBaseModuleClass):
         #     "log_var_mean_global.mu", lambda: torch.tensor((0.0,))
         # )
         # pyro.sample("log_var_mean_global", dist.Delta(log_var_mean_global_mu))
+        noise_global_mu = pyro.param(
+            "noise_global.mu",
+            torch.tensor(0.1),
+            constraint=dist.constraints.positive,
+        )
+        pyro.sample("noise_global", dist.Delta(noise_global_mu))
 
         log_var_mean_mu = pyro.param(
             "log_var_mean.mu", lambda: torch.zeros((self.n_vars,))
