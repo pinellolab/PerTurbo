@@ -138,6 +138,7 @@ class PerturbVIPyroModule(PyroBaseModuleClass):
             )
 
             with cell_plate:
+                observations = tensor_dict.get(REGISTRY_KEYS.X_KEY)
                 if self.likelihood == "nb_mix":
                     return pyro.sample(
                         "obs",
@@ -149,7 +150,7 @@ class PerturbVIPyroModule(PyroBaseModuleClass):
                             mixture_logits=mixture_logits,
                             validate_args=True,
                         ),
-                        obs=tensor_dict[REGISTRY_KEYS.X_KEY],
+                        obs=observations,
                     )
                 elif self.likelihood == "lnnb":
                     return pyro.sample(
@@ -162,7 +163,7 @@ class PerturbVIPyroModule(PyroBaseModuleClass):
                             multiplicative_noise_scale=noise_global,
                             num_quad_points=8,
                         ),
-                        obs=tensor_dict.get(REGISTRY_KEYS.X_KEY),
+                        obs=observations,
                     )
                 elif self.likelihood == "nb":
                     return pyro.sample(
@@ -171,7 +172,7 @@ class PerturbVIPyroModule(PyroBaseModuleClass):
                             logits=nb_log_mean - nb_log_dispersion,
                             total_count=nb_log_dispersion.exp(),
                         ),
-                        obs=tensor_dict[REGISTRY_KEYS.X_KEY],
+                        obs=observations,
                     )
 
     # def guide(self, idx, **tensor_dict):
@@ -193,12 +194,13 @@ class PerturbVIPyroModule(PyroBaseModuleClass):
         #     "log_var_mean_global.mu", lambda: torch.tensor((0.0,))
         # )
         # pyro.sample("log_var_mean_global", dist.Delta(log_var_mean_global_mu))
-        noise_global_mu = pyro.param(
-            "noise_global.mu",
-            torch.tensor(0.1),
-            constraint=dist.constraints.positive,
-        )
-        pyro.sample("noise_global", dist.Delta(noise_global_mu))
+        if self.likelihood == "lnnb":
+            noise_global_mu = pyro.param(
+                "noise_global.mu",
+                torch.tensor(0.1),
+                constraint=dist.constraints.positive,
+            )
+            pyro.sample("noise_global", dist.Delta(noise_global_mu))
 
         log_var_mean_mu = pyro.param(
             "log_var_mean.mu", lambda: torch.zeros((self.n_vars,))

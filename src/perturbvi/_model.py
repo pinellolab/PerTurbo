@@ -427,19 +427,15 @@ class PERTURBVI(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
         sample_args, sample_kwargs = self._get_data_subset()
         sample_kwargs[REGISTRY_KEYS.X_KEY] = None
         return self._get_posterior_samples(
-            sample_args,
-            kwargs=sample_kwargs,
-            num_samples=num_samples
+            sample_args, kwargs=sample_kwargs, num_samples=num_samples
         )
 
     def get_posterior_conditional_samples(self, var_idx, num_samples=1):
         # MAX_CELLS = 100
         # n_cells = min(len(self.adata), MAX_CELLS)
         sample_args, sample_kwargs = self._get_data_subset()
-        sample_kwargs[REGISTRY_KEYS.PERTURBATION_KEY][:, var_idx]=1.
+        sample_kwargs[REGISTRY_KEYS.PERTURBATION_KEY][:, var_idx] = 1.0
         sample_kwargs[REGISTRY_KEYS.X_KEY] = None
         return self._get_posterior_samples(
-            sample_args,
-            kwargs=sample_kwargs,
-            num_samples=num_samples
+            sample_args, kwargs=sample_kwargs, num_samples=num_samples
         )
