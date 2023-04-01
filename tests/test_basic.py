@@ -72,6 +72,12 @@ def test_model_mdata(mdata: MuData):
     assert model.summary_stats.n_perturbations == len(mdata[perturb_key].var)
 
     model.train(max_epochs=10, train_size=1, lr=0.1)
+    samples = model.get_posterior_samples()
+    assert samples['obs'].shape[-2:] == (
+        model.summary_stats.n_cells,
+        model.summary_stats.n_vars,
+    )
+
 
 
 def test_model_adata(adata: AnnData):
@@ -87,3 +93,9 @@ def test_model_adata(adata: AnnData):
     assert model.summary_stats.n_vars == n_vars
     assert model.summary_stats.n_perturbations == adata.obsm[perturb_key].shape[1]
     model.train(max_epochs=10, train_size=1, lr=0.1)
+    samples = model.get_posterior_samples()
+    assert samples['obs'].shape[-2:] == (
+        model.summary_stats.n_cells,
+        model.summary_stats.n_vars,
+    )
+
