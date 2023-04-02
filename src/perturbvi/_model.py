@@ -25,6 +25,7 @@ class PERTURBVI(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
     def __init__(
         self,
         mdata: AnnOrMuData,
+        likelihood: Optional[str] = None,
         **model_kwargs,
     ):
         super().__init__(mdata)
@@ -42,9 +43,17 @@ class PERTURBVI(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
             self.data_and_attrs.update({REGISTRY_KEYS.CONT_COVS_KEY: np.float32})
 
         # self.summary_stats provides information about dimensions and other tensor info
-        self.module = PerturbVIPyroModule(
-            self.summary_stats,
-        )
+        # likelihood
+        if likelihood is None:
+            self.module = PerturbVIPyroModule(
+                self.summary_stats
+            )
+        else:
+            self.module = PerturbVIPyroModule(
+                self.summary_stats,
+                likelihood=likelihood
+            )
+
 
         self._model_summary_string = (
             f"MyPyroModel Model with params:\n{self.summary_stats}"
