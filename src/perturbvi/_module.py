@@ -89,9 +89,11 @@ class PerturbVIPyroModule(PyroBaseModuleClass):
         perturbations = tensor_dict[REGISTRY_KEYS.PERTURBATION_KEY]
         covariates = tensor_dict[REGISTRY_KEYS.CONT_COVS_KEY]
         # log_var_mean_global = pyro.sample("log_var_mean_global", dist.Normal(0.0, 4.0))
-        noise_global = pyro.sample("noise_global", dist.Exponential(10.0))
 
         with var_plate:
+            if self.likelihood == 'lnnb':
+                multiplicative_noise = pyro.sample("multiplicative_noise", dist.Exponential(10.0))
+
             if self.likelihood == "nb_mix":
                 mixture_logits = pyro.sample("mixture_logits", dist.Normal(-1.0, 0.01))
                 mixture_logits = -1.0
@@ -158,9 +160,9 @@ class PerturbVIPyroModule(PyroBaseModuleClass):
                         LogNormalNegativeBinomial(
                             logits=nb_log_mean
                             - nb_log_dispersion
-                            - noise_global**2 / 2,
+                            - multiplicative_noise**2 / 2,
                             total_count=nb_log_dispersion.exp(),
-                            multiplicative_noise_scale=noise_global,
+                            multiplicative_noise_scale=multiplicative_noise,
                             num_quad_points=8,
                         ),
                         obs=observations,
@@ -194,13 +196,6 @@ class PerturbVIPyroModule(PyroBaseModuleClass):
         #     "log_var_mean_global.mu", lambda: torch.tensor((0.0,))
         # )
         # pyro.sample("log_var_mean_global", dist.Delta(log_var_mean_global_mu))
-        if self.likelihood == "lnnb":
-            noise_global_mu = pyro.param(
-                "noise_global.mu",
-                torch.tensor(0.1),
-                constraint=dist.constraints.positive,
-            )
-            pyro.sample("noise_global", dist.Delta(noise_global_mu))
 
         log_var_mean_mu = pyro.param(
             "log_var_mean.mu", lambda: torch.zeros((self.n_vars,))
@@ -265,6 +260,14 @@ class PerturbVIPyroModule(PyroBaseModuleClass):
         )
 
         with var_plate:
+            if self.likelihood == "lnnb":
+                multiplicative_noise_mu = pyro.param(
+                    "multiplicative_noise.mu",
+                    lambda: torch.full((self.n_vars,), init_scale),
+                    constraint=dist.constraints.positive,
+                )
+                pyro.sample("multiplicative_noise", dist.Delta(multiplicative_noise_mu))
+
             pyro.sample(
                 "log_var_mean", dist.Normal(log_var_mean_mu, log_var_mean_sigma)
             )
@@ -307,3 +310,4 @@ class PerturbVIPyroModule(PyroBaseModuleClass):
             store["perturb_mean_lfc.mu"].detach().cpu().numpy(),
             store["perturb_disp_lfc.mu"].detach().cpu().numpy(),
         )
+    
