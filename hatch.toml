@@ -12,6 +12,10 @@ dependencies = [
     # For notebooks
     "ipykernel",
     "ipython",
+    "seaborn",
+    "scanpy",
+    "matplotlib",
+    "graphviz",
     # For VSCode
     "black",
     "ruff"
