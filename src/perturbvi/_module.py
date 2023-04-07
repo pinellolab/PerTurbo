@@ -46,9 +46,13 @@ class PerturbVIPyroModule(PyroBaseModuleClass):
         self.n_cells = summary_stats.n_cells
         self.n_vars = summary_stats.n_vars
         self.n_perturbations = summary_stats.n_perturbations
-        self.n_covariates = 1  # include (inferred) size factor by default
+        self.n_cont_covariates = 1  # include (inferred) size factor by default
         if "n_extra_continuous_covs" in summary_stats:
-            self.n_covariates += summary_stats.n_extra_continuous_covs
+            self.n_cont_covariates += summary_stats.n_extra_continuous_covs
+        if "n_extra_categorical_covs" in summary_stats:
+            self.n_cat_covariates = summary_stats.n_extra_categorical_covs
+        else:
+            self.n_cat_covariates = 0
         self.n_batches = summary_stats.n_batch
         self.likelihood = likelihood
 
@@ -72,7 +76,7 @@ class PerturbVIPyroModule(PyroBaseModuleClass):
             pyro.plate("perturbations", self.n_perturbations, dim=-2),
             pyro.plate("batches", self.n_batches, dim=-2),
             pyro.plate("vars", self.n_vars, dim=-1),
-            pyro.plate("covariates", self.n_covariates, dim=-2),
+            pyro.plate("cont_covariates", self.n_cont_covariates, dim=-2),
         )
 
     def model(self, idx, **tensor_dict):
@@ -82,17 +86,21 @@ class PerturbVIPyroModule(PyroBaseModuleClass):
             perturbation_plate,
             batch_plate,
             var_plate,
-            covariate_plate,
+            cont_cov_plate,
         ) = self.create_plates(idx)
         batch = tensor_dict[REGISTRY_KEYS.BATCH_KEY]
         size_factor = tensor_dict[REGISTRY_KEYS.SIZE_FACTOR_KEY]
         perturbations = tensor_dict[REGISTRY_KEYS.PERTURBATION_KEY]
-        covariates = tensor_dict[REGISTRY_KEYS.CONT_COVS_KEY]
+        cont_covariates = tensor_dict[REGISTRY_KEYS.CONT_COVS_KEY]
+        if self.n_cat_covariates > 0:
+            cat_covariates = tensor_dict[REGISTRY_KEYS.CAT_COVS_KEY]
         # log_var_mean_global = pyro.sample("log_var_mean_global", dist.Normal(0.0, 4.0))
 
         with var_plate:
-            if self.likelihood == 'lnnb':
-                multiplicative_noise = pyro.sample("multiplicative_noise", dist.Exponential(10.0))
+            if self.likelihood == "lnnb":
+                multiplicative_noise = pyro.sample(
+                    "multiplicative_noise", dist.Exponential(10.0)
+                )
 
             if self.likelihood == "nb_mix":
                 mixture_logits = pyro.sample("mixture_logits", dist.Normal(-1.0, 0.01))
@@ -101,12 +109,15 @@ class PerturbVIPyroModule(PyroBaseModuleClass):
                 # n_batches x n_vars
                 batch_effect_size = pyro.sample("batch_effect", dist.Normal(0.0, 1.0))
                 batch_effects = batch_effect_size[batch.squeeze(), ...]
-            with covariate_plate:
-                # n_covariates x n_vars
-                covariate_effect_size = pyro.sample(
-                    "covariate_effect", dist.Normal(0.0, 1.0)
+
+            cov_prior_sigma = 1.0
+            with cont_cov_plate:
+                # n_cont_covariates x n_vars
+                cont_cov_effect_size = pyro.sample(
+                    "cont_cov_effect", dist.Normal(0.0, cov_prior_sigma)
                 )
-                covariate_effects = covariates @ covariate_effect_size
+                covariate_effects = cont_covariates @ cont_cov_effect_size
+
             with perturbation_plate:
                 # spike_frac = 1e-4
                 # spike_slab_mix = dist.Categorical(
@@ -182,20 +193,13 @@ class PerturbVIPyroModule(PyroBaseModuleClass):
 
     def guide(self, idx, init_scale=0.2, **tensor_dict):
         pyro.module("perturbvi", self)
-        # scale_factor = pyro.param("scale_factor", torch.tensor(init_scale).log()).exp()
         (
-            cell_plate,
+            _,
             perturbation_plate,
             batch_plate,
             var_plate,
-            covariate_plate,
+            cont_cov_plate,
         ) = self.create_plates(idx)
-
-        # shared global mean parameter
-        # log_var_mean_global_mu = pyro.param(
-        #     "log_var_mean_global.mu", lambda: torch.tensor((0.0,))
-        # )
-        # pyro.sample("log_var_mean_global", dist.Delta(log_var_mean_global_mu))
 
         log_var_mean_mu = pyro.param(
             "log_var_mean.mu", lambda: torch.zeros((self.n_vars,))
@@ -222,12 +226,13 @@ class PerturbVIPyroModule(PyroBaseModuleClass):
             constraint=dist.constraints.positive,
         )
 
-        covariate_effect_mu = pyro.param(
-            "covariate_effect.mu", lambda: torch.zeros((self.n_covariates, self.n_vars))
+        cont_cov_effect_mu = pyro.param(
+            "cont_cov_effect.mu",
+            lambda: torch.zeros((self.n_cont_covariates, self.n_vars)),
         )
-        covariate_effect_sigma = pyro.param(
-            "covariate_effect.sigma",
-            lambda: torch.full((self.n_covariates, self.n_vars), init_scale),
+        cont_cov_effect_sigma = pyro.param(
+            "cont_cov_effect.sigma",
+            lambda: torch.full((self.n_cont_covariates, self.n_vars), init_scale),
             constraint=dist.constraints.positive,
         )
 
@@ -283,10 +288,10 @@ class PerturbVIPyroModule(PyroBaseModuleClass):
                 pyro.sample(
                     "batch_effect", dist.Normal(batch_effect_mu, batch_effect_sigma)
                 )
-            with covariate_plate:
+            with cont_cov_plate:
                 pyro.sample(
-                    "covariate_effect",
-                    dist.Normal(covariate_effect_mu, covariate_effect_sigma),
+                    "cont_cov_effect",
+                    dist.Normal(cont_cov_effect_mu, cont_cov_effect_sigma),
                 )
 
             with perturbation_plate:
@@ -310,4 +315,3 @@ class PerturbVIPyroModule(PyroBaseModuleClass):
             store["perturb_mean_lfc.mu"].detach().cpu().numpy(),
             store["perturb_disp_lfc.mu"].detach().cpu().numpy(),
         )
-    

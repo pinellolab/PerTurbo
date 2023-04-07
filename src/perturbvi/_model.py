@@ -42,18 +42,15 @@ class PERTURBVI(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
         if "n_extra_continuous_covs" in self.summary_stats:
             self.data_and_attrs.update({REGISTRY_KEYS.CONT_COVS_KEY: np.float32})
 
+        if "n_extra_categorical_covs" in self.summary_stats:
+            self.data_and_attrs.update({REGISTRY_KEYS.CAT_COVS_KEY: np.float32})
+
         # self.summary_stats provides information about dimensions and other tensor info
         # likelihood
         if likelihood is None:
-            self.module = PerturbVIPyroModule(
-                self.summary_stats
-            )
+            self.module = PerturbVIPyroModule(self.summary_stats)
         else:
-            self.module = PerturbVIPyroModule(
-                self.summary_stats,
-                likelihood=likelihood
-            )
-
+            self.module = PerturbVIPyroModule(self.summary_stats, likelihood=likelihood)
 
         self._model_summary_string = (
             f"MyPyroModel Model with params:\n{self.summary_stats}"
@@ -73,6 +70,7 @@ class PERTURBVI(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
         batch_key: Optional[str] = None,
         size_factor_key: Optional[str] = None,
         continuous_covariates_keys: Optional[str] = None,
+        categorical_covariates_keys: Optional[str] = None,
         library_size_key: Optional[str] = None,
         **kwargs,
     ):
@@ -141,6 +139,13 @@ class PERTURBVI(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
                 ),
             )
 
+        if categorical_covariates_keys is not None:
+            anndata_fields += (
+                fields.CategoricalJointObsField(
+                    REGISTRY_KEYS.CAT_COVS_KEY, categorical_covariates_keys
+                ),
+            )
+
         adata_manager = AnnDataManager(
             fields=anndata_fields,
             setup_method_args=setup_method_args,
@@ -160,6 +165,7 @@ class PERTURBVI(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
         library_size_key: Optional[str] = None,
         size_factor_key: Optional[str] = None,
         continuous_covariates_keys: Optional[str] = None,
+        categorical_covariates_keys: Optional[str] = None,
         modalities: Optional[Dict[str, str]] = None,
         **kwargs,
     ):

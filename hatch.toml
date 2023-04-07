@@ -16,6 +16,8 @@ dependencies = [
     "scanpy",
     "matplotlib",
     "graphviz",
+    # For reading R data files
+    "anndata2ri",
     # For VSCode
     "black",
     "ruff"
