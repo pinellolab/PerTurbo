@@ -25,7 +25,7 @@ class PERTURBVI(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
     def __init__(
         self,
         mdata: AnnOrMuData,
-        likelihood: Optional[str] = None,
+        likelihood: Optional[str] = "lnnb",
         **model_kwargs,
     ):
         super().__init__(mdata)
@@ -42,15 +42,18 @@ class PERTURBVI(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
         if "n_extra_continuous_covs" in self.summary_stats:
             self.data_and_attrs.update({REGISTRY_KEYS.CONT_COVS_KEY: np.float32})
 
+        n_cats_per_cov = None
         if "n_extra_categorical_covs" in self.summary_stats:
             self.data_and_attrs.update({REGISTRY_KEYS.CAT_COVS_KEY: np.float32})
+            n_cats_per_cov = self.adata_manager.get_state_registry(
+                REGISTRY_KEYS.CAT_COVS_KEY
+            ).n_cats_per_key
 
         # self.summary_stats provides information about dimensions and other tensor info
         # likelihood
-        if likelihood is None:
-            self.module = PerturbVIPyroModule(self.summary_stats)
-        else:
-            self.module = PerturbVIPyroModule(self.summary_stats, likelihood=likelihood)
+        self.module = PerturbVIPyroModule(
+            self.summary_stats, likelihood=likelihood, n_cats_per_cov=n_cats_per_cov
+        )
 
         self._model_summary_string = (
             f"MyPyroModel Model with params:\n{self.summary_stats}"
