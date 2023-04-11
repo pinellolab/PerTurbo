@@ -2,7 +2,6 @@ from typing import Iterable, Optional
 
 import pyro
 import pyro.distributions as dist
-from sklearn import mixture
 import torch
 from pyro.distributions.torch_distribution import TorchDistribution
 from scvi.distributions import NegativeBinomial as SCVINegativeBinomial
@@ -106,6 +105,8 @@ class PerturbVIPyroModule(PyroBaseModuleClass):
         cont_covariates = tensor_dict[REGISTRY_KEYS.CONT_COVS_KEY]
         # log_var_mean_global = pyro.sample("log_var_mean_global", dist.Normal(0.0, 4.0))
 
+
+
         with var_plate:
             if self.likelihood == "lnnb":
                 multiplicative_noise = pyro.sample(
@@ -183,7 +184,7 @@ class PerturbVIPyroModule(PyroBaseModuleClass):
                             - multiplicative_noise**2 / 2,
                             total_count=nb_log_dispersion.exp(),
                             multiplicative_noise_scale=multiplicative_noise,
-                            num_quad_points=4,
+                            num_quad_points=8,
                         ),
                         obs=observations,
                     )
