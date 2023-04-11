@@ -105,8 +105,6 @@ class PerturbVIPyroModule(PyroBaseModuleClass):
         cont_covariates = tensor_dict[REGISTRY_KEYS.CONT_COVS_KEY]
         # log_var_mean_global = pyro.sample("log_var_mean_global", dist.Normal(0.0, 4.0))
 
-
-
         with var_plate:
             if self.likelihood == "lnnb":
                 multiplicative_noise = pyro.sample(
@@ -202,24 +200,24 @@ class PerturbVIPyroModule(PyroBaseModuleClass):
                         (
                             nb_log_mean_ctrl - nb_log_disp_ctrl,
                             nb_log_mean - nb_log_dispersion,
-                        )
+                        ), dim=-1
                     )
                     total_counts = torch.stack(
                         torch.broadcast_tensors(
                             nb_log_disp_ctrl.exp(), nb_log_dispersion.exp()
-                        )
+                        ), dim=-1
                     )
-                    mixture_dist = dist.Categorical(mixture_probs)
+                    mixture_dist = dist.Categorical(mixture_probs.expand_as(logits))
                     component_dist = dist.NegativeBinomial(
                         total_count=total_counts, logits=logits
-                    ).to_event(2)
+                    )
                     mix_dist = dist.MixtureSameFamily(mixture_dist, component_dist)
                     # .to_event(0)
                     # raise Exception(mix_dist.shape())
                     # raise Exception(pyro.sample("obs", mix_dist, obs=observations).shape)
                     obs = pyro.sample("obs", mix_dist, obs=observations)
-                    print(mix_dist.shape(), obs.shape)
                     return obs
+
     # def guide(self, idx, **tensor_dict):
     # return self._guide(idx, **tensor_dict)
 
