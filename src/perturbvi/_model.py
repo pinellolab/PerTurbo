@@ -408,8 +408,8 @@ class PERTURBVI(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
         return self.module._get_fn_args_from_batch(next(iter(loader)))
 
     def _render_pyro_model(self, model):
-        """Helper function for running one sample through the model for plotting."""
-        sample_args, sample_kwargs = self._get_data_subset([0])
+        """Helper function for running two samples through the model for plotting."""
+        sample_args, sample_kwargs = self._get_data_subset([0,1])
         return pyro_render_model(
             model,
             model_args=sample_args,

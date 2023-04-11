@@ -2,6 +2,7 @@ from typing import Iterable, Optional
 
 import pyro
 import pyro.distributions as dist
+from sklearn import mixture
 import torch
 from pyro.distributions.torch_distribution import TorchDistribution
 from scvi.distributions import NegativeBinomial as SCVINegativeBinomial
@@ -112,8 +113,9 @@ class PerturbVIPyroModule(PyroBaseModuleClass):
                 )
 
             if self.likelihood == "nb_mix":
-                mixture_logits = pyro.sample("mixture_logits", dist.Normal(-1.0, 0.01))
-                mixture_logits = -1.0
+                # mixture_logits = pyro.sample("mixture_logits", dist.Normal(-1.0, 0.01))
+                mixture_probs = torch.tensor([0.1, 0.9])
+
             with batch_plate:
                 # n_batches x n_vars
                 batch_effect_size = pyro.sample("batch_effect", dist.Normal(0.0, 1.0))
@@ -145,27 +147,32 @@ class PerturbVIPyroModule(PyroBaseModuleClass):
                 perturb_mean_lfc = pyro.sample("perturb_mean_lfc", dist.Cauchy(0, 0.1))
                 perturb_disp_lfc = pyro.sample("perturb_disp_lfc", dist.Normal(0, 0.1))
 
-            log_var_mean = pyro.sample("log_var_mean", dist.Normal(0.0, 3.0))
-            log_var_dispersion = pyro.sample(
-                "log_var_dispersion", dist.Normal(0.0, 2.0)
-            )
+            nb_log_mean_gene = pyro.sample("log_var_mean", dist.Normal(0.0, 3.0))
+            nb_log_disp_gene = pyro.sample("log_var_dispersion", dist.Normal(0.0, 2.0))
 
-            nb_log_dispersion = log_var_dispersion + perturbations @ perturb_disp_lfc
-            nb_log_mean = (
-                log_var_mean
-                + perturbations @ perturb_mean_lfc
+            nb_log_mean_ctrl = (
+                nb_log_mean_gene
                 + size_factor
                 + batch_effects
                 # + covariate_effects
             )
 
-            with cell_plate:
-                if self.n_cat_covariates > 0:
-                    cat_covariates = torch.split(tensor_dict[REGISTRY_KEYS.CAT_COVS_KEY], 1, dim=1)
-                    nn_m, nn_v = self.decoder(cont_covariates, *cat_covariates)
-                    nb_log_mean += nn_m
-                    nb_log_dispersion += nn_v.log()
+            # add neural network covariate effects
+            if self.n_cat_covariates > 0:
+                cat_covariates = torch.split(
+                    tensor_dict[REGISTRY_KEYS.CAT_COVS_KEY], 1, dim=1
+                )
+                nn_m, nn_v = self.decoder(cont_covariates, *cat_covariates)
+                nb_log_mean_ctrl += nn_m
+                nb_log_disp_ctrl = nn_v.log() + nb_log_disp_gene
+            else:
+                nb_log_disp_ctrl = nb_log_disp_gene.expand(nb_log_mean_ctrl.shape)
 
+            # add perturbation effects to per-gene parameters
+            nb_log_mean = nb_log_mean_ctrl + perturbations @ perturb_mean_lfc
+            nb_log_dispersion = nb_log_disp_ctrl + perturbations @ perturb_disp_lfc
+
+            with cell_plate:
                 observations = tensor_dict.get(REGISTRY_KEYS.X_KEY)
                 if self.likelihood == "lnnb":
                     return pyro.sample(
@@ -176,7 +183,7 @@ class PerturbVIPyroModule(PyroBaseModuleClass):
                             - multiplicative_noise**2 / 2,
                             total_count=nb_log_dispersion.exp(),
                             multiplicative_noise_scale=multiplicative_noise,
-                            num_quad_points=8,
+                            num_quad_points=4,
                         ),
                         obs=observations,
                     )
@@ -189,7 +196,29 @@ class PerturbVIPyroModule(PyroBaseModuleClass):
                         ),
                         obs=observations,
                     )
-
+                elif self.likelihood == "nb_mix":
+                    logits = torch.stack(
+                        (
+                            nb_log_mean_ctrl - nb_log_disp_ctrl,
+                            nb_log_mean - nb_log_dispersion,
+                        )
+                    )
+                    total_counts = torch.stack(
+                        torch.broadcast_tensors(
+                            nb_log_disp_ctrl.exp(), nb_log_dispersion.exp()
+                        )
+                    )
+                    mixture_dist = dist.Categorical(mixture_probs)
+                    component_dist = dist.NegativeBinomial(
+                        total_count=total_counts, logits=logits
+                    ).to_event(2)
+                    mix_dist = dist.MixtureSameFamily(mixture_dist, component_dist)
+                    # .to_event(0)
+                    # raise Exception(mix_dist.shape())
+                    # raise Exception(pyro.sample("obs", mix_dist, obs=observations).shape)
+                    obs = pyro.sample("obs", mix_dist, obs=observations)
+                    print(mix_dist.shape(), obs.shape)
+                    return obs
     # def guide(self, idx, **tensor_dict):
     # return self._guide(idx, **tensor_dict)
 
@@ -209,15 +238,16 @@ class PerturbVIPyroModule(PyroBaseModuleClass):
         log_var_disp_mu = pyro.param(
             "log_var_disp.mu", lambda: torch.zeros((self.n_vars,))
         )
-        if self.likelihood == "nb_mix":
-            mixture_logits_mu = pyro.param(
-                "mixture_logits.mu", lambda: torch.zeros((self.n_vars,))
-            )
-            mixture_logits_sigma = pyro.param(
-                "mixture_logits.sigma",
-                lambda: torch.full((self.n_vars,), init_scale),
-                constraint=dist.constraints.positive,
-            )
+        # if self.likelihood == "nb_mix":
+
+        #     mixture_logits_mu = pyro.param(
+        #         "mixture_logits.mu", lambda: torch.zeros((self.n_vars,))
+        #     )
+        #     mixture_logits_sigma = pyro.param(
+        #         "mixture_logits.sigma",
+        #         lambda: torch.full((self.n_vars,), init_scale),
+        #         constraint=dist.constraints.positive,
+        #     )
 
         batch_effect_mu = pyro.param(
             "batch_effect.mu", lambda: torch.zeros((self.n_batches, self.n_vars))
@@ -281,11 +311,11 @@ class PerturbVIPyroModule(PyroBaseModuleClass):
             pyro.sample(
                 "log_var_dispersion", dist.Normal(log_var_disp_mu, log_var_disp_sigma)
             )
-            if self.likelihood == "nb_mix":
-                pyro.sample(
-                    "mixture_logits",
-                    dist.Normal(mixture_logits_mu, mixture_logits_sigma),
-                )
+            # if self.likelihood == "nb_mix":
+            #     pyro.sample(
+            #         "mixture_logits",
+            #         dist.Normal(mixture_logits_mu, mixture_logits_sigma),
+            #     )
             with batch_plate:
                 pyro.sample(
                     "batch_effect", dist.Normal(batch_effect_mu, batch_effect_sigma)
