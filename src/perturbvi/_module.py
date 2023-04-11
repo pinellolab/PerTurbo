@@ -203,18 +203,15 @@ class PerturbVIPyroModule(PyroBaseModuleClass):
                         ), dim=-1
                     )
                     total_counts = torch.stack(
-                        torch.broadcast_tensors(
+                        broadcast_all(
                             nb_log_disp_ctrl.exp(), nb_log_dispersion.exp()
                         ), dim=-1
                     )
-                    mixture_dist = dist.Categorical(mixture_probs.expand_as(logits))
+                    mixture_dist = dist.Categorical(mixture_probs)
                     component_dist = dist.NegativeBinomial(
                         total_count=total_counts, logits=logits
                     )
                     mix_dist = dist.MixtureSameFamily(mixture_dist, component_dist)
-                    # .to_event(0)
-                    # raise Exception(mix_dist.shape())
-                    # raise Exception(pyro.sample("obs", mix_dist, obs=observations).shape)
                     obs = pyro.sample("obs", mix_dist, obs=observations)
                     return obs
 
