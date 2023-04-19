@@ -25,7 +25,7 @@ class PERTURBVI(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
     def __init__(
         self,
         mdata: AnnOrMuData,
-        likelihood: Optional[str] = None,
+        likelihood: Optional[str] = "lnnb",
         **model_kwargs,
     ):
         super().__init__(mdata)
@@ -42,18 +42,18 @@ class PERTURBVI(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
         if "n_extra_continuous_covs" in self.summary_stats:
             self.data_and_attrs.update({REGISTRY_KEYS.CONT_COVS_KEY: np.float32})
 
+        n_cats_per_cov = None
+        if "n_extra_categorical_covs" in self.summary_stats:
+            self.data_and_attrs.update({REGISTRY_KEYS.CAT_COVS_KEY: np.float32})
+            n_cats_per_cov = self.adata_manager.get_state_registry(
+                REGISTRY_KEYS.CAT_COVS_KEY
+            ).n_cats_per_key
+
         # self.summary_stats provides information about dimensions and other tensor info
         # likelihood
-        if likelihood is None:
-            self.module = PerturbVIPyroModule(
-                self.summary_stats
-            )
-        else:
-            self.module = PerturbVIPyroModule(
-                self.summary_stats,
-                likelihood=likelihood
-            )
-
+        self.module = PerturbVIPyroModule(
+            self.summary_stats, likelihood=likelihood, n_cats_per_cov=n_cats_per_cov
+        )
 
         self._model_summary_string = (
             f"MyPyroModel Model with params:\n{self.summary_stats}"
@@ -73,6 +73,7 @@ class PERTURBVI(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
         batch_key: Optional[str] = None,
         size_factor_key: Optional[str] = None,
         continuous_covariates_keys: Optional[str] = None,
+        categorical_covariates_keys: Optional[str] = None,
         library_size_key: Optional[str] = None,
         **kwargs,
     ):
@@ -141,6 +142,13 @@ class PERTURBVI(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
                 ),
             )
 
+        if categorical_covariates_keys is not None:
+            anndata_fields += (
+                fields.CategoricalJointObsField(
+                    REGISTRY_KEYS.CAT_COVS_KEY, categorical_covariates_keys
+                ),
+            )
+
         adata_manager = AnnDataManager(
             fields=anndata_fields,
             setup_method_args=setup_method_args,
@@ -160,6 +168,7 @@ class PERTURBVI(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
         library_size_key: Optional[str] = None,
         size_factor_key: Optional[str] = None,
         continuous_covariates_keys: Optional[str] = None,
+        categorical_covariates_keys: Optional[str] = None,
         modalities: Optional[Dict[str, str]] = None,
         **kwargs,
     ):
@@ -399,8 +408,8 @@ class PERTURBVI(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
         return self.module._get_fn_args_from_batch(next(iter(loader)))
 
     def _render_pyro_model(self, model):
-        """Helper function for running one sample through the model for plotting."""
-        sample_args, sample_kwargs = self._get_data_subset([0])
+        """Helper function for running two samples through the model for plotting."""
+        sample_args, sample_kwargs = self._get_data_subset([0,1])
         return pyro_render_model(
             model,
             model_args=sample_args,

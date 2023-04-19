@@ -1,0 +1,15 @@
+name: perturbvi-conda
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+    - anndata
+    - scvi-tools>=0.20.1
+    - pytorch
+    - pyro-ppl
+    - mudata
+    - pandas >= 1.5.3
+    # for debug logging (referenced from the issue template)
+    - session-info
+    - pip:
+      - "https://test-files.pythonhosted.org/packages/de/9b/b9aeb1c18b7604bfc3873b0d2314018d99f37921f5f64023114a0a286582/perturbvi-0.0.1-py3-none-any.whl"
