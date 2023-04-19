@@ -60,9 +60,9 @@ class PerturbVIPyroModule(PyroBaseModuleClass):
             self.n_cat_covariates = 0
             self.n_cat_list = []
 
-        self.decoder = Decoder(
-            self.n_cont_covariates, n_output=self.n_vars, n_cat_list=self.n_cat_list
-        )
+        # self.decoder = Decoder(
+        #     self.n_cont_covariates, n_output=self.n_vars, n_cat_list=self.n_cat_list
+        # )
 
         self.n_batches = summary_stats.n_batch
         self.likelihood = likelihood
@@ -87,7 +87,7 @@ class PerturbVIPyroModule(PyroBaseModuleClass):
             pyro.plate("perturbations", self.n_perturbations, dim=-2),
             pyro.plate("batches", self.n_batches, dim=-2),
             pyro.plate("vars", self.n_vars, dim=-1),
-            # pyro.plate("cont_covariates", self.n_cont_covariates, dim=-2),
+            pyro.plate("cont_covariates", self.n_cont_covariates, dim=-2),
         )
 
     def model(self, idx, **tensor_dict):
@@ -97,7 +97,7 @@ class PerturbVIPyroModule(PyroBaseModuleClass):
             perturbation_plate,
             batch_plate,
             var_plate,
-            # cont_cov_plate,
+            cont_cov_plate,
         ) = self.create_plates(idx)
         batch = tensor_dict[REGISTRY_KEYS.BATCH_KEY]
         size_factor = tensor_dict[REGISTRY_KEYS.SIZE_FACTOR_KEY]
@@ -120,13 +120,13 @@ class PerturbVIPyroModule(PyroBaseModuleClass):
                 batch_effect_size = pyro.sample("batch_effect", dist.Normal(0.0, 1.0))
                 batch_effects = batch_effect_size[batch.squeeze(), ...]
 
-            # cov_prior_sigma = 1.0
-            # with cont_cov_plate:
-            #     # n_cont_covariates x n_vars
-            #     cont_cov_effect_size = pyro.sample(
-            #         "cont_cov_effect", dist.Normal(0.0, cov_prior_sigma)
-            #     )
-            #     covariate_effects = cont_covariates @ cont_cov_effect_size
+            cov_prior_sigma = 1.0
+            with cont_cov_plate:
+                # n_cont_covariates x n_vars
+                cont_cov_effect_size = pyro.sample(
+                    "cont_cov_effect", dist.Normal(0.0, cov_prior_sigma)
+                )
+                covariate_effects = cont_covariates @ cont_cov_effect_size
 
             with perturbation_plate:
                 # spike_frac = 1e-4
@@ -153,19 +153,19 @@ class PerturbVIPyroModule(PyroBaseModuleClass):
                 nb_log_mean_gene
                 + size_factor
                 + batch_effects
-                # + covariate_effects
+                + covariate_effects
             )
 
             # add neural network covariate effects
-            if self.n_cat_covariates > 0:
-                cat_covariates = torch.split(
-                    tensor_dict[REGISTRY_KEYS.CAT_COVS_KEY], 1, dim=1
-                )
-                nn_m, nn_v = self.decoder(cont_covariates, *cat_covariates)
-                nb_log_mean_ctrl += nn_m
-                nb_log_disp_ctrl = nn_v.log() + nb_log_disp_gene
-            else:
-                nb_log_disp_ctrl = nb_log_disp_gene.expand(nb_log_mean_ctrl.shape)
+            # if self.n_cat_covariates > 0:
+            #     cat_covariates = torch.split(
+            #         tensor_dict[REGISTRY_KEYS.CAT_COVS_KEY], 1, dim=1
+            #     )
+            #     nn_m, nn_v = self.decoder(cont_covariates, *cat_covariates)
+            #     nb_log_mean_ctrl += nn_m
+            #     nb_log_disp_ctrl = nn_v.log() + nb_log_disp_gene
+            # else:
+            nb_log_disp_ctrl = nb_log_disp_gene.expand(nb_log_mean_ctrl.shape)
 
             # add perturbation effects to per-gene parameters
             nb_log_mean = nb_log_mean_ctrl + perturbations @ perturb_mean_lfc
@@ -225,7 +225,7 @@ class PerturbVIPyroModule(PyroBaseModuleClass):
             perturbation_plate,
             batch_plate,
             var_plate,
-            # cont_cov_plate,
+            cont_cov_plate,
         ) = self.create_plates(idx)
 
         log_var_mean_mu = pyro.param(
@@ -254,15 +254,15 @@ class PerturbVIPyroModule(PyroBaseModuleClass):
             constraint=dist.constraints.positive,
         )
 
-        # cont_cov_effect_mu = pyro.param(
-        #     "cont_cov_effect.mu",
-        #     lambda: torch.zeros((self.n_cont_covariates, self.n_vars)),
-        # )
-        # cont_cov_effect_sigma = pyro.param(
-        #     "cont_cov_effect.sigma",
-        #     lambda: torch.full((self.n_cont_covariates, self.n_vars), init_scale),
-        #     constraint=dist.constraints.positive,
-        # )
+        cont_cov_effect_mu = pyro.param(
+            "cont_cov_effect.mu",
+            lambda: torch.zeros((self.n_cont_covariates, self.n_vars)),
+        )
+        cont_cov_effect_sigma = pyro.param(
+            "cont_cov_effect.sigma",
+            lambda: torch.full((self.n_cont_covariates, self.n_vars), init_scale),
+            constraint=dist.constraints.positive,
+        )
 
         log_var_mean_sigma = pyro.param(
             "log_var_mean.sigma",
@@ -316,11 +316,11 @@ class PerturbVIPyroModule(PyroBaseModuleClass):
                 pyro.sample(
                     "batch_effect", dist.Normal(batch_effect_mu, batch_effect_sigma)
                 )
-            # with cont_cov_plate:
-            #     pyro.sample(
-            #         "cont_cov_effect",
-            #         dist.Normal(cont_cov_effect_mu, cont_cov_effect_sigma),
-            #     )
+            with cont_cov_plate:
+                pyro.sample(
+                    "cont_cov_effect",
+                    dist.Normal(cont_cov_effect_mu, cont_cov_effect_sigma),
+                )
 
             with perturbation_plate:
                 perturb_lfc = pyro.sample(
