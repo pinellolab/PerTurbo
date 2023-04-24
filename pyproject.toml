@@ -3,7 +3,7 @@ build-backend = "hatchling.build"
 requires = ["hatchling"]
 
 [project]
-name = "PerTurbo"
+name = "perturbo"
 version = "0.0.1"
 description = "Estimating perturbation effects on single cell phenotypes using variational inference."
 readme = "README.md"
