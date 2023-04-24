@@ -56,6 +56,7 @@ def mdata(adata: AnnData):
 def test_package_has_version():
     """Check that our package has an associated version number"""
     logging.info("version: " + perturbvi.__version__)
+    assert perturbvi.__version__ is not None
 
 
 def test_model_mdata(mdata: MuData):
