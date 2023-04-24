@@ -1,6 +1,6 @@
 [envs.default]
 dependencies = [
-    "perturbvi[test]",
+    "perturbo[test]",
 ]
 
 [envs.default.scripts]
@@ -8,7 +8,7 @@ test = "pytest {args:tests}"
 
 [envs.dev]
 dependencies = [
-    "perturbvi[test]",
+    "perturbo[test]",
     # For notebooks
     "ipykernel",
     "ipython",

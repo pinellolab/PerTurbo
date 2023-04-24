@@ -16,12 +16,12 @@ from scvi.model.base import (
 from scvi.train import PyroTrainingPlan
 
 from ._constants import REGISTRY_KEYS
-from ._module import PerturbVIPyroModule
+from ._module import PerTurboPyroModule
 
 logger = logging.getLogger(__name__)
 
 
-class PERTURBVI(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
+class PERTURBO(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
     def __init__(
         self,
         mdata: AnnOrMuData,
@@ -51,7 +51,7 @@ class PERTURBVI(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
 
         # self.summary_stats provides information about dimensions and other tensor info
         # likelihood
-        self.module = PerturbVIPyroModule(
+        self.module = PerTurboPyroModule(
             self.summary_stats, likelihood=likelihood, n_cats_per_cov=n_cats_per_cov
         )
 

@@ -1,12 +1,12 @@
-# perturbvi
+# PerTurbo
 
 <!-- [![Tests][badge-tests]][link-tests] -->
 
 <!-- [![Documentation][badge-docs]][link-docs] -->
 
-[badge-tests]: https://img.shields.io/github/actions/workflow/status/pinellolab/perturbvi/test.yaml?branch=main
-[link-tests]: https://github.com/pinellolab/perturbvi/actions/workflows/test.yml
-[badge-docs]: https://img.shields.io/readthedocs/perturbvi
+[badge-tests]: https://img.shields.io/github/actions/workflow/status/pinellolab/perturbo/test.yaml?branch=main
+[link-tests]: https://github.com/pinellolab/perturbo/actions/workflows/test.yml
+[badge-docs]: https://img.shields.io/readthedocs/perturbo
 
 Estimating perturbation effects on single cell phenotypes using variational inference.
 
@@ -27,18 +27,10 @@ Python installed, we recommend installing [Mambaforge](https://github.com/conda-
 Install the latest development version directly from GitHub using pip:
 
 ```bash
-pip install git+https://github.com/pinellolab/perturbvi.git@main
+pip install git+https://github.com/pinellolab/PerTurbo.git@main
 ```
 
-Alternatively, you can clone this repo and install locally.
-
-```bash
-git clone https://github.com/pinellolab/perturbvi.git
-cd perturbvi
-pip install -e .
-```
-
-We are preparing pip and conda packages to be available soon.
+We are preparing a release on PyPI to be available soon.
 
 ## Release notes
 
@@ -54,7 +46,7 @@ If you found a bug, please use the [issue tracker][issue-tracker].
 > t.b.a
 
 [scverse-discourse]: https://discourse.scverse.org/
-[issue-tracker]: https://github.com/pinellolab/perturbvi/issues
-[changelog]: https://perturbvi.readthedocs.io/latest/changelog.html
-[link-docs]: https://perturbvi.readthedocs.io
-[link-api]: https://perturbvi.readthedocs.io/latest/api.html
+[issue-tracker]: https://github.com/pinellolab/PerTurbo/issues
+[changelog]: https://perturbo.readthedocs.io/latest/changelog.html
+[link-docs]: https://perturbo.readthedocs.io
+[link-api]: https://perturbo.readthedocs.io/latest/api.html

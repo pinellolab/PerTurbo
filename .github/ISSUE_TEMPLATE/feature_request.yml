@@ -1,5 +1,5 @@
 name: Feature request
-description: Propose a new feature for perturbvi
+description: Propose a new feature for PerTurbo
 labels: enhancement
 body:
     - type: textarea

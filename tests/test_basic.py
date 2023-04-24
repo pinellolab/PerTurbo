@@ -5,7 +5,7 @@ import pandas as pd
 import pytest
 from mudata import AnnData, MuData
 
-import perturbvi
+import perturbo
 
 rna_key = "rna"
 perturb_key = "grna"
@@ -55,13 +55,13 @@ def mdata(adata: AnnData):
 
 def test_package_has_version():
     """Check that our package has an associated version number"""
-    logging.info("version: " + perturbvi.__version__)
-    assert perturbvi.__version__ is not None
+    logging.info("version: " + perturbo.__version__)
+    assert perturbo.__version__ is not None
 
 
 def test_model_mdata(mdata: MuData):
     """Check that we can register our MuData object with our model and perform training"""
-    perturbvi.PERTURBVI.setup_mudata(
+    perturbo.perturbo.setup_mudata(
         mdata,
         # size_factor_key="lib_size",
         # batch_key="batch_id",
@@ -71,7 +71,7 @@ def test_model_mdata(mdata: MuData):
             "perturbation_layer": perturb_key,
         },
     )
-    model = perturbvi.PERTURBVI(mdata)
+    model = perturbo.PERTURBO(mdata)
     assert model.summary_stats.n_cells == len(mdata)
     assert model.summary_stats.n_vars == len(mdata[rna_key].var)
     assert model.summary_stats.n_perturbations == len(mdata[perturb_key].var)
@@ -87,13 +87,13 @@ def test_model_mdata(mdata: MuData):
 
 def test_model_adata(adata: AnnData):
     """Check that we can register our AnnData object with our model and perform training"""
-    perturbvi.PERTURBVI.setup_anndata(
+    perturbo.perturbo.setup_anndata(
         adata,
         perturb_key,
         categorical_covariates_keys=["batch_id"],
         batch_key="batch_id",
     )
-    model = perturbvi.PERTURBVI(adata)
+    model = perturbo.PERTURBO(adata)
 
     n_cells, n_vars = adata.shape
     assert model.summary_stats.n_cells == n_cells
