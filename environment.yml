@@ -1,4 +1,4 @@
-name: perturbo-conda
+name: perturbvi-conda
 channels:
   - conda-forge
   - defaults
