@@ -24,13 +24,19 @@ You need to have Python 3.8 or newer installed on your system. If you don't have
 Python installed, we recommend installing [Mambaforge](https://github.com/conda-forge/miniforge#mambaforge).
 
 
-Install the latest development version directly from GitHub using pip:
+Once you've (optionally) [set up an environment using conda](https://docs.conda.io/projects/conda/en/stable/user-guide/getting-started.html#managing-conda), install the latest release from PyPI using pip:
 
 ```bash
 pip install git+https://github.com/pinellolab/PerTurbo.git@main
 ```
 
-We are preparing a release on PyPI to be available soon.
+Or install the development version directly from GitHub using pip:
+
+```bash
+pip install git+https://github.com/pinellolab/PerTurbo.git@main
+```
+
+We are also preparing a conda package release, stay tuned.
 
 ## Release notes
 
