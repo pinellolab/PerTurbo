@@ -5,7 +5,7 @@ import pandas as pd
 import pytest
 from mudata import AnnData, MuData
 
-import perturbvi
+import perturbo
 
 rna_key = "rna"
 perturb_key = "grna"
@@ -25,8 +25,10 @@ def adata():
             "batch_id": np.random.choice(["batch_1", "batch_2"], size=(n_cells)),
         }
     )
-    rna_counts = np.random.negative_binomial(100, 0.9, size=(n_cells, n_genes))
-    rna_adata = AnnData(rna_counts, obs=total_rna, dtype=np.float64)
+    rna_counts = np.random.negative_binomial(100, 0.9, size=(n_cells, n_genes)).astype(
+        np.float64
+    )
+    rna_adata = AnnData(rna_counts, obs=total_rna)
 
     # generate fake guide status
     rna_adata.obsm[perturb_key] = np.random.binomial(1, 0.5, size=(n_cells, n_grna))
@@ -45,7 +47,7 @@ def mdata(adata: AnnData):
 
     # generate fake guide status
     perturb_adata = AnnData(
-        np.random.binomial(1, 0.5, size=(n_cells, n_grna)), dtype=np.float64
+        np.random.binomial(1, 0.5, size=(n_cells, n_grna)).astype(np.float64)
     )
     perturb_adata.var_names = "guide" + perturb_adata.var_names
 
@@ -55,12 +57,13 @@ def mdata(adata: AnnData):
 
 def test_package_has_version():
     """Check that our package has an associated version number"""
-    logging.info("version: " + perturbvi.__version__)
+    logging.info("version: " + perturbo.__version__)
+    assert perturbo.__version__ is not None
 
 
 def test_model_mdata(mdata: MuData):
     """Check that we can register our MuData object with our model and perform training"""
-    perturbvi.PERTURBVI.setup_mudata(
+    perturbo.PERTURBO.setup_mudata(
         mdata,
         # size_factor_key="lib_size",
         # batch_key="batch_id",
@@ -70,7 +73,7 @@ def test_model_mdata(mdata: MuData):
             "perturbation_layer": perturb_key,
         },
     )
-    model = perturbvi.PERTURBVI(mdata)
+    model = perturbo.PERTURBO(mdata)
     assert model.summary_stats.n_cells == len(mdata)
     assert model.summary_stats.n_vars == len(mdata[rna_key].var)
     assert model.summary_stats.n_perturbations == len(mdata[perturb_key].var)
@@ -86,13 +89,13 @@ def test_model_mdata(mdata: MuData):
 
 def test_model_adata(adata: AnnData):
     """Check that we can register our AnnData object with our model and perform training"""
-    perturbvi.PERTURBVI.setup_anndata(
+    perturbo.PERTURBO.setup_anndata(
         adata,
         perturb_key,
         categorical_covariates_keys=["batch_id"],
         batch_key="batch_id",
     )
-    model = perturbvi.PERTURBVI(adata)
+    model = perturbo.PERTURBO(adata)
 
     n_cells, n_vars = adata.shape
     assert model.summary_stats.n_cells == n_cells

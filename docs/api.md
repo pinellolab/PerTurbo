@@ -3,8 +3,8 @@
 ## Preprocessing
 
 ```{eval-rst}
-.. module:: perturbvi.pp
-.. currentmodule:: perturbvi
+.. module:: perturbo.pp
+.. currentmodule:: perturbo
 
 .. autosummary::
     :toctree: generated
@@ -15,8 +15,8 @@
 ## Tools
 
 ```{eval-rst}
-.. module:: perturbvi.tl
-.. currentmodule:: perturbvi
+.. module:: perturbo.tl
+.. currentmodule:: perturbo
 
 .. autosummary::
     :toctree: generated
@@ -27,8 +27,8 @@
 ## Plotting
 
 ```{eval-rst}
-.. module:: perturbvi.pl
-.. currentmodule:: perturbvi
+.. module:: perturbo.pl
+.. currentmodule:: perturbo
 
 .. autosummary::
     :toctree: generated

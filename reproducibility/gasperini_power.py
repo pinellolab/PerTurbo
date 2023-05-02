@@ -140,7 +140,7 @@ mdata
 # mdata_subset
 
 
-perturbvi.PERTURBVI.setup_mudata(
+perturbo.perturbo.setup_mudata(
     mdata,
     batch_key="bath_number",
     library_size_key="library_size",
@@ -153,7 +153,7 @@ perturbvi.PERTURBVI.setup_mudata(
     },
 )
 
-model = perturbvi.PERTURBVI(mdata, fit_lib_size=True)
+model = perturbo.PERTURBO(mdata, fit_lib_size=True)
 model.view_anndata_setup()
 
 

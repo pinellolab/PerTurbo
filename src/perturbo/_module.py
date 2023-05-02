@@ -38,7 +38,7 @@ class NegativeBinomialMixture(SCVINegativeBinomialMixture, TorchDistribution):
         self.mu2, self.theta2 = broadcast_all(kwargs["mu2"], kwargs["theta2"])
 
 
-class PerturbVIPyroModule(PyroBaseModuleClass):
+class PerTurboPyroModule(PyroBaseModuleClass):
     def __init__(
         self,
         summary_stats,
@@ -91,7 +91,7 @@ class PerturbVIPyroModule(PyroBaseModuleClass):
         )
 
     def model(self, idx, **tensor_dict):
-        pyro.module("perturbvi", self)
+        pyro.module("perturbo", self)
         (
             cell_plate,
             perturbation_plate,
@@ -219,7 +219,7 @@ class PerturbVIPyroModule(PyroBaseModuleClass):
     # return self._guide(idx, **tensor_dict)
 
     def guide(self, idx, init_scale=0.2, **tensor_dict):
-        pyro.module("perturbvi", self)
+        pyro.module("perturbo", self)
         (
             _,
             perturbation_plate,
