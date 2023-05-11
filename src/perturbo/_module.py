@@ -67,6 +67,10 @@ class PerTurboPyroModule(PyroBaseModuleClass):
         self.n_batches = summary_stats.n_batch
         self.likelihood = likelihood
 
+    # required to override broken method in PyroBaseModuleClass
+    def on_load(self, model):
+        pass
+
     @staticmethod
     def _get_fn_args_from_batch(tensor_dict):
         # tack on size factor after the other continuous covariates
