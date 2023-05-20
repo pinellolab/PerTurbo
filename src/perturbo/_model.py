@@ -2,6 +2,7 @@ import logging
 from typing import Dict, List, Optional, Union
 
 import numpy as np
+import torch
 from mudata import AnnData, MuData
 from pyro import render_model as pyro_render_model
 from scvi._types import AnnOrMuData
@@ -51,8 +52,15 @@ class PERTURBO(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
 
         # self.summary_stats provides information about dimensions and other tensor info
         # likelihood
+        if REGISTRY_KEYS.PERTURB_BY_ELEMENT_KEY in self.adata_manager.data_registry:
+            pert_registry = self.adata_manager.data_registry[REGISTRY_KEYS.PERTURB_BY_ELEMENT_KEY]
+            element_varm = self.adata_manager.adata.mod[pert_registry.mod_key].varm[pert_registry.attr_key]
+            guide_by_element = torch.from_numpy(element_varm.values)
+        else:
+            guide_by_element = torch.eye(self.summary_stats.n_perturbations)
+
         self.module = PerTurboPyroModule(
-            self.summary_stats, likelihood=likelihood, n_cats_per_cov=n_cats_per_cov
+            self.summary_stats, guide_by_element, likelihood=likelihood, n_cats_per_cov=n_cats_per_cov,
         )
 
         self._model_summary_string = (
