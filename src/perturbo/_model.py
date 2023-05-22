@@ -55,7 +55,7 @@ class PERTURBO(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
         if REGISTRY_KEYS.PERTURB_BY_ELEMENT_KEY in self.adata_manager.data_registry:
             pert_registry = self.adata_manager.data_registry[REGISTRY_KEYS.PERTURB_BY_ELEMENT_KEY]
             element_varm = self.adata_manager.adata.mod[pert_registry.mod_key].varm[pert_registry.attr_key]
-            guide_by_element = torch.from_numpy(element_varm.values)
+            guide_by_element = torch.tensor(element_varm.values)
         else:
             guide_by_element = torch.eye(self.summary_stats.n_perturbations)
 
