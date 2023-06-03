@@ -1,6 +1,6 @@
 [envs.default]
 dependencies = [
-    "perturbvi[test]",
+    "perturbo[test]",
 ]
 
 [envs.default.scripts]
@@ -8,10 +8,16 @@ test = "pytest {args:tests}"
 
 [envs.dev]
 dependencies = [
-    "perturbvi[test]",
+    "perturbo[test]",
     # For notebooks
     "ipykernel",
     "ipython",
+    "seaborn",
+    "scanpy",
+    "matplotlib",
+    "graphviz",
+    # For reading R data files
+    "anndata2ri",
     # For VSCode
     "black",
     "ruff"

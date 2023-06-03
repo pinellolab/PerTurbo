@@ -1,16 +1,16 @@
 {
   "template": "https://github.com/scverse/cookiecutter-scverse",
-  "commit": "57f6267716826dad73baba46dc3c00fe7262c459",
-  "checkout": "v0.1.4",
+  "commit": "6a4338030e0c83a9034d607ed66abeff83e18840",
+  "checkout": null,
   "context": {
     "cookiecutter": {
-      "project_name": "perturbvi",
-      "package_name": "perturbvi",
-      "project_description": "Estimating perturbation effects on single cell phenotypes using variational inference.",
+      "project_name": "PerTurbo",
+      "package_name": "perturbo",
+      "project_description": "Fast inference of CRISPR perturbation effects on single cell phenotypes.",
       "author_full_name": "Logan Blaine",
       "author_email": "loganblaine@g.harvard.edu",
       "github_user": "logan-blaine",
-      "project_repo": "https://github.com/logan-blaine/perturbvi",
+      "project_repo": "https://github.com/pinellolab/PerTurbo",
       "license": "MIT License",
       "_copy_without_render": [
         ".github/workflows/**.yaml",

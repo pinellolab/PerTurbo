@@ -1,7 +1,8 @@
 import logging
-from typing import Dict, Optional, Union
+from typing import Dict, List, Optional, Union
 
 import numpy as np
+import torch
 from mudata import AnnData, MuData
 from pyro import render_model as pyro_render_model
 from scvi._types import AnnOrMuData
@@ -16,17 +17,16 @@ from scvi.model.base import (
 from scvi.train import PyroTrainingPlan
 
 from ._constants import REGISTRY_KEYS
-from ._module import PerturbVIPyroModule
+from ._module import PerTurboPyroModule
 
 logger = logging.getLogger(__name__)
 
 
-class PERTURBVI(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
-
+class PERTURBO(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
     def __init__(
         self,
         mdata: AnnOrMuData,
-        likelihood="nb",
+        likelihood: Optional[str] = "lnnb",
         **model_kwargs,
     ):
         super().__init__(mdata)
@@ -43,10 +43,24 @@ class PERTURBVI(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
         if "n_extra_continuous_covs" in self.summary_stats:
             self.data_and_attrs.update({REGISTRY_KEYS.CONT_COVS_KEY: np.float32})
 
+        n_cats_per_cov = None
+        if "n_extra_categorical_covs" in self.summary_stats:
+            self.data_and_attrs.update({REGISTRY_KEYS.CAT_COVS_KEY: np.float32})
+            n_cats_per_cov = self.adata_manager.get_state_registry(
+                REGISTRY_KEYS.CAT_COVS_KEY
+            ).n_cats_per_key
+
         # self.summary_stats provides information about dimensions and other tensor info
-        self.module = PerturbVIPyroModule(
-            self.summary_stats,
-            likelihood=likelihood,
+        # likelihood
+        if REGISTRY_KEYS.PERTURB_BY_ELEMENT_KEY in self.adata_manager.data_registry:
+            pert_registry = self.adata_manager.data_registry[REGISTRY_KEYS.PERTURB_BY_ELEMENT_KEY]
+            element_varm = self.adata_manager.adata.mod[pert_registry.mod_key].varm[pert_registry.attr_key]
+            guide_by_element = torch.tensor(element_varm.values)
+        else:
+            guide_by_element = torch.eye(self.summary_stats.n_perturbations)
+
+        self.module = PerTurboPyroModule(
+            self.summary_stats, guide_by_element, likelihood=likelihood, n_cats_per_cov=n_cats_per_cov,
         )
 
         self._model_summary_string = (
@@ -67,6 +81,7 @@ class PERTURBVI(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
         batch_key: Optional[str] = None,
         size_factor_key: Optional[str] = None,
         continuous_covariates_keys: Optional[str] = None,
+        categorical_covariates_keys: Optional[str] = None,
         library_size_key: Optional[str] = None,
         **kwargs,
     ):
@@ -135,6 +150,13 @@ class PERTURBVI(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
                 ),
             )
 
+        if categorical_covariates_keys is not None:
+            anndata_fields += (
+                fields.CategoricalJointObsField(
+                    REGISTRY_KEYS.CAT_COVS_KEY, categorical_covariates_keys
+                ),
+            )
+
         adata_manager = AnnDataManager(
             fields=anndata_fields,
             setup_method_args=setup_method_args,
@@ -154,6 +176,7 @@ class PERTURBVI(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
         library_size_key: Optional[str] = None,
         size_factor_key: Optional[str] = None,
         continuous_covariates_keys: Optional[str] = None,
+        categorical_covariates_keys: Optional[str] = None,
         modalities: Optional[Dict[str, str]] = None,
         **kwargs,
     ):
@@ -383,17 +406,18 @@ class PERTURBVI(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
         )
         return runner()
 
-    def _render_pyro_model(self, model):
-        """Helper function for running one sample through the model for plotting."""
+    def _get_data_subset(self, indices: Optional[List] = None):
         loader = AnnDataLoader(
             adata_manager=self.adata_manager,
-            indices=[1],
-            batch_size=1,
+            indices=indices,
+            batch_size=len(indices) if indices is not None else len(self.adata),
             data_and_attributes=self.data_and_attrs,
         )
-        sample_args, sample_kwargs = self.module._get_fn_args_from_batch(
-            next(iter(loader))
-        )
+        return self.module._get_fn_args_from_batch(next(iter(loader)))
+
+    def _render_pyro_model(self, model):
+        """Helper function for running two samples through the model for plotting."""
+        sample_args, sample_kwargs = self._get_data_subset([0,1])
         return pyro_render_model(
             model,
             model_args=sample_args,
@@ -409,3 +433,35 @@ class PERTURBVI(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
     def render_guide(self):
         """Plot the graphical model structure of the guide/variational distribution (requires graphviz)."""
         return self._render_pyro_model(self.module.guide)
+
+    # def get_posterior_samples(self, num_samples=500):
+    #     MAX_CELLS = 100
+    #     n_cells = min(len(self.adata), MAX_CELLS)
+    #     sample_args, sample_kwargs = self._get_data_subset(list(range(n_cells)))
+    #     sample_kwargs[REGISTRY_KEYS.X_KEY] = None
+    #     # print(sample_kwargs)
+    #     predictive_model = Predictive(
+    #         self.module.model,
+    #         guide=self.module.guide,
+    #         num_samples=num_samples,
+    #     )
+    #     return predictive_model(*sample_args, **sample_kwargs)['obs'].detach().cpu().numpy().ravel()
+
+    def get_posterior_samples(self, num_samples=1):
+        # MAX_CELLS = 100
+        # n_cells = min(len(self.adata), MAX_CELLS)
+        sample_args, sample_kwargs = self._get_data_subset()
+        sample_kwargs[REGISTRY_KEYS.X_KEY] = None
+        return self._get_posterior_samples(
+            sample_args, kwargs=sample_kwargs, num_samples=num_samples
+        )
+
+    def get_posterior_conditional_samples(self, var_idx, num_samples=1):
+        # MAX_CELLS = 100
+        # n_cells = min(len(self.adata), MAX_CELLS)
+        sample_args, sample_kwargs = self._get_data_subset()
+        sample_kwargs[REGISTRY_KEYS.PERTURBATION_KEY][:, var_idx] = 1.0
+        sample_kwargs[REGISTRY_KEYS.X_KEY] = None
+        return self._get_posterior_samples(
+            sample_args, kwargs=sample_kwargs, num_samples=num_samples
+        )

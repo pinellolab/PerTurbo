@@ -19,7 +19,7 @@ cruft create https://github.com/scverse/cookiecutter-scverse
 and you should have
 
 ```
-cd perturbvi
+cd perturbo
 ```
 
 into the new project directory. Now that you have created a new repository locally, the first step is to push it to github. To do this, you'd have to create a **new repository** on github.
@@ -28,13 +28,13 @@ Since `cruft` already populated the local repository of your project with all th
 If you are familiar with git and knows how to handle git conflicts, you can go ahead with your preferred choice.
 
 :::{note}
-If you are looking at this document in the [cookiecutter-scverse-instance][] repository documentation, throughout this document the name of the project is `cookiecutter-scverse-instance`. Otherwise it should be replaced by your new project name: `perturbvi`.
+If you are looking at this document in the [cookiecutter-scverse-instance][] repository documentation, throughout this document the name of the project is `cookiecutter-scverse-instance`. Otherwise it should be replaced by your new project name: `perturbo`.
 :::
 
-Now that your new project repository has been created on github at `https://github.com/logan-blaine/perturbvi` you can push your first commit to github.
+Now that your new project repository has been created on github at `https://github.com/logan-blaine/perturbo` you can push your first commit to github.
 To do this, simply follow the instructions on your github repository page or a more verbose walkthrough here:
 
-Assuming you are in `/your/path/to/perturbvi`. Add all files and commit.
+Assuming you are in `/your/path/to/perturbo`. Add all files and commit.
 
 ```bash
 # stage all files of your new repo
@@ -59,14 +59,14 @@ Now that all the files of the newly created project have been committed, go ahea
 
 ```bash
 # update the `origin` of your local repo with the remote github link
-git remote add origin https://github.com/logan-blaine/perturbvi.git
+git remote add origin https://github.com/logan-blaine/perturbo.git
 # rename the default branch to main
 git branch -M main
 # push all your files to remote
 git push -u origin main
 ```
 
-Your project should be now available at `https://github.com/logan-blaine/perturbvi`. While the repository at this point can be directly used, there are few remaining steps that needs to be done in order to achieve full functionality.
+Your project should be now available at `https://github.com/logan-blaine/perturbo`. While the repository at this point can be directly used, there are few remaining steps that needs to be done in order to achieve full functionality.
 
 ### Coverage tests with _Codecov_
 
@@ -90,7 +90,7 @@ While [codecov docs][] has a very extensive documentation on how to get started,
 To set it up, simply go to the [codecov app][] page and follow the instructions to activate it for your repository.
 Once the activation is completed, go back to the `Actions` tab and re-run the failing workflows.
 
-The workflows should now succeed and you will be able to find the code coverage at this link: `https://app.codecov.io/gh/logan-blaine/perturbvi`. You might have to wait couple of minutes and the coverage of this repository should be ~60%.
+The workflows should now succeed and you will be able to find the code coverage at this link: `https://app.codecov.io/gh/logan-blaine/perturbo`. You might have to wait couple of minutes and the coverage of this repository should be ~60%.
 
 If your repository is private, you will have to specify an additional token in the repository secrets. In brief, you need to:
 
@@ -124,6 +124,8 @@ On the RTD dashboard choose "Import a Project" and follow the instructions to ad
 -   If you find the RTD builds are failing, you can disable the `fail_on_warning` option in `.readthedocs.yaml`.
 
 If your project is private, there are ways to enable docs rendering on [readthedocs.org][] but it is more cumbersome and requires a different subscription for read the docs. See a guide [here](https://docs.readthedocs.io/en/stable/guides/importing-private-repositories.html).
+
+(pre-commit)=
 
 ### Pre-commit checks
 
@@ -272,10 +274,11 @@ there may also be good reasons to choose a different approach, e.g. using an obj
 
 [scanpy-api]: https://scanpy.readthedocs.io/en/stable/usage-principles.html
 
+(vcs-based-versioning)=
+
 ### Using VCS-based versioning
 
-By default, the template uses hard-coded version numbers that are set in `pyproject.toml` and [managed with
-bump2version](contributing.md#publishing-a-release). If you prefer to have your project automatically infer version numbers from git
+By default, the template uses hard-coded version numbers that are set in `pyproject.toml`. If you prefer to have your project automatically infer version numbers from git
 tags, it is straightforward to switch to vcs-based versioning using [hatch-vcs][].
 
 In `pyproject.toml` add the following changes, and you are good to go!
@@ -291,7 +294,7 @@ In `pyproject.toml` add the following changes, and you are good to go!
 
 
  [project]
- name = "perturbvi"
+ name = "perturbo"
 -version = "0.3.1dev"
 +dynamic = ["version"]
 
@@ -300,7 +303,7 @@ In `pyproject.toml` add the following changes, and you are good to go!
 +source = "vcs"
 +
  [tool.coverage.run]
- source = ["perturbvi"]
+ source = ["perturbo"]
  omit = [
 ```
 
