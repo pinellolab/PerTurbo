@@ -2,12 +2,9 @@
 
 # 🏎️ PerTurbo: Fast analysis of single-cell perturbation studies
 
-**PerTurbo** estimates the effects of perturbations (e.g. CRISPRi, CRISPR-Cas9, ORF overexpression) on single cell phenotypes using variational inference.
+**PerTurbo** estimates the effects of CRISPR perturbations on single cell phenotypes using variational inference.
 
-Support for several types of experimental designs is planned:
-- [x]  CRISPRi + RNA-seq (Perturb-Seq)
-- [ ] CRISPR-Cas9 + Imaging (Optical Pooled Screens)
-
+Currently, the focus is on CRISPRi + RNA-seq (i.e. CROP-seq, Perturb-Seq) but we're planning to support other assays in the future!
 
 <!-- [![Documentation][badge-docs]][link-docs] -->
 
@@ -28,11 +25,15 @@ Support for several types of experimental designs is planned:
 You need to have Python 3.9 or newer installed on your system. If you don't have
 Python installed, we recommend installing [Mambaforge](https://github.com/conda-forge/miniforge#mambaforge).
 
-PyPI and conda releases are still in the works, but in the meantime you can install the development version directly from GitHub using pip:
+Official PyPI and conda releases are still in the works, but in the meantime you can install the developer version with one of the following options:
 
-```bash
-pip install git+https://github.com/pinellolab/PerTurbo.git@main
-```
+1. **pip (easiest, recommended for end users)**
+The simplest way to install PerTurbo is using pip (ideally inside an isolated conda environment or virtualenv). Simply clone the git repo to your machine, enter the folder using your terminal, and then use `pip install -e .` to install the project and its dependencies.
+
+2. **Hatch (slightly more complex, recommended for developers)**
+Hatch is a project/dependency managment tool which can create project-specific virtual environments, similar to Poetry or pip+virtualenv. First, install [Hatch](https://hatch.pypa.io/).  You may want to further configure where Hatch installs virtual environments, [see documentation](https://hatch.pypa.io/latest/config/hatch/#environments).
+Clone this git repo to your machine, enter the directory, and then run `hatch env create dev.`
+This will create a Hatch virtual environment in your configured directory with all the necessary project dependencies, plus Jupyter and some other development essentials for running the test notebooks in this repo.
 
 ## Release notes
 
