@@ -294,22 +294,6 @@ class PerTurboPyroModule(PyroBaseModuleClass):
             constraint=dist.constraints.positive,
         )
 
-        perturb_mean_lfc_mu = pyro.param(
-            "perturb_mean_lfc.mu",
-            lambda: torch.zeros((self.n_perturbations, self.n_vars), device=idx.device),
-        )
-        perturb_disp_lfc_mu = pyro.param(
-            "perturb_disp_lfc.mu",
-            lambda: torch.zeros((self.n_perturbations, self.n_vars), device=idx.device),
-        )
-        perturb_lfc_mu = torch.stack((perturb_mean_lfc_mu, perturb_disp_lfc_mu), dim=-1)
-
-        perturb_lfc_scale_tril = pyro.param(
-            "perturb_lfc.scale_tril",
-            lambda: torch.eye(2, device=idx.device).repeat((self.n_perturbations, self.n_vars, 1, 1))
-            * init_scale,
-            constraint=dist.constraints.lower_cholesky,
-        )
 
         with var_plate:
             if self.likelihood == "lnnb":
@@ -372,46 +356,58 @@ class PerTurboPyroModule(PyroBaseModuleClass):
                 )
 
             with perturbation_plate:
-                # element_mean_lfc_mu = pyro.param(
-                #     "element_mean_lfc_mu",
-                #     lambda: torch.zeros((self.n_elements, self.n_vars)),
-                # )
-                # element_mean_lfc_sigma = pyro.param(
-                #     "element_mean_lfc_sigma",
-                #     lambda: torch.full((self.n_elements, self.n_vars), init_scale),
-                #     constraint=dist.constraints.positive,
-                # )
-
-                # pyro.sample(
-                #     "element_mean_lfc",
-                #     dist.Normal(element_mean_lfc_mu, element_mean_lfc_sigma),
-                # )
-
-                # element_disp_lfc_mu = pyro.param(
-                #     "element_disp_lfc_mu",
-                #     lambda: torch.zeros((self.n_elements, self.n_vars)),
-                # )
-                # element_disp_lfc_sigma = pyro.param(
-                #     "element_disp_lfc_sigma",
-                #     lambda: torch.full((self.n_elements, self.n_vars), init_scale),
-                #     constraint=dist.constraints.positive,
-                # )
-                # pyro.sample(
-                #     "element_disp_lfc",
-                #     dist.Normal(element_disp_lfc_mu, element_disp_lfc_sigma),
-                # )
-
-                perturb_lfc = pyro.sample(
-                    "perturb_lfc",
-                    dist.MultivariateNormal(
-                        perturb_lfc_mu,
-                        scale_tril=perturb_lfc_scale_tril,
-                    ),
-                    infer={"is_auxiliary": True},
+                perturb_mean_lfc_mu = pyro.param(
+                    "perturb_mean_lfc.mu",
+                    lambda: torch.zeros((self.n_perturbations, self.n_vars), device=idx.device),
                 )
 
-                pyro.sample("perturb_mean_lfc", dist.Delta(perturb_lfc[..., 0]))
-                pyro.sample("perturb_disp_lfc", dist.Delta(perturb_lfc[..., 1]))
+                perturb_mean_lfc_sigma = pyro.param(
+                    "perturb_mean_lfc.sigma",
+                    lambda: torch.full((self.n_elements, self.n_vars), init_scale, device=idx.device),
+                    constraint=dist.constraints.positive,
+                )
+
+                pyro.sample(
+                    "perturb_mean_lfc",
+                    dist.Normal(perturb_mean_lfc_mu, perturb_mean_lfc_sigma),
+                )
+
+                perturb_disp_lfc_mu = pyro.param(
+                    "perturb_disp_lfc.mu",
+                    lambda: torch.zeros((self.n_perturbations, self.n_vars), device=idx.device),
+                )
+
+                perturb_disp_lfc_sigma = pyro.param(
+                    "perturb_disp_lfc.sigma",
+                    lambda: torch.full((self.n_elements, self.n_vars), init_scale, device=idx.device),
+                    constraint=dist.constraints.positive,
+                )
+
+                pyro.sample(
+                    "perturb_disp_lfc",
+                    dist.Normal(perturb_disp_lfc_mu, perturb_disp_lfc_sigma),
+                )
+
+                # perturb_lfc_mu = torch.stack((perturb_mean_lfc_mu, perturb_disp_lfc_mu), dim=-1)
+
+                # perturb_lfc_scale_tril = pyro.param(
+                #     "perturb_lfc.scale_tril",
+                #     lambda: torch.eye(2, device=idx.device).repeat((self.n_perturbations, self.n_vars, 1, 1))
+                #     * init_scale,
+                #     constraint=dist.constraints.lower_cholesky,
+                # )
+
+                # perturb_lfc = pyro.sample(
+                #     "perturb_lfc",
+                #     dist.MultivariateNormal(
+                #         perturb_lfc_mu,
+                #         scale_tril=perturb_lfc_scale_tril,
+                #     ),
+                #     infer={"is_auxiliary": True},
+                # )
+
+                # pyro.sample("perturb_mean_lfc", dist.Delta(perturb_lfc[..., 0]))
+                # pyro.sample("perturb_disp_lfc", dist.Delta(perturb_lfc[..., 1]))
 
     @staticmethod
     def get_perturbation_effects():
