@@ -355,7 +355,7 @@ class PerTurboPyroModule(PyroBaseModuleClass):
                 )
 
             with perturbation_plate:
-                guide_by_element = self.guide_by_element.to(device=idx.device)
+                guide_by_element = self.guide_by_element.to(device=log_var_mean_mu.device)
 
                 perturb_mean_lfc_mu = pyro.param(
                     "perturb_mean_lfc.mu",
