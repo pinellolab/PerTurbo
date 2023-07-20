@@ -9,6 +9,7 @@ import perturbo
 
 rna_key = "rna"
 perturb_key = "grna"
+element_key = "element"
 
 
 @pytest.fixture
@@ -32,6 +33,7 @@ def adata():
 
     # generate fake guide status
     rna_adata.obsm[perturb_key] = np.random.binomial(1, 0.5, size=(n_cells, n_grna))
+    # generate identity guide/element pairing
 
     return rna_adata
 
@@ -50,6 +52,7 @@ def mdata(adata: AnnData):
         np.random.binomial(1, 0.5, size=(n_cells, n_grna)).astype(np.float64)
     )
     perturb_adata.var_names = "guide" + perturb_adata.var_names
+    perturb_adata.varm[element_key] = np.eye(n_grna)
 
     # combine into MuData
     return MuData({rna_key: rna_adata, perturb_key: perturb_adata})
@@ -68,6 +71,7 @@ def test_model_mdata(mdata: MuData, tmp_path):
         # size_factor_key="lib_size",
         # batch_key="batch_id",
         categorical_covariates_keys=["batch_id"],
+        perturb_by_element_key=element_key,
         modalities={
             "rna_layer": rna_key,
             "perturbation_layer": perturb_key,
@@ -79,6 +83,7 @@ def test_model_mdata(mdata: MuData, tmp_path):
     assert model.summary_stats.n_perturbations == len(mdata[perturb_key].var)
 
     model.train(max_epochs=10, lr=0.1)
+    model.train(max_epochs=10, lr=0.1, batch_size=None)
     samples = model.get_posterior_samples()
     assert samples["obs"].shape[-2:] == (
         model.summary_stats.n_cells,
