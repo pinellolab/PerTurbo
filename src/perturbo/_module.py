@@ -158,15 +158,14 @@ class PerTurboPyroModule(PyroBaseModuleClass):
                 # perturb_disp_lfc = pyro.sample(
                 #     "perturb_disp_lfc", dist.Cauchy(0.0, 0.1)
                 # )
-                if self.guide_by_element.device != idx.device:
-                    self.guide_by_element.to(device=idx.device)
+                guide_by_element = self.guide_by_element.to(device=idx.device)
                 perturb_mean_lfc = pyro.sample(
                     "perturb_mean_lfc",
-                    dist.Normal(self.guide_by_element @ element_mean_lfc, 0.05),
+                    dist.Normal(guide_by_element @ element_mean_lfc, 0.05),
                 )
                 perturb_disp_lfc = pyro.sample(
                     "perturb_disp_lfc",
-                    dist.Normal(self.guide_by_element @ element_disp_lfc, 0.05),
+                    dist.Normal(guide_by_element @ element_disp_lfc, 0.05),
                 )
 
             expr_log_mean_prior_scale=torch.tensor(3.0, device=idx.device)
