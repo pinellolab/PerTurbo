@@ -4,6 +4,7 @@ from typing import Dict, List, Optional, Union
 import numpy as np
 import torch
 from mudata import AnnData, MuData
+from pandas import DataFrame
 from pyro import render_model as pyro_render_model
 from scvi._types import AnnOrMuData
 from scvi.data import AnnDataManager, fields
@@ -15,6 +16,7 @@ from scvi.model.base import (
     PyroSviTrainMixin,
 )
 from scvi.train import PyroTrainingPlan
+from scvi.utils._docstrings import devices_dsp
 
 from ._constants import REGISTRY_KEYS
 from ._module import PerTurboPyroModule
@@ -55,8 +57,12 @@ class PERTURBO(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
         if REGISTRY_KEYS.PERTURB_BY_ELEMENT_KEY in self.adata_manager.data_registry:
             pert_registry = self.adata_manager.data_registry[REGISTRY_KEYS.PERTURB_BY_ELEMENT_KEY]
             element_varm = self.adata_manager.adata.mod[pert_registry.mod_key].varm[pert_registry.attr_key]
-            guide_by_element = torch.tensor(element_varm.values)
+            if isinstance(element_varm, DataFrame):
+                guide_by_element = torch.tensor(element_varm.values)
+            else:
+                guide_by_element = torch.tensor(element_varm, dtype=torch.float32)
         else:
+            # assign each guide to a unique "element"
             guide_by_element = torch.eye(self.summary_stats.n_perturbations)
 
         self.module = PerTurboPyroModule(
@@ -308,12 +314,15 @@ class PERTURBO(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
         adata_manager.register_fields(mdata, **kwargs)
         cls.register_manager(adata_manager)
 
+    @devices_dsp.dedent
     def train(
         self,
-        max_epochs: int,
-        use_gpu: Optional[Union[str, int, bool]] = None,
+        max_epochs: Optional[int] = None,
+        accelerator: str = "cpu",
+        device: Union[int, str] = "auto",
         train_size: float = 1.0,
         validation_size: Optional[float] = None,
+        shuffle_set_split: bool = False,
         batch_size: int = 128,
         early_stopping: bool = False,
         lr: Optional[float] = None,
@@ -322,21 +331,25 @@ class PERTURBO(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
         data_splitter_kwargs: Optional[dict] = None,
         **trainer_kwargs,
     ):
-        """Train the model. Modified from scVI scBASSET implementation.
+        """
+        Train the model.
 
         Parameters
         ----------
         max_epochs
             Number of passes through the dataset. If `None`, defaults to
             `np.min([round((20000 / n_cells) * 400), 400])`
-        use_gpu
-            Use default GPU if available (if None or True), or index of GPU to use (if int),
-            or name of GPU (if str, e.g., `'cuda:0'`), or use CPU (if False).
+        %(param_use_gpu)s
+        %(param_accelerator)s
+        %(param_device)s
         train_size
             Size of training set in the range [0.0, 1.0].
         validation_size
             Size of the test set. If `None`, defaults to 1 - `train_size`. If
             `train_size + validation_size < 1`, the remaining cells belong to a test set.
+        shuffle_set_split
+            Whether to shuffle indices before splitting. If `False`, the val, train, and test set are split in the
+            sequential order of the data according to `validation_size` and `train_size` percentages.
         batch_size
             Minibatch size to use during training. If `None`, no minibatching occurs and all
             data is copied to device (e.g., GPU).
@@ -350,9 +363,6 @@ class PERTURBO(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
             Training plan :class:`~scvi.train.PyroTrainingPlan`.
         plan_kwargs
             Keyword args for :class:`~scvi.train.PyroTrainingPlan`. Keyword arguments passed to
-            `train()` will overwrite values present in `plan_kwargs`, when appropriate.
-        data_splitter_kwargs
-            Keyword args for :class:`~scvi.dataloaders.DataSplitter`. Keyword arguments passed to
             `train()` will overwrite values present in `plan_kwargs`, when appropriate.
         **trainer_kwargs
             Other keyword args for :class:`~scvi.train.Trainer`.
@@ -372,8 +382,8 @@ class PERTURBO(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
                 self.adata_manager,
                 train_size=train_size,
                 validation_size=validation_size,
-                batch_size=batch_size,
-                use_gpu=use_gpu,
+                accelerator=accelerator,
+                device=device,
                 **data_splitter_kwargs,
             )
         else:
@@ -381,10 +391,11 @@ class PERTURBO(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
                 self.adata_manager,
                 train_size=train_size,
                 validation_size=validation_size,
+                shuffle_set_split=shuffle_set_split,
                 batch_size=batch_size,
-                use_gpu=use_gpu,
                 **data_splitter_kwargs,
             )
+
         training_plan = self._training_plan_cls(self.module, **plan_kwargs)
 
         es = "early_stopping"
@@ -401,7 +412,8 @@ class PERTURBO(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
             training_plan=training_plan,
             data_splitter=data_splitter,
             max_epochs=max_epochs,
-            use_gpu=use_gpu,
+            accelerator=accelerator,
+            devices=device,
             **trainer_kwargs,
         )
         return runner()
