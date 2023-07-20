@@ -111,6 +111,10 @@ class PerTurboPyroModule(PyroBaseModuleClass):
         perturbations = tensor_dict[REGISTRY_KEYS.PERTURBATION_KEY]
         cont_covariates = tensor_dict[REGISTRY_KEYS.CONT_COVS_KEY]
         # log_var_mean_global = pyro.sample("log_var_mean_global", dist.Normal(0.0, 4.0))
+        expr_log_mean_prior_scale=torch.tensor(3.0, device=idx.device)
+        log_pooling = pyro.sample("log_pooling", dist.Normal(0.0, expr_log_mean_prior_scale))
+        # Estimate strength of gRNA effect sharing
+        expr_log_disp_prior_scale=torch.tensor(2.0, device=idx.device)
 
         with var_plate:
             if self.likelihood == "lnnb":
@@ -168,9 +172,7 @@ class PerTurboPyroModule(PyroBaseModuleClass):
                     dist.Normal(guide_by_element @ element_disp_lfc, 0.05),
                 )
 
-            expr_log_mean_prior_scale=torch.tensor(3.0, device=idx.device)
-            expr_log_disp_prior_scale=torch.tensor(2.0, device=idx.device)
-            nb_log_mean_gene = pyro.sample("log_var_mean", dist.Normal(0.0, expr_log_mean_prior_scale))
+            nb_log_mean_gene = pyro.sample("log_var_mean", dist.Normal(0.0, log_pooling.exp()))
             nb_log_disp_gene = pyro.sample("log_var_dispersion", dist.Normal(0.0, expr_log_disp_prior_scale))
 
             nb_log_mean_ctrl = (
@@ -253,6 +255,11 @@ class PerTurboPyroModule(PyroBaseModuleClass):
         log_var_disp_mu = pyro.param(
             "log_var_disp.mu", lambda: torch.zeros((self.n_vars,), device=idx.device)
         )
+        log_pooling_mu = pyro.param(
+            "log_pooling.mu", lambda: torch.tensor([0.], device=idx.device)
+        )
+
+        pyro.sample("log_pooling", dist.Delta(log_pooling_mu))
         # if self.likelihood == "nb_mix":
 
         #     mixture_logits_mu = pyro.param(
