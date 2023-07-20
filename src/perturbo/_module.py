@@ -158,6 +158,8 @@ class PerTurboPyroModule(PyroBaseModuleClass):
                 # perturb_disp_lfc = pyro.sample(
                 #     "perturb_disp_lfc", dist.Cauchy(0.0, 0.1)
                 # )
+                if self.guide_by_element.device != idx.device:
+                    self.guide_by_element.to(device=idx.device)
                 perturb_mean_lfc = pyro.sample(
                     "perturb_mean_lfc",
                     dist.Normal(self.guide_by_element @ element_mean_lfc, 0.05),
