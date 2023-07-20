@@ -336,7 +336,7 @@ class PerTurboPyroModule(PyroBaseModuleClass):
                     constraint=dist.constraints.positive,
                 )
 
-                pyro.sample(
+                element_mean_lfc = pyro.sample(
                     "element_mean_lfc",
                     dist.Normal(element_mean_lfc_mu, element_mean_lfc_sigma),
                 )
@@ -350,12 +350,14 @@ class PerTurboPyroModule(PyroBaseModuleClass):
                     lambda: torch.full((self.n_elements, self.n_vars), init_scale, device=idx.device),
                     constraint=dist.constraints.positive,
                 )
-                pyro.sample(
+                element_disp_lfc = pyro.sample(
                     "element_disp_lfc",
                     dist.Normal(element_disp_lfc_mu, element_disp_lfc_sigma),
                 )
 
             with perturbation_plate:
+                guide_by_element = self.guide_by_element.to(device=idx.device)
+
                 perturb_mean_lfc_mu = pyro.param(
                     "perturb_mean_lfc.mu",
                     lambda: torch.zeros((self.n_perturbations, self.n_vars), device=idx.device),
@@ -369,7 +371,7 @@ class PerTurboPyroModule(PyroBaseModuleClass):
 
                 pyro.sample(
                     "perturb_mean_lfc",
-                    dist.Normal(perturb_mean_lfc_mu, perturb_mean_lfc_sigma),
+                    dist.Normal(perturb_mean_lfc_mu + guide_by_element @ element_mean_lfc, perturb_mean_lfc_sigma),
                 )
 
                 perturb_disp_lfc_mu = pyro.param(
@@ -385,7 +387,7 @@ class PerTurboPyroModule(PyroBaseModuleClass):
 
                 pyro.sample(
                     "perturb_disp_lfc",
-                    dist.Normal(perturb_disp_lfc_mu, perturb_disp_lfc_sigma),
+                    dist.Normal(perturb_disp_lfc_mu + guide_by_element @ element_disp_lfc, perturb_disp_lfc_sigma),
                 )
 
                 # perturb_lfc_mu = torch.stack((perturb_mean_lfc_mu, perturb_disp_lfc_mu), dim=-1)
