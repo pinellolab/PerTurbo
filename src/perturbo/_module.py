@@ -7,7 +7,6 @@ from pyro.distributions.torch_distribution import TorchDistribution
 from scvi.distributions import NegativeBinomial as SCVINegativeBinomial
 from scvi.distributions import NegativeBinomialMixture as SCVINegativeBinomialMixture
 from scvi.module.base import PyroBaseModuleClass
-from scvi.nn import Decoder
 from torch.distributions.utils import broadcast_all
 
 from ._constants import REGISTRY_KEYS
@@ -65,10 +64,6 @@ class PerTurboPyroModule(PyroBaseModuleClass):
         else:
             self.n_cat_covariates = 0
             self.n_cat_list = []
-
-        # self.decoder = Decoder(
-        #     self.n_cont_covariates, n_output=self.n_vars, n_cat_list=self.n_cat_list
-        # )
 
         self.n_batches = summary_stats.n_batch
         self.likelihood = likelihood
