@@ -375,7 +375,7 @@ class PERTURBO(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
             data_splitter_kwargs = {}
         if "data_and_attributes" not in data_splitter_kwargs:
             data_splitter_kwargs["data_and_attributes"] = self.data_and_attrs
-        
+
         if batch_size is None:
             # use data splitter which moves data to GPU once
             data_splitter = DeviceBackedDataSplitter(
@@ -384,7 +384,7 @@ class PERTURBO(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
                 validation_size=validation_size,
                 accelerator=accelerator,
                 device=device,
-                **data_splitter_kwargs
+                **data_splitter_kwargs,
             )
         else:
             data_splitter = self._data_splitter_cls(
