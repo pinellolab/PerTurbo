@@ -4,6 +4,7 @@ import numpy as np
 import pandas as pd
 import pytest
 from mudata import AnnData, MuData
+import pyro
 
 import perturbo
 
@@ -42,6 +43,7 @@ def adata():
 def mdata(adata: AnnData):
     """Create an example MuData object representing a single cell perturbation screen"""
     n_grna = 5
+    n_elements = 3
 
     # generate fake transcript counts
     rna_adata = adata
@@ -52,7 +54,7 @@ def mdata(adata: AnnData):
         np.random.binomial(1, 0.5, size=(n_cells, n_grna)).astype(np.float64)
     )
     perturb_adata.var_names = "guide" + perturb_adata.var_names
-    perturb_adata.varm[element_key] = np.eye(n_grna)
+    perturb_adata.varm[element_key] = np.random.binomial(1, 0.8, size=(n_grna, n_elements))
 
     # combine into MuData
     return MuData({rna_key: rna_adata, perturb_key: perturb_adata})
@@ -66,6 +68,8 @@ def test_package_has_version():
 
 def test_model_mdata(mdata: MuData, tmp_path):
     """Check that we can register our MuData object with our model and perform training"""
+    
+    pyro.clear_param_store()
     perturbo.PERTURBO.setup_mudata(
         mdata,
         # size_factor_key="lib_size",
@@ -89,7 +93,6 @@ def test_model_mdata(mdata: MuData, tmp_path):
         model.summary_stats.n_cells,
         model.summary_stats.n_vars,
     )
-    print(model.view_anndata_setup())
 
     model.save(tmp_path / "model", save_anndata=True)
     model = perturbo.PERTURBO.load(tmp_path / "model")
@@ -97,6 +100,8 @@ def test_model_mdata(mdata: MuData, tmp_path):
 
 def test_model_adata(adata: AnnData, tmp_path):
     """Check that we can register our AnnData object with our model and perform training"""
+
+    pyro.clear_param_store()
     perturbo.PERTURBO.setup_anndata(
         adata,
         perturb_key,
@@ -120,3 +125,4 @@ def test_model_adata(adata: AnnData, tmp_path):
     model.save(tmp_path / "model", save_anndata=True)
     model = perturbo.PERTURBO.load(tmp_path / "model")
     model.train(max_epochs=1, lr=0.1)
+# 

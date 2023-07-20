@@ -335,7 +335,6 @@ class PerTurboPyroModule(PyroBaseModuleClass):
                     lambda: torch.full((self.n_elements, self.n_vars), init_scale, device=idx.device),
                     constraint=dist.constraints.positive,
                 )
-
                 element_mean_lfc = pyro.sample(
                     "element_mean_lfc",
                     dist.Normal(element_mean_lfc_mu, element_mean_lfc_sigma),
@@ -365,7 +364,7 @@ class PerTurboPyroModule(PyroBaseModuleClass):
 
                 perturb_mean_lfc_sigma = pyro.param(
                     "perturb_mean_lfc.sigma",
-                    lambda: torch.full((self.n_elements, self.n_vars), init_scale, device=idx.device),
+                    lambda: torch.full((self.n_perturbations, self.n_vars), init_scale, device=idx.device),
                     constraint=dist.constraints.positive,
                 )
 
@@ -381,7 +380,7 @@ class PerTurboPyroModule(PyroBaseModuleClass):
 
                 perturb_disp_lfc_sigma = pyro.param(
                     "perturb_disp_lfc.sigma",
-                    lambda: torch.full((self.n_elements, self.n_vars), init_scale, device=idx.device),
+                    lambda: torch.full((self.n_perturbations, self.n_vars), init_scale, device=idx.device),
                     constraint=dist.constraints.positive,
                 )
 
