@@ -398,11 +398,27 @@ class PerTurboPyroModule(PyroBaseModuleClass):
                 # pyro.sample("perturb_mean_lfc", dist.Delta(perturb_lfc[..., 0]))
                 # pyro.sample("perturb_disp_lfc", dist.Delta(perturb_lfc[..., 1]))
 
-    @staticmethod
-    def get_perturbation_effects():
+
+    def get_element_effects(self):
         """Return the perturbation effects on each variable's mean and variance."""
         store = pyro.get_param_store()
-        return (
-            store["perturb_mean_lfc.mu"].detach().cpu().numpy(),
-            store["perturb_disp_lfc.mu"].detach().cpu().numpy(),
-        )
+
+        element_mu = store['element_mean_lfc.mu'].detach().cpu()
+        element_sigma = store['element_mean_lfc.sigma'].detach().cpu()
+
+        return (element_mu.numpy(), element_sigma.numpy())
+
+
+    def get_perturbation_effects(self):
+        """Return the perturbation effects on each variable's mean and variance."""
+        store = pyro.get_param_store()
+        guide_by_element = self.guide_by_element.detach().cpu()
+
+        element_mu = guide_by_element @ store['element_mean_lfc.mu'].detach().cpu()
+        element_sigma = guide_by_element @ store['element_mean_lfc.sigma'].detach().cpu()
+
+        q_mu = element_mu + store['perturb_mean_lfc.mu'].detach().cpu()
+        q_sigma = torch.sqrt(element_sigma**2 + store['perturb_mean_lfc.sigma'].detach().cpu()**2)
+
+        return (q_mu.numpy(), q_sigma.numpy())
+
