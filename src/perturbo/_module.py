@@ -135,10 +135,10 @@ class PerTurboPyroModule(PyroBaseModuleClass):
 
         with var_plate:
             # estimate (log-) mean and dispersion of each gene's expression
-            gene_mean_disp = pyro.sample(
+            gene_mean_disp = mean_disp_loc + mean_disp_scale * pyro.sample(
                 "gene_mean_disp",
                 dist.MultivariateNormal(
-                    mean_disp_loc, scale_tril=mean_disp_scale * mean_disp_cholesky
+                    torch.zeros((2,), device=idx.device), scale_tril=mean_disp_cholesky
                 ),
             )
             nb_log_mean_gene = gene_mean_disp[..., 0]
@@ -276,7 +276,7 @@ class PerTurboPyroModule(PyroBaseModuleClass):
         pyro.sample("mean_disp_loc", dist.Delta(mean_disp_loc).to_event(1))
         mean_disp_scale = pyro.param(
             "mean_disp_scale.mu",
-            torch.ones((2,), device=idx.device),
+            torch.full((2,), 10., device=idx.device),
             constraint=dist.constraints.positive,
         )
         pyro.sample("mean_disp_scale", dist.Delta(mean_disp_scale).to_event(1))
