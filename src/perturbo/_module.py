@@ -130,7 +130,7 @@ class PerTurboPyroModule(PyroBaseModuleClass):
 
         gene_mean_disp_concentration = torch.tensor([1.0], device=idx.device)
         mean_disp_cholesky = pyro.sample(
-            "mean_disp_cholesky", dist.LKJCorrCholesky(2, gene_mean_disp_concentration)
+            "mean_disp_cholesky", dist.LKJCholesky(2, gene_mean_disp_concentration)
         )
 
         with var_plate:
