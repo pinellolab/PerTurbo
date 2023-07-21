@@ -118,33 +118,16 @@ class PerTurboPyroModule(PyroBaseModuleClass):
             "log_pooling", dist.Normal(pooling_prior_loc, pooling_prior_scale)
         )
 
-        gene_mean_disp_prior_loc = torch.zeros((2,), device=idx.device)
-        gene_mean_disp_prior_scale = torch.ones((2,), device=idx.device)
-        mean_disp_loc = pyro.sample(
-            "mean_disp_loc", dist.Normal(gene_mean_disp_prior_loc, 4.0).to_event(1)
-        )
-        mean_disp_scale = pyro.sample(
-            "mean_disp_scale",
-            dist.LogNormal(0.0, gene_mean_disp_prior_scale).to_event(1),
-        )
-
-        gene_mean_disp_concentration = torch.tensor([1.0], device=idx.device)
-        mean_disp_cholesky = pyro.sample(
-            "mean_disp_cholesky", dist.LKJCholesky(2, gene_mean_disp_concentration)
-        )
-
         with var_plate:
-            # estimate (log-) mean and dispersion of each gene's expression
-            gene_mean_disp = mean_disp_loc + mean_disp_scale * pyro.sample(
-                "gene_mean_disp",
-                dist.MultivariateNormal(
-                    torch.zeros((2,), device=idx.device), scale_tril=mean_disp_cholesky
-                ),
+            # mean and dispersion of each gene's expression
+            gene_mean_prior_scale = torch.tensor(3.0, device=idx.device)
+            gene_disp_prior_scale = torch.tensor(1.0, device=idx.device)
+            nb_log_mean_gene = pyro.sample(
+                "log_var_mean", dist.Normal(0.0, gene_mean_prior_scale)
             )
-            nb_log_mean_gene = gene_mean_disp[..., 0]
-            nb_log_disp_gene = gene_mean_disp[..., 1]
-            # nb_log_mean_gene = pyro.sample("log_var_mean", dist.Normal(0.0, gene_mean_prior_scale))
-            # nb_log_disp_gene = pyro.sample("log_var_dispersion", dist.Normal(0.0, gene_disp_prior_scale))
+            nb_log_disp_gene = pyro.sample(
+                "log_var_dispersion", dist.Normal(0.0, gene_disp_prior_scale)
+            )
 
             if self.likelihood == "lnnb":
                 # additional noise for LogNormalNegativeBinomial likelihood
@@ -175,8 +158,8 @@ class PerTurboPyroModule(PyroBaseModuleClass):
 
             with element_plate:
                 # element effects: n_elements x n_vars
-                element_mean_lfc_prior_scale = torch.tensor(0.01, device=idx.device)
-                element_disp_lfc_prior_scale = torch.tensor(0.01, device=idx.device)
+                element_mean_lfc_prior_scale = torch.tensor(0.05, device=idx.device)
+                element_disp_lfc_prior_scale = torch.tensor(0.05, device=idx.device)
                 element_mean_lfc = pyro.sample(
                     "element_mean_lfc", dist.Cauchy(0.0, element_mean_lfc_prior_scale)
                 )
@@ -193,7 +176,7 @@ class PerTurboPyroModule(PyroBaseModuleClass):
                 )
                 perturb_disp_lfc = pyro.sample(
                     "perturb_disp_lfc",
-                    dist.Normal(guide_by_element @ element_disp_lfc, 0.001),
+                    dist.Normal(guide_by_element @ element_disp_lfc, 0.1),
                 )
 
             # calculate overall parameter values for unperturbed cells
@@ -261,31 +244,10 @@ class PerTurboPyroModule(PyroBaseModuleClass):
             cont_cov_plate,
         ) = self.create_plates(idx)
 
-        log_var_mean_mu = pyro.param(
-            "log_var_mean.mu", lambda: torch.zeros((self.n_vars,), device=idx.device)
+        log_pooling_mu = pyro.param(
+            "log_pooling.mu", lambda: torch.tensor([-3.0], device=idx.device)
         )
-        log_var_disp_mu = pyro.param(
-            "log_var_disp.mu", lambda: torch.zeros((self.n_vars,), device=idx.device)
-        )
-        # MAP estimate global params
-        log_pooling = pyro.param("log_pooling.mu", torch.tensor(0.0, device=idx.device))
-        pyro.sample("log_pooling", dist.Delta(log_pooling))
-        mean_disp_loc = pyro.param(
-            "mean_disp_loc.mu", torch.zeros((2,), device=idx.device)
-        )
-        pyro.sample("mean_disp_loc", dist.Delta(mean_disp_loc).to_event(1))
-        mean_disp_scale = pyro.param(
-            "mean_disp_scale.mu",
-            torch.full((2,), 10., device=idx.device),
-            constraint=dist.constraints.positive,
-        )
-        pyro.sample("mean_disp_scale", dist.Delta(mean_disp_scale).to_event(1))
-        mean_disp_cholesky = pyro.param(
-            "mean_disp_cholesky.mu",
-            torch.eye(2, device=idx.device),
-            constraint=dist.constraints.corr_cholesky_constraint,
-        )
-        pyro.sample("mean_disp_cholesky", dist.Delta(mean_disp_cholesky).to_event(2))
+        pyro.sample("log_pooling", dist.Delta(log_pooling_mu))
 
         # if self.likelihood == "nb_mix":
 
@@ -302,6 +264,7 @@ class PerTurboPyroModule(PyroBaseModuleClass):
             "batch_effect.mu",
             lambda: torch.zeros((self.n_batches, self.n_vars), device=idx.device),
         )
+
         batch_effect_sigma = pyro.param(
             "batch_effect.sigma",
             lambda: torch.full(
@@ -324,17 +287,6 @@ class PerTurboPyroModule(PyroBaseModuleClass):
             constraint=dist.constraints.positive,
         )
 
-        log_var_mean_sigma = pyro.param(
-            "log_var_mean.sigma",
-            lambda: torch.full((self.n_vars,), init_scale, device=idx.device),
-            constraint=dist.constraints.positive,
-        )
-        log_var_disp_sigma = pyro.param(
-            "log_var_disp.sigma",
-            lambda: torch.full((self.n_vars,), init_scale, device=idx.device),
-            constraint=dist.constraints.positive,
-        )
-
         with var_plate:
             if self.likelihood == "lnnb":
                 multiplicative_noise_mu = pyro.param(
@@ -344,20 +296,31 @@ class PerTurboPyroModule(PyroBaseModuleClass):
                 )
                 pyro.sample("multiplicative_noise", dist.Delta(multiplicative_noise_mu))
 
-            pyro.sample(
-                "gene_mean_disp",
-                dist.Normal(
-                    torch.stack((log_var_mean_mu, log_var_disp_mu), dim=-1),
-                    torch.stack((log_var_mean_sigma, log_var_disp_sigma), dim=-1),
-                ).to_event(1),
+            log_var_mean_mu = pyro.param(
+                "log_var_mean.mu",
+                lambda: torch.zeros((self.n_vars,), device=idx.device),
             )
-
-            # pyro.sample(
-            #     "log_var_mean", dist.Normal(log_var_mean_mu, log_var_mean_sigma)
-            # )
-            # pyro.sample(
-            #     "log_var_dispersion", dist.Normal(log_var_disp_mu, log_var_disp_sigma)
-            # )
+            log_var_disp_mu = pyro.param(
+                "log_var_disp.mu",
+                lambda: torch.zeros((self.n_vars,), device=idx.device),
+            )
+            log_var_mean_sigma = pyro.param(
+                "log_var_mean.sigma",
+                lambda: torch.full((self.n_vars,), init_scale, device=idx.device),
+                constraint=dist.constraints.positive,
+            )
+            log_var_disp_sigma = pyro.param(
+                "log_var_disp.sigma",
+                lambda: torch.full((self.n_vars,), init_scale, device=idx.device),
+                constraint=dist.constraints.positive,
+            )
+            pyro.sample(
+                "log_var_mean", dist.Normal(log_var_mean_mu, log_var_mean_sigma)
+            )
+            
+            pyro.sample(
+                "log_var_dispersion", dist.Normal(log_var_disp_mu, log_var_disp_sigma)
+            )
 
             # if self.likelihood == "nb_mix":
             #     pyro.sample(
