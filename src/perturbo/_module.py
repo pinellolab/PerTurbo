@@ -111,13 +111,14 @@ class PerTurboPyroModule(PyroBaseModuleClass):
         perturbations = tensor_dict[REGISTRY_KEYS.PERTURBATION_KEY]
         cont_covariates = tensor_dict[REGISTRY_KEYS.CONT_COVS_KEY]
         # log_var_mean_global = pyro.sample("log_var_mean_global", dist.Normal(0.0, 4.0))
+        pooling_prior_loc=torch.tensor(-3.0, device=idx.device)
         pooling_prior_scale=torch.tensor(1.0, device=idx.device)
-        log_pooling = pyro.sample("log_pooling", dist.Normal(0.0, pooling_prior_scale))
+        log_pooling = pyro.sample("log_pooling", dist.Normal(pooling_prior_loc, pooling_prior_scale))
         # Estimate strength of gRNA effect sharing
 
         with var_plate:
             # mean and dispersion of each gene's expression
-            gene_mean_prior_scale = torch.tensor(4.0, device=idx.device)
+            gene_mean_prior_scale = torch.tensor(3.0, device=idx.device)
             gene_disp_prior_scale = torch.tensor(1.0, device=idx.device)
             nb_log_mean_gene = pyro.sample("log_var_mean", dist.Normal(0.0, gene_mean_prior_scale))
             nb_log_disp_gene = pyro.sample("log_var_dispersion", dist.Normal(0.0, gene_disp_prior_scale))
@@ -149,10 +150,10 @@ class PerTurboPyroModule(PyroBaseModuleClass):
 
             with element_plate:
                 # element effects: n_elements x n_vars
-                element_mean_lfc_prior_scale = torch.tensor(0.1, device=idx.device)
-                element_disp_lfc_prior_scale = torch.tensor(0.1, device=idx.device)
+                element_mean_lfc_prior_scale = torch.tensor(0.01, device=idx.device)
+                element_disp_lfc_prior_scale = torch.tensor(0.01, device=idx.device)
                 element_mean_lfc = pyro.sample("element_mean_lfc", dist.Cauchy(0.0, element_mean_lfc_prior_scale))
-                element_disp_lfc = pyro.sample("element_disp_lfc", dist.Normal(0.0, element_disp_lfc_prior_scale))
+                element_disp_lfc = pyro.sample("element_disp_lfc", dist.Cauchy(0.0, element_disp_lfc_prior_scale))
 
             with perturbation_plate:
                 # perturbation effects: n_perturbations x n_vars
@@ -163,7 +164,7 @@ class PerTurboPyroModule(PyroBaseModuleClass):
                 )
                 perturb_disp_lfc = pyro.sample(
                     "perturb_disp_lfc",
-                    dist.Normal(guide_by_element @ element_disp_lfc, log_pooling.exp()),
+                    dist.Normal(guide_by_element @ element_disp_lfc, 0.001),
                 )
 
             # calculate overall parameter values for unperturbed cells
