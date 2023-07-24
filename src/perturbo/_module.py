@@ -5,7 +5,7 @@ import pyro.distributions as dist
 import torch
 from pyro.distributions.torch_distribution import TorchDistribution
 from pyro.infer.autoguide import AutoNormal, init_to_mean
-from pyro.nn import PyroModule, PyroParam, PyroSample
+from pyro.nn import PyroModule
 from scvi.distributions import NegativeBinomial as SCVINegativeBinomial
 from scvi.distributions import NegativeBinomialMixture as SCVINegativeBinomialMixture
 from scvi.module.base import PyroBaseModuleClass
@@ -45,7 +45,10 @@ class PerTurboPyroModule(PyroBaseModuleClass):
 
         self._model = PerTurboPyroModel(*args, **kwargs)
         self._guide = AutoNormal(
-            self.model, init_loc_fn=init_to_mean, create_plates=self.model.create_plates
+            self.model,
+            init_loc_fn=init_to_mean,
+            init_scale=1.0,
+            create_plates=self.model.create_plates,
         )
         self._get_fn_args_from_batch = self._model._get_fn_args_from_batch
 
@@ -120,11 +123,6 @@ class PerTurboPyroModel(PyroModule):
         self.n_batches = summary_stats.n_batch
         self.likelihood = likelihood
 
-        self.global_mean = PyroParam(torch.tensor(0.0))
-        self.global_slope = PyroParam(torch.tensor(0.0))
-        self.global_offset = PyroParam(torch.tensor(0.0))
-        self.global_disp_noise = PyroSample(dist.LogNormal(0,0.1))
-
     @staticmethod
     def _get_fn_args_from_batch(tensor_dict):
         # tack on size factor after the other continuous covariates
@@ -172,16 +170,13 @@ class PerTurboPyroModel(PyroModule):
 
         with var_plate:
             # mean and dispersion of each gene's expression
-            gene_mean_prior_scale = torch.tensor(3.0, device=idx.device)
+            gene_mean_prior_scale = torch.tensor(10.0, device=idx.device)
+            gene_disp_prior_scale = torch.tensor(1.0, device=idx.device)
             nb_log_mean_gene = pyro.sample(
-                "log_var_mean", dist.Normal(self.global_mean, gene_mean_prior_scale)
+                "log_var_mean", dist.Normal(0.0, gene_mean_prior_scale)
             )
             nb_log_disp_gene = pyro.sample(
-                "log_var_dispersion",
-                dist.Normal(
-                    nb_log_mean_gene * self.global_slope + self.global_offset,
-                    self.global_disp_noise,
-                ),
+                "log_var_dispersion", dist.Normal(1.0, gene_disp_prior_scale)
             )
 
             if self.likelihood == "lnnb":
