@@ -6,7 +6,7 @@ dependencies = [
 [envs.default.scripts]
 test = "pytest {args:tests}"
 
-[envs.dev]
+[envs.perturbo-dev]
 dependencies = [
     "perturbo[test]",
     # For notebooks
@@ -17,7 +17,7 @@ dependencies = [
     "matplotlib",
     "graphviz",
     # For reading R data files
-    "anndata2ri",
+    # "anndata2ri",
     # For VSCode
     "black",
     "ruff"
