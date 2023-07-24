@@ -47,7 +47,7 @@ class PerTurboPyroModule(PyroBaseModuleClass):
         self._guide = AutoNormal(
             self.model,
             init_loc_fn=init_to_mean,
-            init_scale=1.0,
+            init_scale=0.01,
             create_plates=self.model.create_plates,
         )
         self._get_fn_args_from_batch = self._model._get_fn_args_from_batch
@@ -220,13 +220,14 @@ class PerTurboPyroModel(PyroModule):
             with perturbation_plate:
                 # perturbation effects: n_perturbations x n_vars
                 guide_by_element = self.guide_by_element.to(device=idx.device)
-                perturb_mean_lfc = pyro.sample(
+                perturb_mean_lfc = guide_by_element @ element_mean_lfc + pyro.sample(
                     "perturb_mean_lfc",
-                    dist.Normal(guide_by_element @ element_mean_lfc, log_pooling.exp()),
+                    dist.Normal(0.0, log_pooling.exp()),
                 )
-                perturb_disp_lfc = pyro.sample(
+
+                perturb_disp_lfc = guide_by_element @ element_disp_lfc + pyro.sample(
                     "perturb_disp_lfc",
-                    dist.Normal(guide_by_element @ element_disp_lfc, 0.1),
+                    dist.Normal(0.0, element_disp_lfc_prior_scale),
                 )
 
             # calculate overall parameter values for unperturbed cells
