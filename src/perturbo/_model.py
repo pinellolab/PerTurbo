@@ -6,6 +6,7 @@ import torch
 from mudata import AnnData, MuData
 from pandas import DataFrame
 from pyro import render_model as pyro_render_model
+from pyro.infer import TraceMeanField_ELBO
 from scvi._types import AnnOrMuData
 from scvi.data import AnnDataManager, fields
 from scvi.dataloaders import AnnDataLoader, DeviceBackedDataSplitter
@@ -55,8 +56,12 @@ class PERTURBO(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
         # self.summary_stats provides information about dimensions and other tensor info
         # likelihood
         if REGISTRY_KEYS.PERTURB_BY_ELEMENT_KEY in self.adata_manager.data_registry:
-            pert_registry = self.adata_manager.data_registry[REGISTRY_KEYS.PERTURB_BY_ELEMENT_KEY]
-            element_varm = self.adata_manager.adata.mod[pert_registry.mod_key].varm[pert_registry.attr_key]
+            pert_registry = self.adata_manager.data_registry[
+                REGISTRY_KEYS.PERTURB_BY_ELEMENT_KEY
+            ]
+            element_varm = self.adata_manager.adata.mod[pert_registry.mod_key].varm[
+                pert_registry.attr_key
+            ]
             if isinstance(element_varm, DataFrame):
                 guide_by_element = torch.tensor(element_varm.values)
             else:
@@ -66,7 +71,10 @@ class PERTURBO(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
             guide_by_element = torch.eye(self.summary_stats.n_perturbations)
 
         self.module = PerTurboPyroModule(
-            self.summary_stats, guide_by_element, likelihood=likelihood, n_cats_per_cov=n_cats_per_cov,
+            self.summary_stats,
+            guide_by_element,
+            likelihood=likelihood,
+            n_cats_per_cov=n_cats_per_cov,
         )
 
         self._model_summary_string = (
@@ -370,6 +378,8 @@ class PERTURBO(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
         plan_kwargs = plan_kwargs if isinstance(plan_kwargs, dict) else {}
         if lr is not None and "optim" not in plan_kwargs.keys():
             plan_kwargs.update({"optim_kwargs": {"lr": lr}})
+        if "loss" not in plan_kwargs.keys():
+            plan_kwargs["loss_fn"] = TraceMeanField_ELBO(max_plate_nesting=2)
 
         if data_splitter_kwargs is None:
             data_splitter_kwargs = {}
@@ -429,7 +439,7 @@ class PERTURBO(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
 
     def _render_pyro_model(self, model):
         """Helper function for running two samples through the model for plotting."""
-        sample_args, sample_kwargs = self._get_data_subset([0,1])
+        sample_args, sample_kwargs = self._get_data_subset([0, 1])
         return pyro_render_model(
             model,
             model_args=sample_args,

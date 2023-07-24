@@ -93,9 +93,8 @@ def test_model_mdata(mdata: MuData, tmp_path):
         model.summary_stats.n_cells,
         model.summary_stats.n_vars,
     )
-
     model.save(tmp_path / "model", save_anndata=True)
-    model = perturbo.PERTURBO.load(tmp_path / "model")
+    model = perturbo.PERTURBO.load(tmp_path / "model", accelerator="cpu") # temporary fix
     model.train(max_epochs=1, lr=0.1)
 
 def test_model_adata(adata: AnnData, tmp_path):
@@ -123,6 +122,5 @@ def test_model_adata(adata: AnnData, tmp_path):
     )
 
     model.save(tmp_path / "model", save_anndata=True)
-    model = perturbo.PERTURBO.load(tmp_path / "model")
+    model = perturbo.PERTURBO.load(tmp_path / "model", accelerator="cpu") # temporary fix
     model.train(max_epochs=1, lr=0.1)
-# 

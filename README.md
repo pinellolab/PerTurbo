@@ -32,7 +32,7 @@ The simplest way to install PerTurbo is using pip (ideally inside an isolated co
 
 2. **Hatch (slightly more complex, recommended for developers)**
 Hatch is a project/dependency managment tool which can create project-specific virtual environments, similar to Poetry or pip+virtualenv. First, install [Hatch](https://hatch.pypa.io/).  You may want to further configure where Hatch installs virtual environments, [see documentation](https://hatch.pypa.io/latest/config/hatch/#environments).
-Clone this git repo to your machine, enter the directory, and then run `hatch env create dev.`
+Clone this git repo to your machine, enter the directory, and then run `hatch env create perturbo-dev.`
 This will create a Hatch virtual environment in your configured directory with all the necessary project dependencies, plus Jupyter and some other development essentials for running the test notebooks in this repo.
 
 ## Release notes
