@@ -146,7 +146,7 @@ class PERTURBO(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
                 raise ValueError(
                     "Cannot infer size factors: cells with zero library size. Set size_factor_key manually instead."
                 )
-            adata.obs[size_factor_key] = np.log1p(library_size)
+            adata.obs[size_factor_key] = np.log(library_size/1e6)
 
         anndata_fields = [
             fields.NumericalObsField(REGISTRY_KEYS.INDICES_KEY, "_ind_x"),
@@ -246,7 +246,7 @@ class PERTURBO(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
                 raise ValueError(
                     "Cannot infer size factors: cells with zero library size. Set size_factor_key manually instead."
                 )
-            mdata[modalities.rna_layer].obs[size_factor_key] = np.log1p(library_size)
+            mdata[modalities.rna_layer].obs[size_factor_key] = np.log(library_size/1e6)
 
         # add indices to enable pyro subsampling of local vars
         mdata[modalities.rna_layer].obs = mdata[modalities.rna_layer].obs.assign(
