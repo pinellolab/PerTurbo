@@ -3,6 +3,7 @@ from typing import Iterable, Optional
 import pyro
 import pyro.distributions as dist
 import torch
+from pyro.infer.autoguide import AutoNormal, init_to_mean
 from scvi.module.base import PyroBaseModuleClass
 
 from ._constants import REGISTRY_KEYS
@@ -26,11 +27,13 @@ class PerTurboPyroModule(PyroBaseModuleClass):
         summary_stats,
         guide_by_element: torch.Tensor,
         likelihood="lnnb",
+        factors=None,
         fit_dispersion=False,
         n_cats_per_cov: Optional[Iterable[int]] = None,
         **module_kwargs,
     ) -> None:
         super().__init__()
+        self.factors = factors
         self.n_cells = summary_stats.n_cells
         self.n_vars = summary_stats.n_vars
         self.n_perturbations = summary_stats.n_perturbations
@@ -49,6 +52,9 @@ class PerTurboPyroModule(PyroBaseModuleClass):
         else:
             self.n_cat_covariates = 0
             self.n_cat_list = []
+        self._guide = AutoNormal(
+            self.model, init_loc_fn=init_to_mean, create_plates=self.create_plates, init_scale=0.2
+        )
 
         self.n_batches = summary_stats.n_batch
         self.likelihood = likelihood
@@ -88,7 +94,7 @@ class PerTurboPyroModule(PyroBaseModuleClass):
             perturbation_plate,
             element_plate,
             batch_plate,
-            var_plate,
+            feature_plate,
             cont_cov_plate,
         ) = self.create_plates(idx)
         batch = tensor_dict[REGISTRY_KEYS.BATCH_KEY]
@@ -97,39 +103,39 @@ class PerTurboPyroModule(PyroBaseModuleClass):
         cont_covariates = tensor_dict[REGISTRY_KEYS.CONT_COVS_KEY]
 
         # Estimate strength of gRNA effect sharing
-        pooling_prior_loc = torch.tensor(-3.0, device=idx.device)
-        pooling_prior_scale = torch.tensor(1.0, device=idx.device)
+        pooling_prior_loc = torch.tensor(-3.0)
+        pooling_prior_scale = torch.tensor(1.0)
         log_pooling = pyro.sample(
             "log_pooling", dist.Normal(pooling_prior_loc, pooling_prior_scale)
         )
 
-        with var_plate:
+        with feature_plate:
             # mean and dispersion of each gene's expression
-            gene_mean_prior_scale = torch.tensor(3.0, device=idx.device)
-            gene_disp_prior_scale = torch.tensor(1.0, device=idx.device)
+            gene_mean_prior_scale = torch.tensor(3.0)
+            gene_disp_prior_scale = torch.tensor(1.0)
             nb_log_mean_gene = pyro.sample(
-                "log_var_mean", dist.Normal(0.0, gene_mean_prior_scale)
+                "log_feature_mean", dist.Normal(0.0, gene_mean_prior_scale)
             )
             nb_log_disp_gene = pyro.sample(
-                "log_var_dispersion", dist.Normal(0.0, gene_disp_prior_scale)
+                "log_feature_dispersion", dist.Normal(0.0, gene_disp_prior_scale)
             )
 
             if self.likelihood == "lnnb":
                 # additional noise for LogNormalNegativeBinomial likelihood
-                noise_prior_rate = torch.tensor(10.0, device=idx.device)
+                noise_prior_rate = torch.tensor(10.0)
                 multiplicative_noise = pyro.sample(
                     "multiplicative_noise", dist.Exponential(noise_prior_rate)
                 )
 
             with batch_plate:
                 # batch effects: n_batches x n_vars
-                batch_effect_prior_scale = torch.tensor(1.0, device=idx.device)
+                batch_effect_prior_scale = torch.tensor(1.0)
                 batch_effect_size = pyro.sample(
                     "batch_effect", dist.Normal(0.0, batch_effect_prior_scale)
                 )
                 batch_effects = batch_effect_size[batch.squeeze(), ...]
 
-            cov_prior_sigma = torch.tensor(1.0, device=idx.device)
+            cov_prior_sigma = torch.tensor(1.0)
             with cont_cov_plate:
                 # covariate effects: n_cont_covariates x n_vars
                 cont_cov_effect_size = pyro.sample(
@@ -139,8 +145,8 @@ class PerTurboPyroModule(PyroBaseModuleClass):
 
             with element_plate:
                 # element effects: n_elements x n_vars
-                element_mean_lfc_prior_scale = torch.tensor(0.05, device=idx.device)
-                element_disp_lfc_prior_scale = torch.tensor(0.05, device=idx.device)
+                element_mean_lfc_prior_scale = torch.tensor(0.05)
+                element_disp_lfc_prior_scale = torch.tensor(0.05)
                 element_mean_lfc = pyro.sample(
                     "element_mean_lfc", dist.Cauchy(0.0, element_mean_lfc_prior_scale)
                 )
@@ -199,225 +205,24 @@ class PerTurboPyroModule(PyroBaseModuleClass):
                         obs=observations,
                     )
 
-    def guide(self, idx, init_scale=0.2, **tensor_dict):
-        pyro.module("perturbo", self)
-        (
-            _,
-            perturbation_plate,
-            element_plate,
-            batch_plate,
-            var_plate,
-            cont_cov_plate,
-        ) = self.create_plates(idx)
+    @property
+    def guide(self):
+        return self._guide
 
-        log_pooling_mu = pyro.param(
-            "log_pooling.mu", lambda: torch.tensor([-3.0], device=idx.device)
-        )
-        pyro.sample("log_pooling", dist.Delta(log_pooling_mu))
-
-        # if self.likelihood == "nb_mix":
-
-        #     mixture_logits_mu = pyro.param(
-        #         "mixture_logits.mu", lambda: torch.zeros((self.n_vars,))
-        #     )
-        #     mixture_logits_sigma = pyro.param(
-        #         "mixture_logits.sigma",
-        #         lambda: torch.full((self.n_vars,), init_scale),
-        #         constraint=dist.constraints.positive,
-        #     )
-
-        batch_effect_mu = pyro.param(
-            "batch_effect.mu",
-            lambda: torch.zeros((self.n_batches, self.n_vars), device=idx.device),
-        )
-
-        batch_effect_sigma = pyro.param(
-            "batch_effect.sigma",
-            lambda: torch.full(
-                (self.n_batches, self.n_vars), init_scale, device=idx.device
-            ),
-            constraint=dist.constraints.positive,
-        )
-
-        cont_cov_effect_mu = pyro.param(
-            "cont_cov_effect.mu",
-            lambda: torch.zeros(
-                (self.n_cont_covariates, self.n_vars), device=idx.device
-            ),
-        )
-        cont_cov_effect_sigma = pyro.param(
-            "cont_cov_effect.sigma",
-            lambda: torch.full(
-                (self.n_cont_covariates, self.n_vars), init_scale, device=idx.device
-            ),
-            constraint=dist.constraints.positive,
-        )
-
-        with var_plate:
-            if self.likelihood == "lnnb":
-                multiplicative_noise_mu = pyro.param(
-                    "multiplicative_noise.mu",
-                    lambda: torch.full((self.n_vars,), init_scale, device=idx.device),
-                    constraint=dist.constraints.positive,
-                )
-                pyro.sample("multiplicative_noise", dist.Delta(multiplicative_noise_mu))
-
-            log_var_mean_mu = pyro.param(
-                "log_var_mean.mu",
-                lambda: torch.zeros((self.n_vars,), device=idx.device),
-            )
-            log_var_disp_mu = pyro.param(
-                "log_var_disp.mu",
-                lambda: torch.zeros((self.n_vars,), device=idx.device),
-            )
-            log_var_mean_sigma = pyro.param(
-                "log_var_mean.sigma",
-                lambda: torch.full((self.n_vars,), init_scale, device=idx.device),
-                constraint=dist.constraints.positive,
-            )
-            log_var_disp_sigma = pyro.param(
-                "log_var_disp.sigma",
-                lambda: torch.full((self.n_vars,), init_scale, device=idx.device),
-                constraint=dist.constraints.positive,
-            )
-            pyro.sample(
-                "log_var_mean", dist.Normal(log_var_mean_mu, log_var_mean_sigma)
-            )
-
-            pyro.sample(
-                "log_var_dispersion", dist.Normal(log_var_disp_mu, log_var_disp_sigma)
-            )
-
-            # if self.likelihood == "nb_mix":
-            #     pyro.sample(
-            #         "mixture_logits",
-            #         dist.Normal(mixture_logits_mu, mixture_logits_sigma),
-            #     )
-            with batch_plate:
-                pyro.sample(
-                    "batch_effect", dist.Normal(batch_effect_mu, batch_effect_sigma)
-                )
-            with cont_cov_plate:
-                pyro.sample(
-                    "cont_cov_effect",
-                    dist.Normal(cont_cov_effect_mu, cont_cov_effect_sigma),
-                )
-
-            with element_plate:
-                element_mean_lfc_mu = pyro.param(
-                    "element_mean_lfc.mu",
-                    lambda: torch.zeros(
-                        (self.n_elements, self.n_vars), device=idx.device
-                    ),
-                )
-                element_mean_lfc_sigma = pyro.param(
-                    "element_mean_lfc.sigma",
-                    lambda: torch.full(
-                        (self.n_elements, self.n_vars), init_scale, device=idx.device
-                    ),
-                    constraint=dist.constraints.positive,
-                )
-                element_mean_lfc = pyro.sample(
-                    "element_mean_lfc",
-                    dist.Normal(element_mean_lfc_mu, element_mean_lfc_sigma),
-                )
-
-                if self.fit_dispersion:
-                    element_disp_lfc_mu = pyro.param(
-                        "element_disp_lfc.mu",
-                        lambda: torch.zeros(
-                            (self.n_elements, self.n_vars), device=idx.device
-                        ),
-                    )
-                    element_disp_lfc_sigma = pyro.param(
-                        "element_disp_lfc.sigma",
-                        lambda: torch.full(
-                            (self.n_elements, self.n_vars), init_scale, device=idx.device
-                        ),
-                        constraint=dist.constraints.positive,
-                    )
-                    element_disp_lfc = pyro.sample(
-                        "element_disp_lfc",
-                        dist.Normal(element_disp_lfc_mu, element_disp_lfc_sigma),
-                    )
-
-            with perturbation_plate:
-                guide_by_element = self.guide_by_element.to(
-                    device=log_var_mean_mu.device
-                )
-
-                perturb_mean_lfc_mu = pyro.param(
-                    "perturb_mean_lfc.mu",
-                    lambda: torch.zeros(
-                        (self.n_perturbations, self.n_vars), device=idx.device
-                    ),
-                )
-
-                perturb_mean_lfc_sigma = pyro.param(
-                    "perturb_mean_lfc.sigma",
-                    lambda: torch.full(
-                        (self.n_perturbations, self.n_vars),
-                        init_scale,
-                        device=idx.device,
-                    ),
-                    constraint=dist.constraints.positive,
-                )
-
-                pyro.sample(
-                    "perturb_mean_lfc",
-                    dist.Normal(
-                        perturb_mean_lfc_mu + guide_by_element @ element_mean_lfc,
-                        perturb_mean_lfc_sigma,
-                    ),
-                )
-                if self.fit_dispersion:
-                    perturb_disp_lfc_mu = pyro.param(
-                        "perturb_disp_lfc.mu",
-                        lambda: torch.zeros(
-                            (self.n_perturbations, self.n_vars), device=idx.device
-                        ),
-                    )
-
-                    perturb_disp_lfc_sigma = pyro.param(
-                        "perturb_disp_lfc.sigma",
-                        lambda: torch.full(
-                            (self.n_perturbations, self.n_vars),
-                            init_scale,
-                            device=idx.device,
-                        ),
-                        constraint=dist.constraints.positive,
-                    )
-
-                    pyro.sample(
-                        "perturb_disp_lfc",
-                        dist.Normal(
-                            perturb_disp_lfc_mu + guide_by_element @ element_disp_lfc,
-                            perturb_disp_lfc_sigma,
-                        ),
-                    )
 
     def get_element_effects(self):
         """Return the perturbation effects on each variable's mean and variance."""
-        store = pyro.get_param_store()
+        element_mu = self.guide.quantiles([0.5])["element_mean_lfc"].squeeze(0)
+        element_mu_plus_sigma = self.guide.quantiles([0.6827])["element_mean_lfc"].squeeze(0)
+        element_sigma = element_mu_plus_sigma-element_mu
 
-        element_mu = store["element_mean_lfc.mu"].detach().cpu()
-        element_sigma = store["element_mean_lfc.sigma"].detach().cpu()
-
-        return (element_mu.numpy(), element_sigma.numpy())
+        return (element_mu.detach().cpu().numpy(), element_sigma.detach().cpu().numpy())
 
     def get_perturbation_effects(self):
         """Return the perturbation effects on each variable's mean and variance."""
-        store = pyro.get_param_store()
-        guide_by_element = self.guide_by_element.detach().cpu()
+        q_mu = self.guide.quantiles([0.5])["perturb_mean_lfc"].squeeze(0)
+        q_mu_plus_sigma = self.guide.quantiles([0.6827])["perturb_mean_lfc"].squeeze(0)
+        q_sigma = q_mu_plus_sigma-q_mu
 
-        element_mu = guide_by_element @ store["element_mean_lfc.mu"].detach().cpu()
-        element_sigma = (
-            guide_by_element @ store["element_mean_lfc.sigma"].detach().cpu()
-        )
-
-        q_mu = element_mu + store["perturb_mean_lfc.mu"].detach().cpu()
-        q_sigma = torch.sqrt(
-            element_sigma**2 + store["perturb_mean_lfc.sigma"].detach().cpu() ** 2
-        )
 
         return (q_mu.numpy(), q_sigma.numpy())

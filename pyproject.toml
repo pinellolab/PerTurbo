@@ -20,7 +20,7 @@ urls.Source = "https://github.com/pinellolab/PerTurbo"
 urls.Home-page = "https://github.com/pinellolab/PerTurbo"
 dependencies = [
     "anndata >= 0.8",
-    "scvi-tools>=0.20.3",
+    "scvi-tools>=1.0.3",
     "torch",
     "pyro-ppl",
     "mudata",
