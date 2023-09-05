@@ -3,11 +3,7 @@ from typing import Iterable, Optional
 import pyro
 import pyro.distributions as dist
 import torch
-from pyro.distributions.torch_distribution import TorchDistribution
-from scvi.distributions import NegativeBinomial as SCVINegativeBinomial
-from scvi.distributions import NegativeBinomialMixture as SCVINegativeBinomialMixture
 from scvi.module.base import PyroBaseModuleClass
-from torch.distributions.utils import broadcast_all
 
 from ._constants import REGISTRY_KEYS
 
@@ -22,19 +18,6 @@ class LogNormalNegativeBinomial(dist.LogNormalNegativeBinomial):
         return dist.NegativeBinomial(
             total_count=self.total_count, logits=self.logits + normals
         ).sample()
-
-
-# Wraps scvi NegativeBinomial implementation for use with Pyro
-class NegativeBinomial(SCVINegativeBinomial, TorchDistribution):
-    pass
-
-
-# Wraps scvi NegativeBinomialMixture implementation for Pyro
-class NegativeBinomialMixture(SCVINegativeBinomialMixture, TorchDistribution):
-    def __init__(self, **kwargs):
-        super().__init__(**kwargs)
-        # fixes broadcasting error when theta2 is different from theta1
-        self.mu2, self.theta2 = broadcast_all(kwargs["mu2"], kwargs["theta2"])
 
 
 class PerTurboPyroModule(PyroBaseModuleClass):
@@ -138,10 +121,6 @@ class PerTurboPyroModule(PyroBaseModuleClass):
                     "multiplicative_noise", dist.Exponential(noise_prior_rate)
                 )
 
-            if self.likelihood == "nb_mix":
-                # mixture_logits = pyro.sample("mixture_logits", dist.Normal(-1.0, 0.01))
-                mixture_probs = torch.tensor([0.1, 0.9], device=idx.device)
-
             with batch_plate:
                 # batch effects: n_batches x n_vars
                 batch_effect_prior_scale = torch.tensor(1.0, device=idx.device)
@@ -219,25 +198,6 @@ class PerTurboPyroModule(PyroBaseModuleClass):
                         ),
                         obs=observations,
                     )
-                elif self.likelihood == "nb_mix":
-                    logits = torch.stack(
-                        (
-                            nb_log_mean_ctrl - nb_log_disp_ctrl,
-                            nb_log_mean - nb_log_dispersion,
-                        ),
-                        dim=-1,
-                    )
-                    total_counts = torch.stack(
-                        broadcast_all(nb_log_disp_ctrl.exp(), nb_log_dispersion.exp()),
-                        dim=-1,
-                    )
-                    mixture_dist = dist.Categorical(mixture_probs)
-                    component_dist = dist.NegativeBinomial(
-                        total_count=total_counts, logits=logits
-                    )
-                    mix_dist = dist.MixtureSameFamily(mixture_dist, component_dist)
-                    obs = pyro.sample("obs", mix_dist, obs=observations)
-                    return obs
 
     def guide(self, idx, init_scale=0.2, **tensor_dict):
         pyro.module("perturbo", self)
