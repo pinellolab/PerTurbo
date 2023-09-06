@@ -66,34 +66,19 @@ class PerTurboPyroModule(PyroBaseModuleClass):
         )
 
         ## intialize model hyperparameters and register buffers so they get automatically moved to GPU by scvi-tools
-        self.guide_by_element = guide_by_element
-        self.register_buffer("_guide_by_element", self.guide_by_element)
-        self.gene_mean_prior_scale = torch.tensor(3.0, requires_grad=False)
-        self.register_buffer("_gene_mean_prior_scale", self.gene_mean_prior_scale)
-        self.gene_disp_prior_scale = torch.tensor(1.0, requires_grad=False)
-        self.register_buffer("_gene_disp_prior_scale", self.gene_disp_prior_scale)
-        self.batch_effect_prior_scale = torch.tensor(1.0, requires_grad=False)
-        self.register_buffer("_batch_effect_prior_scale", self.batch_effect_prior_scale)
-        self.element_mean_lfc_prior_scale = torch.tensor(0.05, requires_grad=False)
-        self.register_buffer(
-            "_element_mean_lfc_prior_scale", self.element_mean_lfc_prior_scale
-        )
-        self.element_disp_lfc_prior_scale = torch.tensor(0.05, requires_grad=False)
-        self.register_buffer(
-            "_element_disp_lfc_prior_scale", self.element_disp_lfc_prior_scale
-        )
-        self.pooling_prior_loc = torch.tensor(-3.0, requires_grad=False)
-        self.register_buffer("_pooling_prior_loc", self.pooling_prior_loc)
-        self.pooling_prior_scale = torch.tensor(1.0, requires_grad=False)
-        self.register_buffer("_pooling_prior_scale", self.pooling_prior_scale)
-        self.covariate_prior_sigma = torch.tensor(1.0, requires_grad=False)
-        self.register_buffer("_covariate_prior_sigma", self.covariate_prior_sigma)
-        self.element_disp_pooling = torch.tensor(0.1, requires_grad=False)
-        self.register_buffer("_covariate_prior_sigma", self.element_disp_pooling)
+        self.register_buffer("guide_by_element", guide_by_element)
+        self.register_buffer("gene_mean_prior_scale", torch.tensor(3.0))
+        self.register_buffer("gene_disp_prior_scale", torch.tensor(1.0))
+        self.register_buffer("batch_effect_prior_scale", torch.tensor(1.0))
+        self.register_buffer("element_mean_lfc_prior_scale", torch.tensor(0.05))
+        self.register_buffer("element_disp_lfc_prior_scale", torch.tensor(0.05))
+        self.register_buffer("pooling_prior_loc", torch.tensor(-3.0))
+        self.register_buffer("pooling_prior_scale", torch.tensor(1.0))
+        self.register_buffer("covariate_prior_sigma", torch.tensor(1.0))
+        self.register_buffer("covariate_prior_sigma", torch.tensor(0.1))
 
         if self.likelihood == "lnnb":
-            self.noise_prior_rate = torch.tensor(10.0, requires_grad=False)
-            self.register_buffer("_noise_prior_rate", self.noise_prior_rate)
+            self.register_buffer("noise_prior_rate", torch.tensor(10.0, requires_grad=False))
 
     @staticmethod
     def _get_fn_args_from_batch(tensor_dict):

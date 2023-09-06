@@ -2,9 +2,9 @@ import logging
 
 import numpy as np
 import pandas as pd
+import pyro
 import pytest
 from mudata import AnnData, MuData
-import pyro
 
 import perturbo
 
@@ -54,7 +54,9 @@ def mdata(adata: AnnData):
         np.random.binomial(1, 0.5, size=(n_cells, n_grna)).astype(np.float64)
     )
     perturb_adata.var_names = "guide" + perturb_adata.var_names
-    perturb_adata.varm[element_key] = np.random.binomial(1, 0.8, size=(n_grna, n_elements))
+    perturb_adata.varm[element_key] = np.random.binomial(
+        1, 0.8, size=(n_grna, n_elements)
+    )
 
     # combine into MuData
     return MuData({rna_key: rna_adata, perturb_key: perturb_adata})
@@ -68,7 +70,6 @@ def test_package_has_version():
 
 def test_model_mdata(mdata: MuData, tmp_path):
     """Check that we can register our MuData object with our model and perform training"""
-    
     pyro.clear_param_store()
     perturbo.PERTURBO.setup_mudata(
         mdata,
@@ -98,6 +99,7 @@ def test_model_mdata(mdata: MuData, tmp_path):
     model = perturbo.PERTURBO.load(tmp_path / "model")
     model.train(max_epochs=1, lr=0.1)
 
+
 def test_model_adata(adata: AnnData, tmp_path):
     """Check that we can register our AnnData object with our model and perform training"""
 
@@ -123,7 +125,10 @@ def test_model_adata(adata: AnnData, tmp_path):
     )
 
     element_mu, element_sigma = model.module.get_element_effects()
-    assert element_mu.shape == (model.summary_stats.n_perturbations, model.summary_stats.n_vars)
+    assert element_mu.shape == (
+        model.summary_stats.n_perturbations,
+        model.summary_stats.n_vars,
+    )
     model.save(tmp_path / "model", save_anndata=True)
     model = perturbo.PERTURBO.load(tmp_path / "model")
     model.train(max_epochs=1, lr=0.1)
