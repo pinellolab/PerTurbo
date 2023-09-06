@@ -71,7 +71,9 @@ class PERTURBO(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
             if issparse(guide_by_element):
                 # TODO: avoid conversion to dense matrix, handle sparse values in model
                 guide_by_element = guide_by_element.todense()
-            guide_by_element = torch.tensor(guide_by_element, dtype=torch.float32, requires_grad=False)
+            guide_by_element = torch.tensor(
+                guide_by_element, dtype=torch.float32, requires_grad=False
+            )
 
         else:
             # assign each guide to a unique "element"
@@ -464,18 +466,6 @@ class PERTURBO(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
         """Plot the graphical model structure of the guide/variational distribution (requires graphviz)."""
         return self._render_pyro_model(self.module.guide)
 
-    # def get_posterior_samples(self, num_samples=500):
-    #     MAX_CELLS = 100
-    #     n_cells = min(len(self.adata), MAX_CELLS)
-    #     sample_args, sample_kwargs = self._get_data_subset(list(range(n_cells)))
-    #     sample_kwargs[REGISTRY_KEYS.X_KEY] = None
-    #     # print(sample_kwargs)
-    #     predictive_model = Predictive(
-    #         self.module.model,
-    #         guide=self.module.guide,
-    #         num_samples=num_samples,
-    #     )
-    #     return predictive_model(*sample_args, **sample_kwargs)['obs'].detach().cpu().numpy().ravel()
 
     def get_posterior_samples(self, num_samples=1):
         # MAX_CELLS = 100

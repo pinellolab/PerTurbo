@@ -5,6 +5,8 @@ import pyro
 import pyro.distributions as dist
 import torch
 from pyro.infer.autoguide import AutoNormal, init_to_mean
+from pyro import poutine
+from pyro.infer.reparam import LocScaleReparam
 from scvi.module.base import PyroBaseModuleClass
 
 from ._constants import REGISTRY_KEYS
@@ -20,6 +22,7 @@ class LogNormalNegativeBinomial(dist.LogNormalNegativeBinomial):
         return dist.NegativeBinomial(
             total_count=self.total_count, logits=self.logits + normals
         ).sample()
+
 
 class PerTurboPyroModule(PyroBaseModuleClass):
     def __init__(
@@ -77,7 +80,9 @@ class PerTurboPyroModule(PyroBaseModuleClass):
         self.register_buffer("covariate_prior_sigma", torch.tensor(0.1))
 
         if self.likelihood == "lnnb":
-            self.register_buffer("noise_prior_rate", torch.tensor(10.0, requires_grad=False))
+            self.register_buffer(
+                "noise_prior_rate", torch.tensor(10.0, requires_grad=False)
+            )
 
     @staticmethod
     def _get_fn_args_from_batch(tensor_dict):
@@ -168,11 +173,19 @@ class PerTurboPyroModule(PyroBaseModuleClass):
 
             with perturbation_plate:
                 # perturbation effects: n_perturbations x n_vars
-                perturb_mean_lfc = pyro.sample(
-                    "perturb_mean_lfc",
-                    dist.Normal(
-                        self.guide_by_element @ element_mean_lfc, element_mean_pooling
-                    ),
+                # with poutine.reparam(config={"perturb_mean_lfc": LocScaleReparam()}):
+                #     perturb_mean_lfc = pyro.sample(
+                #         "perturb_mean_lfc",
+                #         dist.Normal(
+                #             self.guide_by_element @ element_mean_lfc,
+                #             element_mean_pooling,
+                #         ),
+                #     )
+                perturb_mean_lfc = (
+                    self.guide_by_element @ element_mean_lfc
+                    + pyro.sample(
+                        "perturb_mean_lfc", dist.Normal(0.0, element_mean_pooling)
+                    )
                 )
                 if self.fit_dispersion:
                     perturb_disp_lfc = pyro.sample(
@@ -231,5 +244,9 @@ class PerTurboPyroModule(PyroBaseModuleClass):
 
     def get_perturbation_effects(self):
         """Return the perturbation effects on each variable's mean and variance."""
-        loc, scale = self.guide._get_loc_and_scale("perturb_mean_lfc")
+        # raise Exception(list(self.guide.named_pyro_params()))
+        loc1, scale1 = self.guide._get_loc_and_scale("element_mean_lfc")
+        loc2, scale2 = self.guide._get_loc_and_scale("perturb_mean_lfc")
+        loc = loc1 + loc2
+        scale = (scale1**2 + scale2**2).sqrt()
         return (loc.detach().cpu().numpy(), scale.detach().cpu().numpy())

@@ -99,6 +99,9 @@ def test_model_mdata(mdata: MuData, tmp_path):
     model = perturbo.PERTURBO.load(tmp_path / "model")
     model.train(max_epochs=1, lr=0.1)
 
+    e_loc, e_scale = model.module.get_element_effects()
+    p_loc, p_scale = model.module.get_perturbation_effects()
+
 
 def test_model_adata(adata: AnnData, tmp_path):
     """Check that we can register our AnnData object with our model and perform training"""
@@ -132,3 +135,6 @@ def test_model_adata(adata: AnnData, tmp_path):
     model.save(tmp_path / "model", save_anndata=True)
     model = perturbo.PERTURBO.load(tmp_path / "model")
     model.train(max_epochs=1, lr=0.1)
+
+    e_loc, e_scale = model.module.get_element_effects()
+    p_loc, p_scale = model.module.get_perturbation_effects()
