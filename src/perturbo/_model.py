@@ -1,11 +1,12 @@
 import logging
-from typing import Dict, List, Optional, Union
+from typing import Optional, Union
 
 import numpy as np
 import torch
 from mudata import AnnData, MuData
 from pandas import DataFrame
 from pyro import render_model as pyro_render_model
+from scipy.sparse import issparse
 from scvi._types import AnnOrMuData
 from scvi.data import AnnDataManager, fields
 from scvi.dataloaders import AnnDataLoader, DeviceBackedDataSplitter
@@ -63,9 +64,15 @@ class PERTURBO(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
                 pert_registry.attr_key
             ]
             if isinstance(element_varm, DataFrame):
-                guide_by_element = torch.tensor(element_varm.values)
+                guide_by_element = element_varm.values
             else:
-                guide_by_element = torch.tensor(element_varm, dtype=torch.float32)
+                guide_by_element = element_varm
+
+            if issparse(guide_by_element):
+                # TODO: avoid conversion to dense matrix, handle sparse values in model
+                guide_by_element = guide_by_element.todense()
+            guide_by_element = torch.tensor(guide_by_element, dtype=torch.float32, requires_grad=False)
+
         else:
             # assign each guide to a unique "element"
             guide_by_element = torch.eye(self.summary_stats.n_perturbations)
@@ -117,7 +124,7 @@ class PERTURBO(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
         size_factor_key
             .obs key of adata containing library size factors for each sample (e.g. log-library size)
         continuous_covariates_keys
-            List of .obs keys within adata containing other continuous covariates to be "regressed out"
+            list of .obs keys within adata containing other continuous covariates to be "regressed out"
         kwargs
             Additional keyword arguments
         """
@@ -146,7 +153,7 @@ class PERTURBO(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
                 raise ValueError(
                     "Cannot infer size factors: cells with zero library size. Set size_factor_key manually instead."
                 )
-            adata.obs[size_factor_key] = np.log(library_size/1e6)
+            adata.obs[size_factor_key] = np.log(library_size / 1e6)
 
         anndata_fields = [
             fields.NumericalObsField(REGISTRY_KEYS.INDICES_KEY, "_ind_x"),
@@ -192,7 +199,7 @@ class PERTURBO(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
         size_factor_key: Optional[str] = None,
         continuous_covariates_keys: Optional[str] = None,
         categorical_covariates_keys: Optional[str] = None,
-        modalities: Optional[Dict[str, str]] = None,
+        modalities: Optional[dict[str, str]] = None,
         **kwargs,
     ):
         """Registers data from a MuData object with the model.
@@ -216,7 +223,7 @@ class PERTURBO(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
         size_factor_key
             .obs key within the RNA AnnData object containing library size factors for each sample (e.g. log-library size)
         continuous_covariates_keys
-            List of .obs keys within the RNA AnnData object containing other continuous covariates to be "regressed out"
+            list of .obs keys within the RNA AnnData object containing other continuous covariates to be "regressed out"
         modalities
             A dict containing these same setup arguments
         kwargs
@@ -246,7 +253,9 @@ class PERTURBO(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
                 raise ValueError(
                     "Cannot infer size factors: cells with zero library size. Set size_factor_key manually instead."
                 )
-            mdata[modalities.rna_layer].obs[size_factor_key] = np.log(library_size/1e6)
+            mdata[modalities.rna_layer].obs[size_factor_key] = np.log(
+                library_size / 1e6
+            )
 
         # add indices to enable pyro subsampling of local vars
         mdata[modalities.rna_layer].obs = mdata[modalities.rna_layer].obs.assign(
@@ -427,7 +436,7 @@ class PERTURBO(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
         )
         return runner()
 
-    def _get_data_subset(self, indices: Optional[List] = None):
+    def _get_data_subset(self, indices: Optional[list] = None):
         loader = AnnDataLoader(
             adata_manager=self.adata_manager,
             indices=indices,
