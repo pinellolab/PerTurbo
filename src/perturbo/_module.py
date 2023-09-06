@@ -1,4 +1,5 @@
-from typing import Iterable, Optional
+from collections.abc import Iterable
+from typing import Optional
 
 import pyro
 import pyro.distributions as dist
@@ -26,24 +27,27 @@ class PerTurboPyroModule(PyroBaseModuleClass):
         self,
         summary_stats,
         guide_by_element: torch.Tensor,
-        likelihood="lnnb",
+        likelihood: str = "lnnb",
         factors=None,
         fit_dispersion=False,
         n_cats_per_cov: Optional[Iterable[int]] = None,
         **module_kwargs,
     ) -> None:
         super().__init__()
-        self.factors = factors
+
+        # set user-defined options for model behavior
+        self.fit_dispersion = fit_dispersion
+        self.likelihood = likelihood
+        self.lnnb_quad_points = 8
+
+        # copy data summary stats
         self.n_cells = summary_stats.n_cells
         self.n_vars = summary_stats.n_vars
         self.n_perturbations = summary_stats.n_perturbations
         self.n_cont_covariates = 1  # include (inferred) size factor by default
-        self.fit_dispersion = fit_dispersion
         if "n_targeted_elements" in summary_stats:
-            # self.n_elements = summary_stats.n_targeted_elements
             assert summary_stats.n_targeted_elements == guide_by_element.shape[1]
         self.n_elements = guide_by_element.shape[1]
-        self.guide_by_element = guide_by_element
         if "n_extra_continuous_covs" in summary_stats:
             self.n_cont_covariates += summary_stats.n_extra_continuous_covs
         if "n_extra_categorical_covs" in summary_stats:
@@ -52,16 +56,48 @@ class PerTurboPyroModule(PyroBaseModuleClass):
         else:
             self.n_cat_covariates = 0
             self.n_cat_list = []
+        self.n_batches = summary_stats.n_batch
+
         self._guide = AutoNormal(
-            self.model, init_loc_fn=init_to_mean, create_plates=self.create_plates, init_scale=0.2
+            self.model,
+            init_loc_fn=init_to_mean,
+            create_plates=self.create_plates,
+            init_scale=0.2,
         )
 
-        self.n_batches = summary_stats.n_batch
-        self.likelihood = likelihood
+        ## intialize model hyperparameters and register buffers so they get automatically moved to GPU by scvi-tools
+        self.guide_by_element = guide_by_element
+        self.register_buffer("_guide_by_element", self.guide_by_element)
+        self.gene_mean_prior_scale = torch.tensor(3.0, requires_grad=False)
+        self.register_buffer("_gene_mean_prior_scale", self.gene_mean_prior_scale)
+        self.gene_disp_prior_scale = torch.tensor(1.0, requires_grad=False)
+        self.register_buffer("_gene_disp_prior_scale", self.gene_disp_prior_scale)
+        self.batch_effect_prior_scale = torch.tensor(1.0, requires_grad=False)
+        self.register_buffer("_batch_effect_prior_scale", self.batch_effect_prior_scale)
+        self.element_mean_lfc_prior_scale = torch.tensor(0.05, requires_grad=False)
+        self.register_buffer(
+            "_element_mean_lfc_prior_scale", self.element_mean_lfc_prior_scale
+        )
+        self.element_disp_lfc_prior_scale = torch.tensor(0.05, requires_grad=False)
+        self.register_buffer(
+            "_element_disp_lfc_prior_scale", self.element_disp_lfc_prior_scale
+        )
+        self.pooling_prior_loc = torch.tensor(-3.0, requires_grad=False)
+        self.register_buffer("_pooling_prior_loc", self.pooling_prior_loc)
+        self.pooling_prior_scale = torch.tensor(1.0, requires_grad=False)
+        self.register_buffer("_pooling_prior_scale", self.pooling_prior_scale)
+        self.covariate_prior_sigma = torch.tensor(1.0, requires_grad=False)
+        self.register_buffer("_covariate_prior_sigma", self.covariate_prior_sigma)
+        self.element_disp_pooling = torch.tensor(0.1, requires_grad=False)
+        self.register_buffer("_covariate_prior_sigma", self.element_disp_pooling)
 
-    # required to override broken method in PyroBaseModuleClass
-    def on_load(self, model):
-        pass
+        if self.likelihood == "lnnb":
+            self.noise_prior_rate = torch.tensor(10.0, requires_grad=False)
+            self.register_buffer("_noise_prior_rate", self.noise_prior_rate)
+
+    # # required to override broken method in PyroBaseModuleClass
+    # def on_load(self, model):
+    #     pass
 
     @staticmethod
     def _get_fn_args_from_batch(tensor_dict):
@@ -95,7 +131,7 @@ class PerTurboPyroModule(PyroBaseModuleClass):
             element_plate,
             batch_plate,
             feature_plate,
-            cont_cov_plate,
+            cont_covariate_plate,
         ) = self.create_plates(idx)
         batch = tensor_dict[REGISTRY_KEYS.BATCH_KEY]
         size_factor = tensor_dict[REGISTRY_KEYS.SIZE_FACTOR_KEY]
@@ -103,69 +139,68 @@ class PerTurboPyroModule(PyroBaseModuleClass):
         cont_covariates = tensor_dict[REGISTRY_KEYS.CONT_COVS_KEY]
 
         # Estimate strength of gRNA effect sharing
-        pooling_prior_loc = torch.tensor(-3.0)
-        pooling_prior_scale = torch.tensor(1.0)
-        log_pooling = pyro.sample(
-            "log_pooling", dist.Normal(pooling_prior_loc, pooling_prior_scale)
+        element_mean_pooling = pyro.sample(
+            "element_mean_pooling",
+            dist.LogNormal(self.pooling_prior_loc, self.pooling_prior_scale),
         )
 
         with feature_plate:
             # mean and dispersion of each gene's expression
-            gene_mean_prior_scale = torch.tensor(3.0)
-            gene_disp_prior_scale = torch.tensor(1.0)
             nb_log_mean_gene = pyro.sample(
-                "log_feature_mean", dist.Normal(0.0, gene_mean_prior_scale)
+                "log_feature_mean", dist.Normal(0.0, self.gene_mean_prior_scale)
             )
             nb_log_disp_gene = pyro.sample(
-                "log_feature_dispersion", dist.Normal(0.0, gene_disp_prior_scale)
+                "log_feature_dispersion", dist.Normal(0.0, self.gene_disp_prior_scale)
             )
 
             if self.likelihood == "lnnb":
                 # additional noise for LogNormalNegativeBinomial likelihood
-                noise_prior_rate = torch.tensor(10.0)
                 multiplicative_noise = pyro.sample(
-                    "multiplicative_noise", dist.Exponential(noise_prior_rate)
+                    "multiplicative_noise", dist.Exponential(self.noise_prior_rate)
                 )
 
             with batch_plate:
                 # batch effects: n_batches x n_vars
-                batch_effect_prior_scale = torch.tensor(1.0)
                 batch_effect_size = pyro.sample(
-                    "batch_effect", dist.Normal(0.0, batch_effect_prior_scale)
+                    "batch_effect", dist.Normal(0.0, self.batch_effect_prior_scale)
                 )
                 batch_effects = batch_effect_size[batch.squeeze(), ...]
 
-            cov_prior_sigma = torch.tensor(1.0)
-            with cont_cov_plate:
+            with cont_covariate_plate:
                 # covariate effects: n_cont_covariates x n_vars
-                cont_cov_effect_size = pyro.sample(
-                    "cont_cov_effect", dist.Normal(0.0, cov_prior_sigma)
+                cont_covariate_effect_size = pyro.sample(
+                    "cont_covariate_effect",
+                    dist.Normal(0.0, self.covariate_prior_sigma),
                 )
-                covariate_effects = cont_covariates @ cont_cov_effect_size
+                covariate_effects = cont_covariates @ cont_covariate_effect_size
 
             with element_plate:
                 # element effects: n_elements x n_vars
-                element_mean_lfc_prior_scale = torch.tensor(0.05)
-                element_disp_lfc_prior_scale = torch.tensor(0.05)
                 element_mean_lfc = pyro.sample(
-                    "element_mean_lfc", dist.Cauchy(0.0, element_mean_lfc_prior_scale)
+                    "element_mean_lfc",
+                    dist.Cauchy(0.0, self.element_mean_lfc_prior_scale),
                 )
                 if self.fit_dispersion:
                     element_disp_lfc = pyro.sample(
-                        "element_disp_lfc", dist.Cauchy(0.0, element_disp_lfc_prior_scale)
+                        "element_disp_lfc",
+                        dist.Cauchy(0.0, self.element_disp_lfc_prior_scale),
                     )
 
             with perturbation_plate:
                 # perturbation effects: n_perturbations x n_vars
-                guide_by_element = self.guide_by_element.to(device=idx.device)
                 perturb_mean_lfc = pyro.sample(
                     "perturb_mean_lfc",
-                    dist.Normal(guide_by_element @ element_mean_lfc, log_pooling.exp()),
+                    dist.Normal(
+                        self.guide_by_element @ element_mean_lfc, element_mean_pooling
+                    ),
                 )
                 if self.fit_dispersion:
                     perturb_disp_lfc = pyro.sample(
                         "perturb_disp_lfc",
-                        dist.Normal(guide_by_element @ element_disp_lfc, 0.1),
+                        dist.Normal(
+                            self.guide_by_element @ element_disp_lfc,
+                            self.element_disp_pooling,
+                        ),
                     )
 
             # calculate overall parameter values for unperturbed cells
@@ -191,7 +226,7 @@ class PerTurboPyroModule(PyroBaseModuleClass):
                             - multiplicative_noise**2 / 2,
                             total_count=nb_log_dispersion.exp(),
                             multiplicative_noise_scale=multiplicative_noise,
-                            num_quad_points=8,
+                            num_quad_points=self.lnnb_quad_points,
                         ),
                         obs=observations,
                     )
@@ -209,12 +244,13 @@ class PerTurboPyroModule(PyroBaseModuleClass):
     def guide(self):
         return self._guide
 
-
     def get_element_effects(self):
         """Return the perturbation effects on each variable's mean and variance."""
         element_mu = self.guide.quantiles([0.5])["element_mean_lfc"].squeeze(0)
-        element_mu_plus_sigma = self.guide.quantiles([0.6827])["element_mean_lfc"].squeeze(0)
-        element_sigma = element_mu_plus_sigma-element_mu
+        element_mu_plus_sigma = self.guide.quantiles([0.6827])[
+            "element_mean_lfc"
+        ].squeeze(0)
+        element_sigma = element_mu_plus_sigma - element_mu
 
         return (element_mu.detach().cpu().numpy(), element_sigma.detach().cpu().numpy())
 
@@ -222,7 +258,6 @@ class PerTurboPyroModule(PyroBaseModuleClass):
         """Return the perturbation effects on each variable's mean and variance."""
         q_mu = self.guide.quantiles([0.5])["perturb_mean_lfc"].squeeze(0)
         q_mu_plus_sigma = self.guide.quantiles([0.6827])["perturb_mean_lfc"].squeeze(0)
-        q_sigma = q_mu_plus_sigma-q_mu
-
+        q_sigma = q_mu_plus_sigma - q_mu
 
         return (q_mu.numpy(), q_sigma.numpy())
