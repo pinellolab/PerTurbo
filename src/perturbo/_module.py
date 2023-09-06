@@ -226,17 +226,10 @@ class PerTurboPyroModule(PyroBaseModuleClass):
 
     def get_element_effects(self):
         """Return the perturbation effects on each variable's mean and variance."""
-        element_mu = self.guide.quantiles([0.5])["element_mean_lfc"].squeeze(0)
-        element_mu_plus_sigma = self.guide.quantiles([0.841])[
-            "element_mean_lfc"
-        ].squeeze(0)
-        element_sigma = element_mu_plus_sigma - element_mu
-        return (element_mu.detach().cpu().numpy(), element_sigma.detach().cpu().numpy())
+        loc, scale = self.guide._get_loc_and_scale("element_mean_lfc")
+        return (loc.detach().cpu().numpy(), scale.detach().cpu().numpy())
 
     def get_perturbation_effects(self):
         """Return the perturbation effects on each variable's mean and variance."""
-        q_mu = self.guide.median()["perturb_mean_lfc"]
-        q_mu_plus_sigma = self.guide.quantiles([0.841])["perturb_mean_lfc"].squeeze(0)
-        q_sigma = q_mu_plus_sigma - q_mu
-
-        return (q_mu.detach().cpu().numpy(), q_sigma.detach().cpu().numpy())
+        loc, scale = self.guide._get_loc_and_scale("perturb_mean_lfc")
+        return (loc.detach().cpu().numpy(), scale.detach().cpu().numpy())
