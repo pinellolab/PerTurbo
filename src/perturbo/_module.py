@@ -95,10 +95,6 @@ class PerTurboPyroModule(PyroBaseModuleClass):
             self.noise_prior_rate = torch.tensor(10.0, requires_grad=False)
             self.register_buffer("_noise_prior_rate", self.noise_prior_rate)
 
-    # # required to override broken method in PyroBaseModuleClass
-    # def on_load(self, model):
-    #     pass
-
     @staticmethod
     def _get_fn_args_from_batch(tensor_dict):
         # tack on size factor after the other continuous covariates

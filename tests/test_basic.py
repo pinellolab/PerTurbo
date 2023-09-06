@@ -94,9 +94,9 @@ def test_model_mdata(mdata: MuData, tmp_path):
         model.summary_stats.n_vars,
     )
 
-    # model.save(tmp_path / "model", save_anndata=True)
-    # model = perturbo.PERTURBO.load(tmp_path / "model")
-    # model.train(max_epochs=1, lr=0.1)
+    model.save(tmp_path / "model", save_anndata=True)
+    model = perturbo.PERTURBO.load(tmp_path / "model")
+    model.train(max_epochs=1, lr=0.1)
 
 def test_model_adata(adata: AnnData, tmp_path):
     """Check that we can register our AnnData object with our model and perform training"""
@@ -124,7 +124,6 @@ def test_model_adata(adata: AnnData, tmp_path):
 
     element_mu, element_sigma = model.module.get_element_effects()
     assert element_mu.shape == (model.summary_stats.n_perturbations, model.summary_stats.n_vars)
-#     model.save(tmp_path / "model", save_anndata=True)
-#     model = perturbo.PERTURBO.load(tmp_path / "model")
-#     model.train(max_epochs=1, lr=0.1)
-# # 
+    model.save(tmp_path / "model", save_anndata=True)
+    model = perturbo.PERTURBO.load(tmp_path / "model")
+    model.train(max_epochs=1, lr=0.1)
