@@ -6,7 +6,6 @@ import torch
 from mudata import AnnData, MuData
 from pandas import DataFrame
 from pyro import render_model as pyro_render_model
-from scipy.sparse import issparse, csr_array
 from scvi._types import AnnOrMuData
 from scvi.data import AnnDataManager, fields
 from scvi.dataloaders import AnnDataLoader, DeviceBackedDataSplitter
@@ -188,6 +187,8 @@ class PERTURBO(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
         perturbation_layer: Optional[str] = None,
         batch_key: Optional[str] = None,
         var_by_element_key: Optional[str] = None,
+        rna_element_uns_key: Optional[str] = None,
+        guide_element_uns_key: Optional[str] = None,
         perturb_by_element_key: Optional[str] = None,
         library_size_key: Optional[str] = None,
         size_factor_key: Optional[str] = None,
@@ -212,6 +213,12 @@ class PERTURBO(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
             .varm key within the RNA AnnData object containing a mask of which genes can be affected by which genetic elements
         perturb_by_element_key
             .varm key within the perturbation AnnData object containing which perturbations target which genetic elements
+        rna_element_uns_key
+            .uns key within the RNA AnnData object containing names of perturbed elements (if using var_by_element_key),
+            otherwise automatically inferred from column names if .varm object is a DataFrame
+        guide_element_uns_key
+            .uns key within the perturbation AnnData object containing names of perturbed elements
+            (if using perturb_by_element_key), otherwise automatically inferred from column names if .varm object is a DataFrame
         library_size_key
             .obs key within the RNA AnnData object containing raw (not log-scaled) library size factors for each sample
         size_factor_key
@@ -307,6 +314,8 @@ class PERTURBO(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
                     REGISTRY_KEYS.VAR_BY_ELEMENT_KEY,
                     var_by_element_key,
                     mod_key=modalities.rna_layer,
+                    is_count_data=True,
+                    colnames_uns_key=rna_element_uns_key,
                 )
             )
 
@@ -316,6 +325,8 @@ class PERTURBO(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
                     REGISTRY_KEYS.PERTURB_BY_ELEMENT_KEY,
                     perturb_by_element_key,
                     mod_key=modalities.perturbation_layer,
+                    is_count_data=True,
+                    colnames_uns_key=guide_element_uns_key,
                 )
             ),
 

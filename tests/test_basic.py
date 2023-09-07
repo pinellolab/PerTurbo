@@ -11,7 +11,9 @@ import perturbo
 
 rna_key = "rna"
 perturb_key = "grna"
-element_key = "element"
+guide_by_element_key = "guide_by_element"
+gene_by_element_key = "gene_by_element"
+
 
 
 @pytest.fixture
@@ -20,6 +22,7 @@ def adata():
     n_cells = 20
     n_genes = 10
     n_grna = 5
+    n_elements = 3
 
     # generate fake transcript counts
     total_rna = pd.DataFrame(
@@ -33,9 +36,18 @@ def adata():
     )
     rna_adata = AnnData(rna_counts, obs=total_rna)
 
-    # generate fake guide status
+    # generate fake guide status (for AnnData only version)
     rna_adata.obsm[perturb_key] = np.random.binomial(1, 0.5, size=(n_cells, n_grna))
-    # generate identity guide/element pairing
+    # generate gene/element pairing
+    rna_adata.var_names = "guide" + rna_adata.var_names
+    rna_adata.uns['elements'] = [f"element{str(i)}" for i in range(n_elements)]
+    gene_by_element = np.random.binomial(1, 0.5, size=(n_genes, n_elements)).astype(np.float32)
+    rna_adata.varm[gene_by_element_key] = pd.DataFrame.sparse.from_spmatrix(
+        csr_matrix(gene_by_element),
+        index = rna_adata.var_names,
+        columns = rna_adata.uns['elements']
+    )
+
 
     return rna_adata
 
@@ -55,11 +67,13 @@ def mdata(adata: AnnData):
         np.random.binomial(1, 0.5, size=(n_cells, n_grna)).astype(np.float32)
     )
     perturb_adata.var_names = "guide" + perturb_adata.var_names
+    perturb_adata.uns['elements'] = rna_adata.uns['elements']
+
     guide_by_element = np.random.binomial(1, 0.8, size=(n_grna, n_elements)).astype(np.float32)
-    perturb_adata.varm[element_key] = pd.DataFrame.sparse.from_spmatrix(
+    perturb_adata.varm[guide_by_element_key] = pd.DataFrame.sparse.from_spmatrix(
         csr_matrix(guide_by_element),
         index = perturb_adata.var_names,
-        columns = [f"element_{str(i)}" for i in range(n_elements)]
+        columns = perturb_adata.uns['elements']
     )
 
     # combine into MuData
@@ -79,8 +93,11 @@ def test_model_mdata(mdata: MuData, tmp_path):
         mdata,
         # size_factor_key="lib_size",
         # batch_key="batch_id",
+        guide_element_uns_key="elements",
+        rna_element_uns_key="elements",
         categorical_covariates_keys=["batch_id"],
-        perturb_by_element_key=element_key,
+        perturb_by_element_key=guide_by_element_key,
+        var_by_element_key=gene_by_element_key,
         modalities={
             "rna_layer": rna_key,
             "perturbation_layer": perturb_key,

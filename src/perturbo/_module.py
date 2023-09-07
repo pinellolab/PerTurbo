@@ -66,7 +66,7 @@ class PerTurboPyroModule(PyroBaseModuleClass):
         )
 
         ## intialize model hyperparameters and register buffers so they get automatically moved to GPU by scvi-tools
-        self.register_buffer("guide_by_element", guide_by_element.to_sparse_csc())
+        self.register_buffer("guide_by_element", guide_by_element.to_sparse_coo())
         self.register_buffer("gene_mean_prior_scale", torch.tensor(3.0))
         self.register_buffer("gene_disp_prior_scale", torch.tensor(1.0))
         self.register_buffer("batch_effect_prior_scale", torch.tensor(1.0))
