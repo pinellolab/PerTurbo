@@ -5,8 +5,6 @@ import pyro
 import pyro.distributions as dist
 import torch
 from pyro.infer.autoguide import AutoNormal, init_to_mean
-from pyro import poutine
-from pyro.infer.reparam import LocScaleReparam
 from scvi.module.base import PyroBaseModuleClass
 
 from ._constants import REGISTRY_KEYS
@@ -30,7 +28,7 @@ class PerTurboPyroModule(PyroBaseModuleClass):
         summary_stats,
         guide_by_element: torch.Tensor,
         likelihood: str = "lnnb",
-        factors=None,
+        n_factors=None,
         fit_dispersion=False,
         n_cats_per_cov: Optional[Iterable[int]] = None,
         **module_kwargs,
@@ -68,7 +66,7 @@ class PerTurboPyroModule(PyroBaseModuleClass):
         )
 
         ## intialize model hyperparameters and register buffers so they get automatically moved to GPU by scvi-tools
-        self.register_buffer("guide_by_element", guide_by_element)
+        self.register_buffer("guide_by_element", guide_by_element.to_sparse_csc())
         self.register_buffer("gene_mean_prior_scale", torch.tensor(3.0))
         self.register_buffer("gene_disp_prior_scale", torch.tensor(1.0))
         self.register_buffer("batch_effect_prior_scale", torch.tensor(1.0))
@@ -173,14 +171,6 @@ class PerTurboPyroModule(PyroBaseModuleClass):
 
             with perturbation_plate:
                 # perturbation effects: n_perturbations x n_vars
-                # with poutine.reparam(config={"perturb_mean_lfc": LocScaleReparam()}):
-                #     perturb_mean_lfc = pyro.sample(
-                #         "perturb_mean_lfc",
-                #         dist.Normal(
-                #             self.guide_by_element @ element_mean_lfc,
-                #             element_mean_pooling,
-                #         ),
-                #     )
                 perturb_mean_lfc = (
                     self.guide_by_element @ element_mean_lfc
                     + pyro.sample(
@@ -247,6 +237,6 @@ class PerTurboPyroModule(PyroBaseModuleClass):
         # raise Exception(list(self.guide.named_pyro_params()))
         loc1, scale1 = self.guide._get_loc_and_scale("element_mean_lfc")
         loc2, scale2 = self.guide._get_loc_and_scale("perturb_mean_lfc")
-        loc = loc1 + loc2
-        scale = (scale1**2 + scale2**2).sqrt()
+        loc = self.guide_by_element @ loc1 + loc2
+        scale = ((self.guide_by_element @ scale1)**2 + scale2**2).sqrt()
         return (loc.detach().cpu().numpy(), scale.detach().cpu().numpy())

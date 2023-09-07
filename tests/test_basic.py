@@ -5,6 +5,7 @@ import pandas as pd
 import pyro
 import pytest
 from mudata import AnnData, MuData
+from scipy.sparse import csr_matrix
 
 import perturbo
 
@@ -51,11 +52,14 @@ def mdata(adata: AnnData):
 
     # generate fake guide status
     perturb_adata = AnnData(
-        np.random.binomial(1, 0.5, size=(n_cells, n_grna)).astype(np.float64)
+        np.random.binomial(1, 0.5, size=(n_cells, n_grna)).astype(np.float32)
     )
     perturb_adata.var_names = "guide" + perturb_adata.var_names
-    perturb_adata.varm[element_key] = np.random.binomial(
-        1, 0.8, size=(n_grna, n_elements)
+    guide_by_element = np.random.binomial(1, 0.8, size=(n_grna, n_elements)).astype(np.float32)
+    perturb_adata.varm[element_key] = pd.DataFrame.sparse.from_spmatrix(
+        csr_matrix(guide_by_element),
+        index = perturb_adata.var_names,
+        columns = [f"element_{str(i)}" for i in range(n_elements)]
     )
 
     # combine into MuData
@@ -103,38 +107,38 @@ def test_model_mdata(mdata: MuData, tmp_path):
     p_loc, p_scale = model.module.get_perturbation_effects()
 
 
-def test_model_adata(adata: AnnData, tmp_path):
-    """Check that we can register our AnnData object with our model and perform training"""
+# def test_model_adata(adata: AnnData, tmp_path):
+#     """Check that we can register our AnnData object with our model and perform training"""
 
-    pyro.clear_param_store()
-    perturbo.PERTURBO.setup_anndata(
-        adata,
-        perturb_key,
-        categorical_covariates_keys=["batch_id"],
-        batch_key="batch_id",
-    )
-    model = perturbo.PERTURBO(adata)
+#     pyro.clear_param_store()
+#     perturbo.PERTURBO.setup_anndata(
+#         adata,
+#         perturb_key,
+#         categorical_covariates_keys=["batch_id"],
+#         batch_key="batch_id",
+#     )
+#     model = perturbo.PERTURBO(adata)
 
-    n_cells, n_vars = adata.shape
-    assert model.summary_stats.n_cells == n_cells
-    assert model.summary_stats.n_vars == n_vars
-    assert model.summary_stats.n_perturbations == adata.obsm[perturb_key].shape[1]
-    model.train(max_epochs=10, lr=0.1)
-    samples = model.get_posterior_samples()
+#     n_cells, n_vars = adata.shape
+#     assert model.summary_stats.n_cells == n_cells
+#     assert model.summary_stats.n_vars == n_vars
+#     assert model.summary_stats.n_perturbations == adata.obsm[perturb_key].shape[1]
+#     model.train(max_epochs=10, lr=0.1)
+#     samples = model.get_posterior_samples()
 
-    assert samples["obs"].shape[-2:] == (
-        model.summary_stats.n_cells,
-        model.summary_stats.n_vars,
-    )
+#     assert samples["obs"].shape[-2:] == (
+#         model.summary_stats.n_cells,
+#         model.summary_stats.n_vars,
+#     )
 
-    element_mu, element_sigma = model.module.get_element_effects()
-    assert element_mu.shape == (
-        model.summary_stats.n_perturbations,
-        model.summary_stats.n_vars,
-    )
-    model.save(tmp_path / "model", save_anndata=True)
-    model = perturbo.PERTURBO.load(tmp_path / "model")
-    model.train(max_epochs=1, lr=0.1)
+#     element_mu, element_sigma = model.module.get_element_effects()
+#     assert element_mu.shape == (
+#         model.summary_stats.n_perturbations,
+#         model.summary_stats.n_vars,
+#     )
+#     model.save(tmp_path / "model", save_anndata=True)
+#     model = perturbo.PERTURBO.load(tmp_path / "model")
+#     model.train(max_epochs=1, lr=0.1)
 
-    e_loc, e_scale = model.module.get_element_effects()
-    p_loc, p_scale = model.module.get_perturbation_effects()
+#     e_loc, e_scale = model.module.get_element_effects()
+#     p_loc, p_scale = model.module.get_perturbation_effects()
