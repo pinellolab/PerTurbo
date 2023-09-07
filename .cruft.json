@@ -1,6 +1,6 @@
 {
   "template": "https://github.com/scverse/cookiecutter-scverse",
-  "commit": "6a4338030e0c83a9034d607ed66abeff83e18840",
+  "commit": "647649ca9f440214013ccec917c4713759223b2c",
   "checkout": null,
   "context": {
     "cookiecutter": {
