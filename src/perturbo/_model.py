@@ -6,7 +6,7 @@ import torch
 from mudata import AnnData, MuData
 from pandas import DataFrame
 from pyro import render_model as pyro_render_model
-from scipy.sparse import issparse
+from scipy.sparse import issparse, csr_array
 from scvi._types import AnnOrMuData
 from scvi.data import AnnDataManager, fields
 from scvi.dataloaders import AnnDataLoader, DeviceBackedDataSplitter
@@ -57,26 +57,18 @@ class PERTURBO(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
         # self.summary_stats provides information about dimensions and other tensor info
         # likelihood
         if REGISTRY_KEYS.PERTURB_BY_ELEMENT_KEY in self.adata_manager.data_registry:
-            pert_registry = self.adata_manager.data_registry[
+            guide_by_element_varm = self.adata_manager.get_from_registry(
                 REGISTRY_KEYS.PERTURB_BY_ELEMENT_KEY
-            ]
-            element_varm = self.adata_manager.adata.mod[pert_registry.mod_key].varm[
-                pert_registry.attr_key
-            ]
-            if isinstance(element_varm, DataFrame):
-                guide_by_element = element_varm.values
-            else:
-                guide_by_element = element_varm
-
-            if issparse(guide_by_element):
-                # TODO: avoid conversion to dense matrix, handle sparse values in model
-                guide_by_element = guide_by_element.todense()
-            guide_by_element = torch.tensor(
-                guide_by_element, dtype=torch.float32, requires_grad=False
             )
+            if isinstance(guide_by_element_varm, DataFrame):
+                guide_by_element_varm = guide_by_element_varm.values
 
+            guide_by_element = torch.tensor(
+                guide_by_element_varm, dtype=torch.float32, requires_grad=False
+            )
         else:
             # assign each guide to a unique "element"
+            # TODO: assign guide names to each element in registry
             guide_by_element = torch.eye(self.summary_stats.n_perturbations)
 
         self.module = PerTurboPyroModule(
@@ -465,7 +457,6 @@ class PERTURBO(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
     def render_guide(self):
         """Plot the graphical model structure of the guide/variational distribution (requires graphviz)."""
         return self._render_pyro_model(self.module.guide)
-
 
     def get_posterior_samples(self, num_samples=1):
         # MAX_CELLS = 100
