@@ -14,6 +14,10 @@ __pycache__/
 /dist/
 /*.egg-info/
 
+# Notebook checkpoints
+*/.ipynb_checkpoints
+*/*/.ipynb_checkpoints
+
 # Tests and coverage
 /.pytest_cache/
 /.cache/
@@ -26,3 +30,5 @@ __pycache__/
 # IDEs
 /.idea/
 /.vscode/
+/.hatch/
+
