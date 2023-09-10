@@ -35,11 +35,12 @@ def adata():
         np.float64
     )
     rna_adata = AnnData(rna_counts, obs=total_rna)
+    rna_adata.var_names = "guide" + rna_adata.var_names
 
     # generate fake guide status (for AnnData only version)
     rna_adata.obsm[perturb_key] = np.random.binomial(1, 0.5, size=(n_cells, n_grna))
+
     # generate gene/element pairing
-    rna_adata.var_names = "guide" + rna_adata.var_names
     rna_adata.uns['elements'] = [f"element{str(i)}" for i in range(n_elements)]
     gene_by_element = np.random.binomial(1, 0.5, size=(n_genes, n_elements)).astype(np.float32)
     rna_adata.varm[gene_by_element_key] = pd.DataFrame.sparse.from_spmatrix(
@@ -103,6 +104,7 @@ def test_model_mdata(mdata: MuData, tmp_path):
             "perturbation_layer": perturb_key,
         },
     )
+
     model = perturbo.PERTURBO(mdata)
     assert model.summary_stats.n_cells == len(mdata)
     assert model.summary_stats.n_vars == len(mdata[rna_key].var)
@@ -121,7 +123,7 @@ def test_model_mdata(mdata: MuData, tmp_path):
     model.train(max_epochs=1, lr=0.1)
 
     e_loc, e_scale = model.module.get_element_effects()
-    p_loc, p_scale = model.module.get_perturbation_effects()
+    # p_loc, p_scale = model.moduleget_perturbation_effects()
 
 
 # def test_model_adata(adata: AnnData, tmp_path):

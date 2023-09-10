@@ -53,26 +53,32 @@ class PERTURBO(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
                 REGISTRY_KEYS.CAT_COVS_KEY
             ).n_cats_per_key
 
-        # self.summary_stats provides information about dimensions and other tensor info
-        # likelihood
+        guide_by_element = None
         if REGISTRY_KEYS.PERTURB_BY_ELEMENT_KEY in self.adata_manager.data_registry:
             guide_by_element_varm = self.adata_manager.get_from_registry(
                 REGISTRY_KEYS.PERTURB_BY_ELEMENT_KEY
             )
             if isinstance(guide_by_element_varm, DataFrame):
                 guide_by_element_varm = guide_by_element_varm.values
-
             guide_by_element = torch.tensor(
                 guide_by_element_varm, dtype=torch.float32, requires_grad=False
             )
-        else:
-            # assign each guide to a unique "element"
-            # TODO: assign guide names to each element in registry
-            guide_by_element = torch.eye(self.summary_stats.n_perturbations)
+
+        var_by_element = None
+        if REGISTRY_KEYS.VAR_BY_ELEMENT_KEY in self.adata_manager.data_registry:
+            var_by_element_varm = self.adata_manager.get_from_registry(
+                REGISTRY_KEYS.VAR_BY_ELEMENT_KEY
+            )
+            if isinstance(var_by_element_varm, DataFrame):
+                var_by_element_varm = var_by_element_varm.values
+            var_by_element = torch.tensor(
+                var_by_element_varm, dtype=torch.float32, requires_grad=False
+            )
 
         self.module = PerTurboPyroModule(
             self.summary_stats,
-            guide_by_element,
+            guide_by_element=guide_by_element,
+            var_by_element=var_by_element,
             likelihood=likelihood,
             fit_dispersion=fit_dispersion,
             n_cats_per_cov=n_cats_per_cov,
@@ -123,7 +129,6 @@ class PERTURBO(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
         """
         setup_method_args = cls._get_setup_method_args(**locals())
         adata.obs["_ind_x"] = np.arange(len(adata))
-
         # add library size if not present
         if library_size_key is None:
             library_size_key = "_library_size"
@@ -137,7 +142,6 @@ class PERTURBO(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
                     "Cannot infer library size: cells with zero counts. Set library_size_key manually instead."
                 )
             adata.obs[library_size_key] = library_size
-
         # add size factor if not present
         if size_factor_key is None:
             size_factor_key = "_size_factor"
@@ -147,7 +151,6 @@ class PERTURBO(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
                     "Cannot infer size factors: cells with zero library size. Set size_factor_key manually instead."
                 )
             adata.obs[size_factor_key] = np.log(library_size / 1e6)
-
         anndata_fields = [
             fields.NumericalObsField(REGISTRY_KEYS.INDICES_KEY, "_ind_x"),
             fields.LayerField(REGISTRY_KEYS.X_KEY, layer, is_count_data=True),
@@ -157,21 +160,18 @@ class PERTURBO(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
                 REGISTRY_KEYS.SIZE_FACTOR_KEY, size_factor_key, required=False
             ),
         ]
-
         if continuous_covariates_keys is not None:
             anndata_fields += (
                 fields.NumericalJointObsField(
                     REGISTRY_KEYS.CONT_COVS_KEY, continuous_covariates_keys
                 ),
             )
-
         if categorical_covariates_keys is not None:
             anndata_fields += (
                 fields.CategoricalJointObsField(
                     REGISTRY_KEYS.CAT_COVS_KEY, categorical_covariates_keys
                 ),
             )
-
         adata_manager = AnnDataManager(
             fields=anndata_fields,
             setup_method_args=setup_method_args,
@@ -393,7 +393,6 @@ class PERTURBO(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
         plan_kwargs = plan_kwargs if isinstance(plan_kwargs, dict) else {}
         if lr is not None and "optim" not in plan_kwargs.keys():
             plan_kwargs.update({"optim_kwargs": {"lr": lr}})
-
         if data_splitter_kwargs is None:
             data_splitter_kwargs = {}
         if "data_and_attributes" not in data_splitter_kwargs:

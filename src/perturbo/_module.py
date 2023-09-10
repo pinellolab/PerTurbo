@@ -26,7 +26,8 @@ class PerTurboPyroModule(PyroBaseModuleClass):
     def __init__(
         self,
         summary_stats,
-        guide_by_element: torch.Tensor,
+        guide_by_element: Optional[torch.Tensor] = None,
+        var_by_element: Optional[torch.Tensor] = None,
         likelihood: str = "lnnb",
         n_factors=None,
         fit_dispersion=False,
@@ -34,7 +35,6 @@ class PerTurboPyroModule(PyroBaseModuleClass):
         **module_kwargs,
     ) -> None:
         super().__init__()
-
         # set user-defined options for model behavior
         self.fit_dispersion = fit_dispersion
         self.likelihood = likelihood
@@ -45,9 +45,12 @@ class PerTurboPyroModule(PyroBaseModuleClass):
         self.n_vars = summary_stats.n_vars
         self.n_perturbations = summary_stats.n_perturbations
         self.n_cont_covariates = 1  # include (inferred) size factor by default
-        if "n_targeted_elements" in summary_stats:
+        self.has_elements = "n_targeted_elements" in summary_stats
+        if self.has_elements:
             assert summary_stats.n_targeted_elements == guide_by_element.shape[1]
-        self.n_elements = guide_by_element.shape[1]
+            self.n_elements = guide_by_element.shape[1]
+        else:
+            self.n_elements = self.n_perturbations
         if "n_extra_continuous_covs" in summary_stats:
             self.n_cont_covariates += summary_stats.n_extra_continuous_covs
         if "n_extra_categorical_covs" in summary_stats:
@@ -65,8 +68,20 @@ class PerTurboPyroModule(PyroBaseModuleClass):
             init_scale=0.2,
         )
 
-        ## intialize model hyperparameters and register buffers so they get automatically moved to GPU by scvi-tools
-        self.register_buffer("guide_by_element", guide_by_element.to_sparse_coo())
+        ## register hyperparameters as buffers so they get automatically moved to GPU by scvi-tools
+        if guide_by_element is not None:
+            self.register_buffer("guide_by_element", guide_by_element.to_sparse_coo())
+        if var_by_element is not None:
+            self.register_buffer(
+                "element_by_var_idx", var_by_element.T.to_sparse_coo().indices()
+            )
+            self.register_buffer(
+                "guide_by_var_idx",
+                (guide_by_element @ var_by_element.T).to_sparse_coo().indices(),
+            )
+            self.n_element_effects = self.element_by_var_idx.shape[1]
+            self.n_guide_effects = self.guide_by_var_idx.shape[1]
+        # self.register_buffer("guide_by_var", (guide_by_element @ var_by_element.T).to_sparse())
         self.register_buffer("gene_mean_prior_scale", torch.tensor(3.0))
         self.register_buffer("gene_disp_prior_scale", torch.tensor(1.0))
         self.register_buffer("batch_effect_prior_scale", torch.tensor(1.0))
@@ -104,6 +119,8 @@ class PerTurboPyroModule(PyroBaseModuleClass):
             pyro.plate("batches", self.n_batches, dim=-2),
             pyro.plate("vars", self.n_vars, dim=-1),
             pyro.plate("cont_covariates", self.n_cont_covariates, dim=-2),
+            pyro.plate("element_effects", self.n_element_effects, dim=-1),
+            pyro.plate("guide_effects", self.n_guide_effects, dim=-1),
         )
 
     def model(self, idx, **tensor_dict):
@@ -115,6 +132,8 @@ class PerTurboPyroModule(PyroBaseModuleClass):
             batch_plate,
             feature_plate,
             cont_covariate_plate,
+            element_effects_plate,  # sparse mode
+            guide_effects_plate,  # sparse mode
         ) = self.create_plates(idx)
         batch = tensor_dict[REGISTRY_KEYS.BATCH_KEY]
         size_factor = tensor_dict[REGISTRY_KEYS.SIZE_FACTOR_KEY]
@@ -126,6 +145,25 @@ class PerTurboPyroModule(PyroBaseModuleClass):
             "element_mean_pooling",
             dist.LogNormal(self.pooling_prior_loc, self.pooling_prior_scale),
         )
+
+        with element_effects_plate:
+            element_effects_values = pyro.sample(
+                "element_mean_lfc",
+                dist.Cauchy(0.0, self.element_mean_lfc_prior_scale),
+            )
+            element_mean_lfc = torch.sparse_coo_tensor(
+                self.element_by_var_idx, element_effects_values
+            )
+
+        with guide_effects_plate:
+            guide_effects_values = pyro.sample(
+                "perturb_mean_lfc",
+                dist.Normal(0.0, element_mean_pooling),
+            )
+            perturb_mean_lfc = (
+                torch.sparse_coo_tensor(self.guide_by_var_idx, guide_effects_values)
+                + self.guide_by_element @ element_mean_lfc
+            )
 
         with feature_plate:
             # mean and dispersion of each gene's expression
@@ -157,34 +195,39 @@ class PerTurboPyroModule(PyroBaseModuleClass):
                 )
                 covariate_effects = cont_covariates @ cont_covariate_effect_size
 
-            with element_plate:
-                # element effects: n_elements x n_vars
-                element_mean_lfc = pyro.sample(
-                    "element_mean_lfc",
-                    dist.Cauchy(0.0, self.element_mean_lfc_prior_scale),
-                )
-                if self.fit_dispersion:
-                    element_disp_lfc = pyro.sample(
-                        "element_disp_lfc",
-                        dist.Cauchy(0.0, self.element_disp_lfc_prior_scale),
-                    )
+            # with element_plate:
+            #     # element effects: n_elements x n_vars
+            #     element_mean_lfc = pyro.sample(
+            #         "element_mean_lfc",
+            #         dist.Cauchy(0.0, self.element_mean_lfc_prior_scale),
+            #     )
+            #     if self.fit_dispersion:
+            #         element_disp_lfc = pyro.sample(
+            #             "element_disp_lfc",
+            #             dist.Cauchy(0.0, self.element_disp_lfc_prior_scale),
+            #         )
 
-            with perturbation_plate:
-                # perturbation effects: n_perturbations x n_vars
-                perturb_mean_lfc = (
-                    self.guide_by_element @ element_mean_lfc
-                    + pyro.sample(
-                        "perturb_mean_lfc", dist.Normal(0.0, element_mean_pooling)
-                    )
-                )
-                if self.fit_dispersion:
-                    perturb_disp_lfc = pyro.sample(
-                        "perturb_disp_lfc",
-                        dist.Normal(
-                            self.guide_by_element @ element_disp_lfc,
-                            self.element_disp_pooling,
-                        ),
-                    )
+            # if self.has_elements:
+            #     with perturbation_plate:
+            #         # perturbation effects: n_perturbations x n_vars
+            #         perturb_mean_lfc = (
+            #             pyro.sample(
+            #                 "perturb_mean_lfc", dist.Normal(0.0, element_mean_pooling)
+            #             )
+            #             + self.guide_by_element @ element_mean_lfc
+            #         )
+            #         if self.fit_dispersion:
+            #             perturb_disp_lfc = pyro.sample(
+            #                 "perturb_disp_lfc",
+            #                 dist.Normal(
+            #                     self.guide_by_element @ element_disp_lfc,
+            #                     self.element_disp_pooling,
+            #                 ),
+            #             )
+            # else:
+            #     perturb_mean_lfc = element_mean_lfc
+            #     if self.fit_dispersion:
+            #         perturb_disp_lfc = element_disp_lfc
 
             # calculate overall parameter values for unperturbed cells
             nb_log_mean_ctrl = (
@@ -195,8 +238,8 @@ class PerTurboPyroModule(PyroBaseModuleClass):
             # add perturbation effects to per-gene parameters
             nb_log_mean = nb_log_mean_ctrl + perturbations @ perturb_mean_lfc
             nb_log_dispersion = nb_log_disp_ctrl
-            if self.fit_dispersion:
-                nb_log_dispersion += perturbations @ perturb_disp_lfc
+            # if self.fit_dispersion:
+            #     nb_log_dispersion += perturbations @ perturb_disp_lfc
 
             with cell_plate:
                 observations = tensor_dict.get(REGISTRY_KEYS.X_KEY)
@@ -230,13 +273,24 @@ class PerTurboPyroModule(PyroBaseModuleClass):
     def get_element_effects(self):
         """Return the perturbation effects on each variable's mean and variance."""
         loc, scale = self.guide._get_loc_and_scale("element_mean_lfc")
+        if len(loc.shape) == 1:
+            loc = torch.sparse_coo_tensor(
+                self.element_by_var_idx, loc.clone()
+            ).to_dense()
+            scale = torch.sparse_coo_tensor(
+                self.element_by_var_idx, scale.clone()
+            ).to_dense()
         return (loc.detach().cpu().numpy(), scale.detach().cpu().numpy())
 
     def get_perturbation_effects(self):
         """Return the perturbation effects on each variable's mean and variance."""
-        # raise Exception(list(self.guide.named_pyro_params()))
-        loc1, scale1 = self.guide._get_loc_and_scale("element_mean_lfc")
+        if not self.has_elements:
+            return self.get_element_effects()
+        loc1, scale1 = self.get_element_effects()
         loc2, scale2 = self.guide._get_loc_and_scale("perturb_mean_lfc")
+        if len(loc2.shape) == 1:
+            loc2 = torch.sparse_coo_tensor(self.element_by_var_idx, loc2.clone())
+            scale2 = torch.sparse_coo_tensor(self.element_by_var_idx, scale2.clone())
         loc = self.guide_by_element @ loc1 + loc2
-        scale = ((self.guide_by_element @ scale1)**2 + scale2**2).sqrt()
+        scale = ((self.guide_by_element @ scale1) ** 2 + scale2**2).sqrt()
         return (loc.detach().cpu().numpy(), scale.detach().cpu().numpy())
