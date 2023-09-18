@@ -28,7 +28,8 @@ class PERTURBO(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
     def __init__(
         self,
         mdata: AnnOrMuData,
-        likelihood: Optional[str] = "lnnb",
+        likelihood: Optional[str] = "nb",
+        n_factors: Optional[int] = None,
         fit_dispersion: Optional[bool] = False,
         **model_kwargs,
     ):
@@ -54,9 +55,9 @@ class PERTURBO(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
             ).n_cats_per_key
 
         guide_by_element = None
-        if REGISTRY_KEYS.PERTURB_BY_ELEMENT_KEY in self.adata_manager.data_registry:
+        if REGISTRY_KEYS.GUIDE_BY_ELEMENT_KEY in self.adata_manager.data_registry:
             guide_by_element_varm = self.adata_manager.get_from_registry(
-                REGISTRY_KEYS.PERTURB_BY_ELEMENT_KEY
+                REGISTRY_KEYS.GUIDE_BY_ELEMENT_KEY
             )
             if isinstance(guide_by_element_varm, DataFrame):
                 guide_by_element_varm = guide_by_element_varm.values
@@ -64,22 +65,23 @@ class PERTURBO(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
                 guide_by_element_varm, dtype=torch.float32, requires_grad=False
             )
 
-        var_by_element = None
-        if REGISTRY_KEYS.VAR_BY_ELEMENT_KEY in self.adata_manager.data_registry:
-            var_by_element_varm = self.adata_manager.get_from_registry(
-                REGISTRY_KEYS.VAR_BY_ELEMENT_KEY
+        gene_by_element = None
+        if REGISTRY_KEYS.GENE_BY_ELEMENT_KEY in self.adata_manager.data_registry:
+            gene_by_element_varm = self.adata_manager.get_from_registry(
+                REGISTRY_KEYS.GENE_BY_ELEMENT_KEY
             )
-            if isinstance(var_by_element_varm, DataFrame):
-                var_by_element_varm = var_by_element_varm.values
-            var_by_element = torch.tensor(
-                var_by_element_varm, dtype=torch.float32, requires_grad=False
+            if isinstance(gene_by_element_varm, DataFrame):
+                gene_by_element_varm = gene_by_element_varm.values
+            gene_by_element = torch.tensor(
+                gene_by_element_varm, dtype=torch.float32, requires_grad=False
             )
 
         self.module = PerTurboPyroModule(
             self.summary_stats,
             guide_by_element=guide_by_element,
-            var_by_element=var_by_element,
+            gene_by_element=gene_by_element,
             likelihood=likelihood,
+            n_factors=n_factors,
             fit_dispersion=fit_dispersion,
             n_cats_per_cov=n_cats_per_cov,
         )
@@ -106,7 +108,7 @@ class PERTURBO(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
         library_size_key: Optional[str] = None,
         **kwargs,
     ):
-        """Registers data from an AnnData object with the model.
+        """DEPRECATED: Registers data from an AnnData object with the model.
 
         Parameters
         ----------
@@ -150,7 +152,8 @@ class PERTURBO(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
                 raise ValueError(
                     "Cannot infer size factors: cells with zero library size. Set size_factor_key manually instead."
                 )
-            adata.obs[size_factor_key] = np.log(library_size / 1e6)
+            log_cpm = np.log(library_size / 1e6)
+            adata.obs[size_factor_key] = log_cpm - log_cpm.mean()
         anndata_fields = [
             fields.NumericalObsField(REGISTRY_KEYS.INDICES_KEY, "_ind_x"),
             fields.LayerField(REGISTRY_KEYS.X_KEY, layer, is_count_data=True),
@@ -186,10 +189,10 @@ class PERTURBO(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
         rna_layer: Optional[str] = None,
         perturbation_layer: Optional[str] = None,
         batch_key: Optional[str] = None,
-        var_by_element_key: Optional[str] = None,
+        gene_by_element_key: Optional[str] = None,
         rna_element_uns_key: Optional[str] = None,
         guide_element_uns_key: Optional[str] = None,
-        perturb_by_element_key: Optional[str] = None,
+        guide_by_element_key: Optional[str] = None,
         library_size_key: Optional[str] = None,
         size_factor_key: Optional[str] = None,
         continuous_covariates_keys: Optional[str] = None,
@@ -209,16 +212,16 @@ class PERTURBO(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
             The key of the MuData modality containing the perturbations
         batch_key
             Key within the RNA AnnData .obs corresponding to the experimental batch
-        var_by_element_key
+        gene_by_element_key
             .varm key within the RNA AnnData object containing a mask of which genes can be affected by which genetic elements
-        perturb_by_element_key
+        guide_by_element_key
             .varm key within the perturbation AnnData object containing which perturbations target which genetic elements
         rna_element_uns_key
-            .uns key within the RNA AnnData object containing names of perturbed elements (if using var_by_element_key),
+            .uns key within the RNA AnnData object containing names of perturbed elements (if using GENE_BY_ELEMENT_KEY),
             otherwise automatically inferred from column names if .varm object is a DataFrame
         guide_element_uns_key
             .uns key within the perturbation AnnData object containing names of perturbed elements
-            (if using perturb_by_element_key), otherwise automatically inferred from column names if .varm object is a DataFrame
+            (if using GUIDE_BY_ELEMENT_KEY), otherwise automatically inferred from column names if .varm object is a DataFrame
         library_size_key
             .obs key within the RNA AnnData object containing raw (not log-scaled) library size factors for each sample
         size_factor_key
@@ -308,22 +311,22 @@ class PERTURBO(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
         if continuous_covariates_keys is not None:
             mudata_fields.append(covariates_field)
 
-        if var_by_element_key is not None:
+        if gene_by_element_key is not None:
             mudata_fields.append(
                 fields.MuDataVarmField(
-                    REGISTRY_KEYS.VAR_BY_ELEMENT_KEY,
-                    var_by_element_key,
+                    REGISTRY_KEYS.GENE_BY_ELEMENT_KEY,
+                    gene_by_element_key,
                     mod_key=modalities.rna_layer,
                     is_count_data=True,
                     colnames_uns_key=rna_element_uns_key,
                 )
             )
 
-        if perturb_by_element_key is not None:
+        if guide_by_element_key is not None:
             mudata_fields.append(
                 fields.MuDataVarmField(
-                    REGISTRY_KEYS.PERTURB_BY_ELEMENT_KEY,
-                    perturb_by_element_key,
+                    REGISTRY_KEYS.GUIDE_BY_ELEMENT_KEY,
+                    guide_by_element_key,
                     mod_key=modalities.perturbation_layer,
                     is_count_data=True,
                     colnames_uns_key=guide_element_uns_key,
@@ -390,7 +393,7 @@ class PERTURBO(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
         **trainer_kwargs
             Other keyword args for :class:`~scvi.train.Trainer`.
         """
-        plan_kwargs = plan_kwargs if isinstance(plan_kwargs, dict) else {}
+        plan_kwargs = plan_kwargs if plan_kwargs is not None else {}
         if lr is not None and "optim" not in plan_kwargs.keys():
             plan_kwargs.update({"optim_kwargs": {"lr": lr}})
         if data_splitter_kwargs is None:
@@ -468,21 +471,17 @@ class PERTURBO(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
         """Plot the graphical model structure of the guide/variational distribution (requires graphviz)."""
         return self._render_pyro_model(self.module.guide)
 
-    def get_posterior_samples(self, num_samples=1):
-        # MAX_CELLS = 100
-        # n_cells = min(len(self.adata), MAX_CELLS)
-        sample_args, sample_kwargs = self._get_data_subset()
-        sample_kwargs[REGISTRY_KEYS.X_KEY] = None
-        return self._get_posterior_samples(
-            sample_args, kwargs=sample_kwargs, num_samples=num_samples
-        )
+    # def get_posterior_samples(self, num_samples=1):
+    #     sample_args, sample_kwargs = self._get_data_subset()
+    #     sample_kwargs[REGISTRY_KEYS.X_KEY] = None
+    #     return self._get_posterior_samples(
+    #         sample_args, kwargs=sample_kwargs, num_samples=num_samples
+    #     )
 
-    def get_posterior_conditional_samples(self, var_idx, num_samples=1):
-        # MAX_CELLS = 100
-        # n_cells = min(len(self.adata), MAX_CELLS)
-        sample_args, sample_kwargs = self._get_data_subset()
-        sample_kwargs[REGISTRY_KEYS.PERTURBATION_KEY][:, var_idx] = 1.0
-        sample_kwargs[REGISTRY_KEYS.X_KEY] = None
-        return self._get_posterior_samples(
-            sample_args, kwargs=sample_kwargs, num_samples=num_samples
-        )
+    # def get_posterior_conditional_samples(self, var_idx, num_samples=1):
+    #     sample_args, sample_kwargs = self._get_data_subset()
+    #     sample_kwargs[REGISTRY_KEYS.PERTURBATION_KEY][:, var_idx] = 1.0
+    #     sample_kwargs[REGISTRY_KEYS.X_KEY] = None
+    #     return self._get_posterior_samples(
+    #         sample_args, kwargs=sample_kwargs, num_samples=num_samples
+    #     )
