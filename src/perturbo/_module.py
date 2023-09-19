@@ -71,7 +71,9 @@ class PerTurboPyroModule(PyroBaseModuleClass):
         )
 
         ## register hyperparameters as buffers so they get automatically moved to GPU by scvi-tools
-        if guide_by_element is not None:
+        self.local_effects = guide_by_element is not None
+        if self.local_effects:
+            self.local_effects = True
             self.register_buffer("guide_by_element", guide_by_element.to_sparse_coo())
             self.register_buffer(
                 "guide_by_element_idx", guide_by_element.to_sparse_coo().indices()
@@ -93,8 +95,11 @@ class PerTurboPyroModule(PyroBaseModuleClass):
         self.register_buffer("batch_effect_prior_scale", torch.tensor(3.0))
         self.register_buffer("element_effects_prior_scale", torch.tensor(0.1))
         self.register_buffer("covariate_prior_sigma", torch.tensor(3.0))
-        self.register_buffer("logit_efficacy_mu", torch.tensor(2.0))
-        self.register_buffer("logit_efficacy_sigma", torch.tensor(1.0))
+        # self.register_buffer("logit_efficacy_mu", torch.tensor(2.0))
+        # self.register_buffer("logit_efficacy_sigma", torch.tensor(1.0))
+        self.register_buffer("logit_efficacy_alpha", torch.tensor(2.0))
+        self.register_buffer("logit_efficacy_beta", torch.tensor(5.0))
+
 
         if self.n_factors is not None:
             self.register_buffer("factor_element_prior_scale", torch.tensor(0.01))
@@ -152,28 +157,36 @@ class PerTurboPyroModule(PyroBaseModuleClass):
         perturbations = tensor_dict[REGISTRY_KEYS.PERTURBATION_KEY]
         cont_covariates = tensor_dict[REGISTRY_KEYS.CONT_COVS_KEY]
 
-        with element_effects_plate:
-            element_local_effects_values = pyro.sample(
-                "element_effects",
-                dist.Cauchy(0.0, self.element_effects_prior_scale),
-            )
-            element_local_effects = torch.sparse_coo_tensor(
-                self.element_by_gene_idx,
-                element_local_effects_values,
-                size=(self.n_elements, self.n_genes),
-            )
+        if self.local_effects:
+            with element_effects_plate:
+                element_local_effects_values = pyro.sample(
+                    "element_effects",
+                    dist.Cauchy(0.0, self.element_effects_prior_scale),
+                )
+                element_local_effects = torch.sparse_coo_tensor(
+                    self.element_by_gene_idx,
+                    element_local_effects_values,
+                    size=(self.n_elements, self.n_genes),
+                )
+        elif self.n_factors is None:
+            with element_plate, gene_plate:
+                total_perturbation_effect = pyro.sample(
+                    "element_effects",
+                    dist.Cauchy(0.0, self.element_effects_prior_scale),
+                )
 
         # estimate a single efficacy value per guide
         # alternative: estimate efficacy for each guide--gene *cis* pair
         if self.has_elements:
             with guide_plate:
                 # with guide_effects_plate:
-                base_dist = dist.Normal(
-                    self.logit_efficacy_mu, self.logit_efficacy_sigma
-                )
-                transforms = [dist.transforms.SigmoidTransform()]
-                logit_normal = dist.TransformedDistribution(base_dist, transforms)
-                guide_efficacy_values = pyro.sample("guide_efficacy", logit_normal)
+                # base_dist = dist.Normal(
+                #     self.logit_efficacy_mu, self.logit_efficacy_sigma
+                # )
+                # transforms = [dist.transforms.SigmoidTransform()]
+                # logit_normal = dist.TransformedDistribution(base_dist, transforms)
+                # guide_efficacy_values = pyro.sample("guide_efficacy", logit_normal)
+                guide_efficacy_values = pyro.sample("guide_efficacy", dist.Beta(self.logit_efficacy_alpha, self.logit_efficacy_beta))
                 guide_efficacy = guide_efficacy_values * self.guide_by_element
                 # guide_efficacy = torch.sparse_coo_tensor(
                 #     self.guide_by_element_idx,
@@ -223,6 +236,10 @@ class PerTurboPyroModule(PyroBaseModuleClass):
                     "batch_effect", dist.Normal(0.0, self.batch_effect_prior_scale)
                 )
                 batch_effects = batch_effect_size[batch.squeeze(), ...]
+                batch_disp_effect_size = pyro.sample(
+                    "batch_disp_effect", dist.Normal(0.0, self.batch_effect_prior_scale)
+                )
+                batch_disp_effects = batch_disp_effect_size[batch.squeeze(), ...]
 
             with cont_covariate_plate:
                 # covariate effects: n_cont_covariates x n_genes
@@ -231,6 +248,12 @@ class PerTurboPyroModule(PyroBaseModuleClass):
                     dist.Normal(0.0, self.covariate_prior_sigma),
                 )
                 covariate_effects = cont_covariates @ cont_covariate_effect_size
+
+                cont_covariate_disp_effect_size = pyro.sample(
+                    "cont_covariate_disp_effect",
+                    dist.Normal(0.0, self.covariate_prior_sigma),
+                )
+                covariate_disp_effects = cont_covariates @ cont_covariate_disp_effect_size
 
             # with element_plate:
             #     # element effects: n_elements x n_genes
@@ -270,6 +293,10 @@ class PerTurboPyroModule(PyroBaseModuleClass):
             nb_log_mean_ctrl = (
                 gene_base_log_mean + size_factor + batch_effects + covariate_effects
             )
+
+            nb_log_dispersion = (
+                gene_log_dispersion + batch_disp_effects + covariate_disp_effects
+            )
             # nb_log_disp_ctrl = nb_log_disp_gene.expand(nb_log_mean_ctrl.shape)
 
             # add perturbation effects to per-gene parameters
@@ -284,7 +311,7 @@ class PerTurboPyroModule(PyroBaseModuleClass):
                         "obs",
                         LogNormalNegativeBinomial(
                             logits=nb_log_mean
-                            - gene_log_dispersion
+                            - nb_log_dispersion
                             - multiplicative_noise**2 / 2,
                             total_count=gene_log_dispersion.exp(),
                             multiplicative_noise_scale=multiplicative_noise,
