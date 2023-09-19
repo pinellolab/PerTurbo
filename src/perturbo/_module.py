@@ -46,8 +46,8 @@ class PerTurboPyroModule(PyroBaseModuleClass):
         self.n_genes = summary_stats.n_vars
         self.n_perturbations = summary_stats.n_perturbations
         self.n_cont_covariates = 1  # include (inferred) size factor by default
-        self.has_elements = "n_targeted_elements" in summary_stats
-        if self.has_elements:
+        self.multi_guide = "n_targeted_elements" in summary_stats
+        if self.multi_guide:
             assert summary_stats.n_targeted_elements == guide_by_element.shape[1]
             self.n_elements = guide_by_element.shape[1]
         else:
@@ -71,8 +71,7 @@ class PerTurboPyroModule(PyroBaseModuleClass):
         )
 
         ## register hyperparameters as buffers so they get automatically moved to GPU by scvi-tools
-        self.local_effects = guide_by_element is not None
-        if self.local_effects:
+        if self.multi_guide:
             self.local_effects = True
             self.register_buffer("guide_by_element", guide_by_element.to_sparse_coo())
             self.register_buffer(
@@ -82,7 +81,8 @@ class PerTurboPyroModule(PyroBaseModuleClass):
             self.guide_by_element_idx.shape[1] if guide_by_element is not None else 1
         )
 
-        if gene_by_element is not None:
+        self.local_effects = gene_by_element is not None
+        if self.local_effects:
             self.register_buffer(
                 "element_by_gene_idx", gene_by_element.T.to_sparse_coo().indices()
             )
@@ -180,7 +180,7 @@ class PerTurboPyroModule(PyroBaseModuleClass):
 
         # estimate a single efficacy value per guide
         # alternative: estimate efficacy for each guide--gene *cis* pair
-        if self.has_elements:
+        if self.multi_guide:
             with guide_plate:
                 # with guide_effects_plate:
                 # base_dist = dist.Normal(
