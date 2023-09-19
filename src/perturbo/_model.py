@@ -3,6 +3,7 @@ from typing import Optional, Union
 
 import numpy as np
 import torch
+from scipy.sparse import issparse
 from mudata import AnnData, MuData
 from pandas import DataFrame
 from pyro import render_model as pyro_render_model
@@ -56,24 +57,14 @@ class PERTURBO(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
 
         guide_by_element = None
         if REGISTRY_KEYS.GUIDE_BY_ELEMENT_KEY in self.adata_manager.data_registry:
-            guide_by_element_varm = self.adata_manager.get_from_registry(
+            guide_by_element = self.read_varm_from_registry(
                 REGISTRY_KEYS.GUIDE_BY_ELEMENT_KEY
-            )
-            if isinstance(guide_by_element_varm, DataFrame):
-                guide_by_element_varm = guide_by_element_varm.values
-            guide_by_element = torch.tensor(
-                guide_by_element_varm, dtype=torch.float32, requires_grad=False
             )
 
         gene_by_element = None
         if REGISTRY_KEYS.GENE_BY_ELEMENT_KEY in self.adata_manager.data_registry:
-            gene_by_element_varm = self.adata_manager.get_from_registry(
+            gene_by_element = self.read_varm_from_registry(
                 REGISTRY_KEYS.GENE_BY_ELEMENT_KEY
-            )
-            if isinstance(gene_by_element_varm, DataFrame):
-                gene_by_element_varm = gene_by_element_varm.values
-            gene_by_element = torch.tensor(
-                gene_by_element_varm, dtype=torch.float32, requires_grad=False
             )
 
         self.module = PerTurboPyroModule(
@@ -94,6 +85,15 @@ class PERTURBO(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
         self.init_params_ = self._get_init_params(locals())
 
         logger.info("The model has been initialized")
+
+    def read_varm_from_registry(self, registry_key):
+        varm_field = self.adata_manager.get_from_registry(registry_key)
+        if isinstance(varm_field, DataFrame):
+            varm_field = varm_field.values
+        if issparse(varm_field):
+            varm_field = varm_field.todense()
+        varm_tensor = torch.tensor(varm_field, dtype=torch.float32, requires_grad=False)
+        return varm_tensor
 
     @classmethod
     def setup_anndata(
