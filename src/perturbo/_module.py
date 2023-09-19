@@ -78,7 +78,9 @@ class PerTurboPyroModule(PyroBaseModuleClass):
             self.register_buffer(
                 "guide_by_element_idx", guide_by_element.to_sparse_coo().indices()
             )
-        self.n_guide_effects = self.guide_by_element_idx.shape[1] if guide_by_element else 1
+        self.n_guide_effects = (
+            self.guide_by_element_idx.shape[1] if guide_by_element is not None else 1
+        )
 
         if gene_by_element is not None:
             self.register_buffer(
@@ -88,7 +90,9 @@ class PerTurboPyroModule(PyroBaseModuleClass):
                 "guide_by_gene_idx",
                 (guide_by_element @ gene_by_element.T).to_sparse_coo().indices(),
             )
-        self.n_element_effects = self.element_by_gene_idx.shape[1] if gene_by_element else 1
+        self.n_element_effects = (
+            self.element_by_gene_idx.shape[1] if gene_by_element is not None else 1
+        )
 
         self.register_buffer("gene_mean_prior_scale", torch.tensor(3.0))
         self.register_buffer("gene_disp_prior_scale", torch.tensor(3.0))
@@ -99,7 +103,6 @@ class PerTurboPyroModule(PyroBaseModuleClass):
         # self.register_buffer("logit_efficacy_sigma", torch.tensor(1.0))
         self.register_buffer("logit_efficacy_alpha", torch.tensor(2.0))
         self.register_buffer("logit_efficacy_beta", torch.tensor(5.0))
-
 
         if self.n_factors is not None:
             self.register_buffer("factor_element_prior_scale", torch.tensor(0.01))
@@ -186,7 +189,10 @@ class PerTurboPyroModule(PyroBaseModuleClass):
                 # transforms = [dist.transforms.SigmoidTransform()]
                 # logit_normal = dist.TransformedDistribution(base_dist, transforms)
                 # guide_efficacy_values = pyro.sample("guide_efficacy", logit_normal)
-                guide_efficacy_values = pyro.sample("guide_efficacy", dist.Beta(self.logit_efficacy_alpha, self.logit_efficacy_beta))
+                guide_efficacy_values = pyro.sample(
+                    "guide_efficacy",
+                    dist.Beta(self.logit_efficacy_alpha, self.logit_efficacy_beta),
+                )
                 guide_efficacy = guide_efficacy_values * self.guide_by_element
                 # guide_efficacy = torch.sparse_coo_tensor(
                 #     self.guide_by_element_idx,
@@ -253,7 +259,9 @@ class PerTurboPyroModule(PyroBaseModuleClass):
                     "cont_covariate_disp_effect",
                     dist.Normal(0.0, self.covariate_prior_sigma),
                 )
-                covariate_disp_effects = cont_covariates @ cont_covariate_disp_effect_size
+                covariate_disp_effects = (
+                    cont_covariates @ cont_covariate_disp_effect_size
+                )
 
             # with element_plate:
             #     # element effects: n_elements x n_genes
