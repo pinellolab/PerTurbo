@@ -78,7 +78,7 @@ class PerTurboPyroModule(PyroBaseModuleClass):
             self.register_buffer(
                 "guide_by_element_idx", guide_by_element.to_sparse_coo().indices()
             )
-            self.n_guide_effects = self.guide_by_element_idx.shape[1]
+        self.n_guide_effects = self.guide_by_element_idx.shape[1] if guide_by_element else 1
 
         if gene_by_element is not None:
             self.register_buffer(
@@ -88,7 +88,7 @@ class PerTurboPyroModule(PyroBaseModuleClass):
                 "guide_by_gene_idx",
                 (guide_by_element @ gene_by_element.T).to_sparse_coo().indices(),
             )
-            self.n_element_effects = self.element_by_gene_idx.shape[1]
+        self.n_element_effects = self.element_by_gene_idx.shape[1] if gene_by_element else 1
 
         self.register_buffer("gene_mean_prior_scale", torch.tensor(3.0))
         self.register_buffer("gene_disp_prior_scale", torch.tensor(3.0))
