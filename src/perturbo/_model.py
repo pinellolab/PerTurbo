@@ -3,13 +3,12 @@ from typing import Optional, Union
 
 import numpy as np
 import torch
-from scipy.sparse import issparse
 from mudata import AnnData, MuData
 from pandas import DataFrame
-from pyro import render_model as pyro_render_model
+from scipy.sparse import issparse
 from scvi._types import AnnOrMuData
 from scvi.data import AnnDataManager, fields
-from scvi.dataloaders import AnnDataLoader, DeviceBackedDataSplitter
+from scvi.dataloaders import DeviceBackedDataSplitter
 from scvi.model.base import (
     BaseModelClass,
     PyroJitGuideWarmup,
@@ -442,46 +441,3 @@ class PERTURBO(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
             **trainer_kwargs,
         )
         return runner()
-
-    def _get_data_subset(self, indices: Optional[list] = None):
-        loader = AnnDataLoader(
-            adata_manager=self.adata_manager,
-            indices=indices,
-            batch_size=len(indices) if indices is not None else len(self.adata),
-            data_and_attributes=self.data_and_attrs,
-        )
-        return self.module._get_fn_args_from_batch(next(iter(loader)))
-
-    def _render_pyro_model(self, model):
-        """Helper function for running two samples through the model for plotting."""
-        sample_args, sample_kwargs = self._get_data_subset([0, 1])
-        return pyro_render_model(
-            model,
-            model_args=sample_args,
-            model_kwargs=sample_kwargs,
-            render_distributions=True,
-            render_params=True,
-        )
-
-    def render_model(self):
-        """Plot the graphical model structure of the generative model (requires graphviz)."""
-        return self._render_pyro_model(self.module.model)
-
-    def render_guide(self):
-        """Plot the graphical model structure of the guide/variational distribution (requires graphviz)."""
-        return self._render_pyro_model(self.module.guide)
-
-    # def get_posterior_samples(self, num_samples=1):
-    #     sample_args, sample_kwargs = self._get_data_subset()
-    #     sample_kwargs[REGISTRY_KEYS.X_KEY] = None
-    #     return self._get_posterior_samples(
-    #         sample_args, kwargs=sample_kwargs, num_samples=num_samples
-    #     )
-
-    # def get_posterior_conditional_samples(self, var_idx, num_samples=1):
-    #     sample_args, sample_kwargs = self._get_data_subset()
-    #     sample_kwargs[REGISTRY_KEYS.PERTURBATION_KEY][:, var_idx] = 1.0
-    #     sample_kwargs[REGISTRY_KEYS.X_KEY] = None
-    #     return self._get_posterior_samples(
-    #         sample_args, kwargs=sample_kwargs, num_samples=num_samples
-    #     )
