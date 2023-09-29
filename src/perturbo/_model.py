@@ -3,7 +3,7 @@ from typing import Optional, Union
 
 import numpy as np
 import torch
-from mudata import AnnData, MuData
+from mudata import MuData
 from pandas import DataFrame
 from scipy.sparse import issparse
 from scvi._types import AnnOrMuData
@@ -54,6 +54,8 @@ class PERTURBO(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
                 REGISTRY_KEYS.CAT_COVS_KEY
             ).n_cats_per_key
 
+        gene_summary_stats = self.adata_manager.get_from_registry(REGISTRY_KEYS.GENE_SUMMARY_STATS)
+
         guide_by_element = None
         if REGISTRY_KEYS.GUIDE_BY_ELEMENT_KEY in self.adata_manager.data_registry:
             guide_by_element = self.read_varm_from_registry(
@@ -68,6 +70,7 @@ class PERTURBO(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
 
         self.module = PerTurboPyroModule(
             self.summary_stats,
+            gene_summary_stats = gene_summary_stats,
             guide_by_element=guide_by_element,
             gene_by_element=gene_by_element,
             likelihood=likelihood,
@@ -95,91 +98,97 @@ class PERTURBO(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
         return varm_tensor
 
     @classmethod
-    def setup_anndata(
-        cls,
-        adata: AnnData,
-        perturbation_key: str,
-        layer: Optional[str] = None,
-        batch_key: Optional[str] = None,
-        size_factor_key: Optional[str] = None,
-        continuous_covariates_keys: Optional[str] = None,
-        categorical_covariates_keys: Optional[str] = None,
-        library_size_key: Optional[str] = None,
-        **kwargs,
-    ):
-        """DEPRECATED: Registers data from an AnnData object with the model.
+    def setup_anndata(cls):
+        """Required by scvi-tools"""
+        raise NotImplementedError("deprecated: use setup_mudata instead")
 
-        Parameters
-        ----------
-        adata
-            (Required) An AnnData object containing the perturbations and observational data.
-        perturbation_key
-            (Required) .obsm field of the AnnData containing a matrix of cells x perturbations
-        layer
-            Layer of adata containing the observed RNA transcript counts
-        batch_key
-            Key within the RNA AnnData .obs corresponding to the experimental batch
-        library_size_key
-            .obs key of adata containing raw (not log-scaled) library size factors for each sample
-        size_factor_key
-            .obs key of adata containing library size factors for each sample (e.g. log-library size)
-        continuous_covariates_keys
-            list of .obs keys within adata containing other continuous covariates to be "regressed out"
-        kwargs
-            Additional keyword arguments
-        """
-        setup_method_args = cls._get_setup_method_args(**locals())
-        adata.obs["_ind_x"] = np.arange(len(adata))
-        # add library size if not present
-        if library_size_key is None:
-            library_size_key = "_library_size"
-            if layer is None:
-                data = adata.X
-            else:
-                data = adata.layers[layer]
-            library_size = data.sum(axis=1)
-            if not library_size.all():
-                raise ValueError(
-                    "Cannot infer library size: cells with zero counts. Set library_size_key manually instead."
-                )
-            adata.obs[library_size_key] = library_size
-        # add size factor if not present
-        if size_factor_key is None:
-            size_factor_key = "_size_factor"
-            library_size = adata.obs[library_size_key]
-            if not library_size.all():
-                raise ValueError(
-                    "Cannot infer size factors: cells with zero library size. Set size_factor_key manually instead."
-                )
-            log_cpm = np.log(library_size / 1e6)
-            adata.obs[size_factor_key] = log_cpm - log_cpm.mean()
-        anndata_fields = [
-            fields.NumericalObsField(REGISTRY_KEYS.INDICES_KEY, "_ind_x"),
-            fields.LayerField(REGISTRY_KEYS.X_KEY, layer, is_count_data=True),
-            fields.ObsmField(REGISTRY_KEYS.PERTURBATION_KEY, perturbation_key),
-            fields.CategoricalObsField(REGISTRY_KEYS.BATCH_KEY, batch_key),
-            fields.NumericalObsField(
-                REGISTRY_KEYS.SIZE_FACTOR_KEY, size_factor_key, required=False
-            ),
-        ]
-        if continuous_covariates_keys is not None:
-            anndata_fields += (
-                fields.NumericalJointObsField(
-                    REGISTRY_KEYS.CONT_COVS_KEY, continuous_covariates_keys
-                ),
-            )
-        if categorical_covariates_keys is not None:
-            anndata_fields += (
-                fields.CategoricalJointObsField(
-                    REGISTRY_KEYS.CAT_COVS_KEY, categorical_covariates_keys
-                ),
-            )
-        adata_manager = AnnDataManager(
-            fields=anndata_fields,
-            setup_method_args=setup_method_args,
-        )
-        adata_manager.register_fields(adata, **kwargs)
-        cls.register_manager(adata_manager)
+    # @classmethod
+    # def setup_anndata(
+    #     cls,
+    #     adata: AnnData,
+    #     perturbation_key: str,
+    #     layer: Optional[str] = None,
+    #     batch_key: Optional[str] = None,
+    #     size_factor_key: Optional[str] = None,
+    #     continuous_covariates_keys: Optional[str] = None,
+    #     categorical_covariates_keys: Optional[str] = None,
+    #     library_size_key: Optional[str] = None,
+    #     **kwargs,
+    # ):
+    #     """DEPRECATED: Registers data from an AnnData object with the model.
+
+    #     Parameters
+    #     ----------
+    #     adata
+    #         (Required) An AnnData object containing the perturbations and observational data.
+    #     perturbation_key
+    #         (Required) .obsm field of the AnnData containing a matrix of cells x perturbations
+    #     layer
+    #         Layer of adata containing the observed RNA transcript counts
+    #     batch_key
+    #         Key within the RNA AnnData .obs corresponding to the experimental batch
+    #     library_size_key
+    #         .obs key of adata containing raw (not log-scaled) library size factors for each sample
+    #     size_factor_key
+    #         .obs key of adata containing library size factors for each sample (e.g. log-library size)
+    #     continuous_covariates_keys
+    #         list of .obs keys within adata containing other continuous covariates to be "regressed out"
+    #     kwargs
+    #         Additional keyword arguments
+    #     """
+    #     setup_method_args = cls._get_setup_method_args(**locals())
+    #     adata.obs["_ind_x"] = np.arange(len(adata))
+    #     # add library size if not present
+    #     if library_size_key is None:
+    #         library_size_key = "_library_size"
+    #         if layer is None:
+    #             data = adata.X
+    #         else:
+    #             data = adata.layers[layer]
+    #         library_size = data.sum(axis=1)
+    #         if not library_size.all():
+    #             raise ValueError(
+    #                 "Cannot infer library size: cells with zero counts. Set library_size_key manually instead."
+    #             )
+    #         adata.obs[library_size_key] = library_size
+
+    #     # add size factor if not present
+    #     if size_factor_key is None:
+    #         size_factor_key = "_size_factor"
+    #         library_size = adata.obs[library_size_key]
+    #         if not library_size.all():
+    #             raise ValueError(
+    #                 "Cannot infer size factors: cells with zero library size. Set size_factor_key manually instead."
+    #             )
+    #         log_cpm = np.log(library_size / 1e6)
+    #         adata.obs[size_factor_key] = log_cpm - log_cpm.mean()
+    #     anndata_fields = [
+    #         fields.NumericalObsField(REGISTRY_KEYS.INDICES_KEY, "_ind_x"),
+    #         fields.LayerField(REGISTRY_KEYS.X_KEY, layer, is_count_data=True),
+    #         fields.ObsmField(REGISTRY_KEYS.PERTURBATION_KEY, perturbation_key),
+    #         fields.CategoricalObsField(REGISTRY_KEYS.BATCH_KEY, batch_key),
+    #         fields.NumericalObsField(
+    #             REGISTRY_KEYS.SIZE_FACTOR_KEY, size_factor_key, required=False
+    #         ),
+    #     ]
+    #     if continuous_covariates_keys is not None:
+    #         anndata_fields += (
+    #             fields.NumericalJointObsField(
+    #                 REGISTRY_KEYS.CONT_COVS_KEY, continuous_covariates_keys
+    #             ),
+    #         )
+    #     if categorical_covariates_keys is not None:
+    #         anndata_fields += (
+    #             fields.CategoricalJointObsField(
+    #                 REGISTRY_KEYS.CAT_COVS_KEY, categorical_covariates_keys
+    #             ),
+    #         )
+    #     adata_manager = AnnDataManager(
+    #         fields=anndata_fields,
+    #         setup_method_args=setup_method_args,
+    #     )
+    #     adata_manager.register_fields(adata, **kwargs)
+    #     cls.register_manager(adata_manager)
 
     @classmethod
     def setup_mudata(
@@ -256,9 +265,8 @@ class PERTURBO(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
                 raise ValueError(
                     "Cannot infer size factors: cells with zero library size. Set size_factor_key manually instead."
                 )
-            mdata[modalities.rna_layer].obs[size_factor_key] = np.log(
-                library_size / 1e6
-            )
+            log_cpm = np.log(library_size / 1e6)
+            mdata[modalities.rna_layer].obs[size_factor_key] = log_cpm - log_cpm.mean()
 
         # add indices to enable pyro subsampling of local vars
         mdata[modalities.rna_layer].obs = mdata[modalities.rna_layer].obs.assign(
@@ -267,6 +275,20 @@ class PERTURBO(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
         index_field = fields.MuDataNumericalObsField(
             REGISTRY_KEYS.INDICES_KEY,
             "_ind_x",
+            mod_key=modalities.rna_layer,
+        )
+
+        # add info for method of moments estimation of gene params
+        rna_adata = mdata[modalities.rna_layer]
+        mean_counts = np.mean(rna_adata.X, axis=0)
+        if isinstance(mean_counts,np.matrix): # occurs when summing sparse array
+            mean_counts = mean_counts.A1
+        rna_adata.var["_gene_mean"] = mean_counts
+        # rna_adata.var["_gene_variance"] = np.var(rna_adata.X, axis=0).squeeze()
+        # rna_adata.var["_gene_variance"] = np.var(rna_adata.X, axis=0).squeeze()
+        gene_field = fields.MuDataNumericalJointVarField(
+            REGISTRY_KEYS.GENE_SUMMARY_STATS,
+            ["_gene_mean"],
             mod_key=modalities.rna_layer,
         )
 
@@ -285,6 +307,7 @@ class PERTURBO(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
         mudata_fields = [
             index_field,
             batch_field,
+            gene_field,
             fields.MuDataLayerField(
                 REGISTRY_KEYS.PERTURBATION_KEY,
                 perturbation_layer,
