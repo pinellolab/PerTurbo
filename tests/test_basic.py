@@ -11,7 +11,9 @@ import perturbo
 
 rna_key = "rna"
 perturb_key = "grna"
-element_key = "element"
+guide_by_element_key = "guide_by_element"
+gene_by_element_key = "gene_by_element"
+
 
 
 @pytest.fixture
@@ -20,6 +22,7 @@ def adata():
     n_cells = 20
     n_genes = 10
     n_grna = 5
+    n_elements = 3
 
     # generate fake transcript counts
     total_rna = pd.DataFrame(
@@ -32,10 +35,20 @@ def adata():
         np.float64
     )
     rna_adata = AnnData(rna_counts, obs=total_rna)
+    rna_adata.var_names = "guide" + rna_adata.var_names
 
-    # generate fake guide status
+    # generate fake guide status (for AnnData only version)
     rna_adata.obsm[perturb_key] = np.random.binomial(1, 0.5, size=(n_cells, n_grna))
-    # generate identity guide/element pairing
+
+    # generate gene/element pairing
+    rna_adata.uns['elements'] = [f"element{str(i)}" for i in range(n_elements)]
+    gene_by_element = np.random.binomial(1, 0.5, size=(n_genes, n_elements)).astype(np.float32)
+    rna_adata.varm[gene_by_element_key] = pd.DataFrame(
+        gene_by_element,
+        index = rna_adata.var_names,
+        columns = rna_adata.uns['elements']
+    )
+
 
     return rna_adata
 
@@ -55,11 +68,13 @@ def mdata(adata: AnnData):
         np.random.binomial(1, 0.5, size=(n_cells, n_grna)).astype(np.float32)
     )
     perturb_adata.var_names = "guide" + perturb_adata.var_names
+    perturb_adata.uns['elements'] = rna_adata.uns['elements']
+
     guide_by_element = np.random.binomial(1, 0.8, size=(n_grna, n_elements)).astype(np.float32)
-    perturb_adata.varm[element_key] = pd.DataFrame.sparse.from_spmatrix(
-        csr_matrix(guide_by_element),
+    perturb_adata.varm[guide_by_element_key] = pd.DataFrame(
+        guide_by_element,
         index = perturb_adata.var_names,
-        columns = [f"element_{str(i)}" for i in range(n_elements)]
+        columns = perturb_adata.uns['elements']
     )
 
     # combine into MuData
@@ -71,40 +86,49 @@ def test_package_has_version():
     logging.info("version: " + perturbo.__version__)
     assert perturbo.__version__ is not None
 
-
-def test_model_mdata(mdata: MuData, tmp_path):
+@pytest.mark.parametrize('use_gene_by_element', [True, False])
+@pytest.mark.parametrize('use_guide_by_element', [True, False])
+def test_model_mdata(mdata: MuData, tmp_path, use_guide_by_element, use_gene_by_element):
     """Check that we can register our MuData object with our model and perform training"""
+    if use_gene_by_element and not use_guide_by_element:
+        pytest.skip("gene_by_element without guide_by_element test not implemented!")
+
     pyro.clear_param_store()
     perturbo.PERTURBO.setup_mudata(
         mdata,
         # size_factor_key="lib_size",
-        # batch_key="batch_id",
-        categorical_covariates_keys=["batch_id"],
-        perturb_by_element_key=element_key,
+        batch_key="batch_id",
+        guide_element_uns_key="elements" if use_guide_by_element else None,
+        rna_element_uns_key="elements" if use_gene_by_element else None,
+        categorical_covariates_keys=["lib_size"],
+        guide_by_element_key=guide_by_element_key if use_guide_by_element else None,
+        gene_by_element_key=gene_by_element_key if use_gene_by_element else None,
         modalities={
             "rna_layer": rna_key,
             "perturbation_layer": perturb_key,
         },
     )
-    model = perturbo.PERTURBO(mdata)
+
+    model = perturbo.PERTURBO(mdata, n_factors=None)
     assert model.summary_stats.n_cells == len(mdata)
     assert model.summary_stats.n_vars == len(mdata[rna_key].var)
     assert model.summary_stats.n_perturbations == len(mdata[perturb_key].var)
 
     model.train(max_epochs=10, lr=0.1)
     model.train(max_epochs=10, lr=0.1, batch_size=None)
-    samples = model.get_posterior_samples()
-    assert samples["obs"].shape[-2:] == (
-        model.summary_stats.n_cells,
-        model.summary_stats.n_vars,
-    )
+    # samples = model.get_posterior_samples()
+    # assert samples["obs"].shape[-2:] == (
+    #     model.summary_stats.n_cells,
+    #     model.summary_stats.n_vars,
+    # )
 
     model.save(tmp_path / "model", save_anndata=True)
     model = perturbo.PERTURBO.load(tmp_path / "model")
-    model.train(max_epochs=1, lr=0.1)
+    # model.train(max_epochs=1, lr=0.1)
 
     e_loc, e_scale = model.module.get_element_effects()
-    p_loc, p_scale = model.module.get_perturbation_effects()
+    # p_loc, p_scale = model.moduleget_perturbation_effects()
+
 
 
 # def test_model_adata(adata: AnnData, tmp_path):

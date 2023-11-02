@@ -2,9 +2,9 @@
 
 # 🏎️ PerTurbo: Fast analysis of single-cell perturbation studies
 
-**PerTurbo** estimates the effects of CRISPR perturbations on single cell phenotypes using variational inference.
+**PerTurbo** is a fast statistical package for analyzing perturbation phenotypes from single cell CRISPR screens.
 
-Currently, the focus is on CRISPRi + RNA-seq (i.e. CROP-seq, Perturb-Seq) but we're planning to support other assays in the future!
+For reproducibility, see []
 
 <!-- [![Documentation][badge-docs]][link-docs] -->
 

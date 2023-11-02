@@ -6,7 +6,7 @@ dependencies = [
 [envs.default.scripts]
 test = "pytest {args:tests}"
 
-[envs.dev]
+[envs.perturbo-dev]
 dependencies = [
     "perturbo[test]",
     # For notebooks
