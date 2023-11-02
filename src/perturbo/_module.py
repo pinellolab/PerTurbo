@@ -1,3 +1,4 @@
+import warnings
 from collections.abc import Iterable
 from typing import Optional
 
@@ -296,7 +297,8 @@ class PerTurboPyroModule(PyroBaseModuleClass):
         return self._guide
 
     def get_element_effects(self):
-        """Return the element-level effects on each gene's mean and variance."""
+        """DEPRECATED: Return the element-level effects on each gene's mean and variance."""
+        warnings.warn("Deprecated: Use model.get_element_effects instead.", DeprecationWarning, stacklevel=1)
         loc, scale = self.guide._get_loc_and_scale("element_effects")
         if len(loc.shape) == 1:
             loc = torch.sparse_coo_tensor(
