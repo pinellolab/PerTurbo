@@ -25,6 +25,7 @@ dependencies = [
     "pyro-ppl",
     "mudata",
     "pandas >= 1.5.3",
+    "scipy",
     # for debug logging (referenced from the issue template)
     "session-info",
 ]

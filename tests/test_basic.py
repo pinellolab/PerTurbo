@@ -35,7 +35,7 @@ def adata():
         np.float64
     )
     rna_adata = AnnData(rna_counts, obs=total_rna)
-    rna_adata.var_names = "guide" + rna_adata.var_names
+    rna_adata.var_names = "gene" + rna_adata.var_names
 
     # generate fake guide status (for AnnData only version)
     rna_adata.obsm[perturb_key] = np.random.binomial(1, 0.5, size=(n_cells, n_grna))
@@ -121,12 +121,12 @@ def test_model_mdata(mdata: MuData, tmp_path, use_guide_by_element, use_gene_by_
     #     model.summary_stats.n_cells,
     #     model.summary_stats.n_vars,
     # )
-
+    fx = model.get_element_effects()
+    assert isinstance(fx, pd.DataFrame)
+    print(fx)
     model.save(tmp_path / "model", save_anndata=True)
     model = perturbo.PERTURBO.load(tmp_path / "model")
     # model.train(max_epochs=1, lr=0.1)
-
-    e_loc, e_scale = model.module.get_element_effects()
     # p_loc, p_scale = model.moduleget_perturbation_effects()
 
 
