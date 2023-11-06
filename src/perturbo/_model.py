@@ -372,7 +372,10 @@ class PERTURBO(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
         self,
     ):
         """Return a DataFrame summary of the effects for targeted elements on each gene"""
-        element_ids = self.adata_manager.get_state_registry("tested_elements").column_names
+        if REGISTRY_KEYS.GUIDE_BY_ELEMENT_KEY in self.adata_manager.data_registry:
+            element_ids = self.adata_manager.get_state_registry(REGISTRY_KEYS.GUIDE_BY_ELEMENT_KEY).column_names
+        else:
+            element_ids = self.adata_manager.get_state_registry(REGISTRY_KEYS.PERTURBATION_KEY).column_names
         gene_ids = self.adata_manager.get_state_registry("X").column_names
         loc_values, scale_values = self.module.guide._get_loc_and_scale("element_effects")
 
@@ -399,7 +402,9 @@ class PERTURBO(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
                     .reset_index(names="element")
                 )
 
-            element_effects = pd.merge(make_long_df(loc_values, "loc"), make_long_df(scale_values, "scale"))
+            element_effects = pd.merge(
+                make_long_df(loc_values.detach(), "loc"), make_long_df(scale_values.detach(), "scale")
+            )
 
         element_effects = element_effects.assign(
             z_value=lambda x: x["loc"] / x["scale"],
