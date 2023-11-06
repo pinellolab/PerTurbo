@@ -123,7 +123,7 @@ def test_model_mdata(mdata: MuData, tmp_path, use_guide_by_element, use_gene_by_
     # )
     fx = model.get_element_effects()
     assert isinstance(fx, pd.DataFrame)
-    print(fx)
+    assert isinstance(model.history["elbo_train"], pd.DataFrame)
     model.save(tmp_path / "model", save_anndata=True)
     model = perturbo.PERTURBO.load(tmp_path / "model")
     # model.train(max_epochs=1, lr=0.1)
