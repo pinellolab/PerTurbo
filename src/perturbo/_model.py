@@ -403,7 +403,11 @@ class PERTURBO(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
                 )
 
             element_effects = pd.merge(
+<<<<<<< HEAD
                 make_long_df(loc_values.detach().cpu(), "loc"), make_long_df(scale_values.detach().cpu(), "scale")
+=======
+                make_long_df(loc_values.detach(), "loc"), make_long_df(scale_values.detach(), "scale")
+>>>>>>> cb46f8d (Export perturbation effects as a pandas DataFrame (#33))
             )
 
         element_effects = element_effects.assign(
