@@ -386,8 +386,8 @@ class PERTURBO(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
             # pert_ids = self.adata_manager.get_state_registry("perturbations").column_names
             element_effects = pd.DataFrame(
                 {
-                    "loc": loc_values.detach(),
-                    "scale": scale_values.detach(),
+                    "loc": loc_values.detach().cpu().numpy(),
+                    "scale": scale_values.detach().cpu().numpy(),
                     "element": [element_ids[idx] for idx in i],
                     "gene": [gene_ids[idx] for idx in j],
                 }
@@ -403,7 +403,7 @@ class PERTURBO(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
                 )
 
             element_effects = pd.merge(
-                make_long_df(loc_values.detach(), "loc"), make_long_df(scale_values.detach(), "scale")
+                make_long_df(loc_values.detach().cpu(), "loc"), make_long_df(scale_values.detach().cpu(), "scale")
             )
 
         element_effects = element_effects.assign(
