@@ -9,6 +9,7 @@ from pandas import DataFrame
 from scipy.sparse import issparse
 from scipy.stats import chi2
 from scvi._types import AnnOrMuData
+from pyro.infer.autoguide import AutoNormal
 from scvi.data import AnnDataManager, fields
 from scvi.dataloaders import DeviceBackedDataSplitter
 from scvi.model.base import (
@@ -377,7 +378,12 @@ class PERTURBO(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
         else:
             element_ids = self.adata_manager.get_state_registry(REGISTRY_KEYS.PERTURBATION_KEY).column_names
         gene_ids = self.adata_manager.get_state_registry("X").column_names
-        loc_values, scale_values = self.module.guide._get_loc_and_scale("element_effects")
+        for guide in self.module.guide:
+            if "element_effects" in guide.median():
+                loc_values, scale_values = guide._get_loc_and_scale("element_effects")
+                # loc_values, loc_plus_scale_values = guide.quantiles([0.5, 0.841])["element_effects"]
+                # scale_values = loc_plus_scale_values - loc_values
+        # loc_values, scale_values = self.module.guide._get_loc_and_scale("element_effects")
 
         if self.module.local_effects:
             # loc/scale_values are the nonzero elements of a sparse matrix of elements by genes

@@ -6,7 +6,8 @@ import pyro
 import pyro.distributions as dist
 import torch
 from pandas import DataFrame
-from pyro.infer.autoguide import AutoNormal, init_to_median
+from pyro.infer.autoguide import AutoNormal, init_to_median, AutoGuideList, AutoDelta
+from pyro import poutine
 from scvi.module.base import PyroBaseModuleClass
 
 from ._constants import REGISTRY_KEYS
@@ -39,7 +40,7 @@ class PerTurboPyroModule(PyroBaseModuleClass):
         self.dispersion_effects = dispersion_effects
         self.likelihood = likelihood
         self.merge_guides = merge_guides
-        self.lnnb_quad_points = 8
+        self.lnnb_quad_points = 16
         self.n_factors = n_factors
 
         # copy data summary stats
@@ -70,6 +71,21 @@ class PerTurboPyroModule(PyroBaseModuleClass):
             create_plates=self.create_plates,
         )
 
+        self._guide = AutoGuideList(self.model, create_plates=self.create_plates)
+        self._guide.append(
+            AutoNormal(
+                poutine.block(self.model, hide="element_effects"),
+                init_loc_fn=init_to_median,
+            )
+        )
+        self._guide.append(
+            AutoNormal(
+                poutine.block(self.model, expose="element_effects"),
+                init_loc_fn=init_to_median,
+                init_scale=0.01
+            )
+        )
+
         ## register hyperparameters as buffers so they get automatically moved to GPU by scvi-tools
         self.register_buffer("guide_by_element", guide_by_element.to_sparse_coo())
 
@@ -98,8 +114,8 @@ class PerTurboPyroModule(PyroBaseModuleClass):
             self.register_buffer("gene_disp_prior_loc", torch.tensor(0.0))
 
         self.register_buffer("zero", torch.tensor(0.0))
-        self.register_buffer("gene_mean_prior_scale", torch.tensor(1.0))
-        self.register_buffer("gene_disp_prior_scale", torch.tensor(1.0))
+        self.register_buffer("gene_mean_prior_scale", torch.tensor(3.0))
+        self.register_buffer("gene_disp_prior_scale", torch.tensor(3.0))
         self.register_buffer("batch_effect_prior_scale", torch.tensor(3.0))
         self.register_buffer("element_effects_prior_scale", torch.tensor(0.1))
         self.register_buffer("covariate_prior_sigma", torch.tensor(3.0))
@@ -112,12 +128,17 @@ class PerTurboPyroModule(PyroBaseModuleClass):
             self.register_buffer("factor_gene_prior_scale", torch.tensor(0.0001))
 
         if self.likelihood == "lnnb":
-            self.register_buffer("noise_prior_rate", torch.tensor(10.0, requires_grad=False))
+            self.register_buffer("noise_prior_rate", torch.tensor(2.0, requires_grad=False))
 
     @staticmethod
     def _get_fn_args_from_batch(tensor_dict):
-        # tack on size factor after the other continuous covariates
-        size_factor = tensor_dict[REGISTRY_KEYS.SIZE_FACTOR_KEY]
+        fit_size_factor_covariate=False
+
+        if fit_size_factor_covariate:
+            # tack on size factor after the other continuous covariates
+            size_factor = tensor_dict[REGISTRY_KEYS.SIZE_FACTOR_KEY]
+        else:
+            size_factor = torch.zeros_like(tensor_dict[REGISTRY_KEYS.SIZE_FACTOR_KEY])
         if REGISTRY_KEYS.CONT_COVS_KEY in tensor_dict:
             tensor_dict[REGISTRY_KEYS.CONT_COVS_KEY] = torch.cat(
                 (tensor_dict[REGISTRY_KEYS.CONT_COVS_KEY], size_factor), dim=-1
@@ -295,33 +316,3 @@ class PerTurboPyroModule(PyroBaseModuleClass):
     @property
     def guide(self):
         return self._guide
-
-    def get_element_effects(self):
-        """DEPRECATED: Return the element-level effects on each gene's mean and variance."""
-        warnings.warn("Deprecated: Use model.get_element_effects instead.", DeprecationWarning, stacklevel=1)
-        loc, scale = self.guide._get_loc_and_scale("element_effects")
-        if len(loc.shape) == 1:
-            loc = torch.sparse_coo_tensor(
-                self.element_by_gene_idx,
-                loc.clone(),
-                size=(self.n_elements, self.n_genes),
-            ).to_dense()
-            scale = torch.sparse_coo_tensor(
-                self.element_by_gene_idx,
-                scale.clone(),
-                size=(self.n_elements, self.n_genes),
-            ).to_dense()
-        return (loc.detach().cpu().numpy(), scale.detach().cpu().numpy())
-
-    # def get_guide_effects(self):
-    #     """Return the guide-level effects on each gene's mean and variance."""
-    #     if not self.has_elements:
-    #         return self.get_element_effects()
-    #     loc1, scale1 = self.get_element_effects()
-    #     loc2, scale2 = self.guide._get_loc_and_scale("perturb_mean_lfc")
-    #     if len(loc2.shape) == 1:
-    #         loc2 = torch.sparse_coo_tensor(self.element_by_gene_idx, loc2.clone())
-    #         scale2 = torch.sparse_coo_tensor(self.element_by_gene_idx, scale2.clone())
-    #     loc = self.guide_by_element @ loc1 + loc2
-    #     scale = ((self.guide_by_element @ scale1) ** 2 + scale2**2).sqrt()
-    #     return (loc.detach().cpu().numpy(), scale.detach().cpu().numpy())

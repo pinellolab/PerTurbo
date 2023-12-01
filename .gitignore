@@ -17,6 +17,7 @@ __pycache__/
 # Notebook checkpoints
 */.ipynb_checkpoints
 */*/.ipynb_checkpoints
+docs/notebooks/checkpoints
 
 # Tests and coverage
 /.pytest_cache/
