@@ -449,7 +449,6 @@ class PERTURBO(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
 
         self.to_device(device)
 
-
         return self._get_posterior_samples(
             args,
             kwargs=kwargs,

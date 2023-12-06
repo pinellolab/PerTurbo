@@ -1,4 +1,3 @@
-import warnings
 from collections.abc import Iterable
 from typing import Optional
 
@@ -6,8 +5,8 @@ import pyro
 import pyro.distributions as dist
 import torch
 from pandas import DataFrame
-from pyro.infer.autoguide import AutoNormal, init_to_median, AutoGuideList, AutoDelta
 from pyro import poutine
+from pyro.infer.autoguide import AutoGuideList, AutoNormal, init_to_median
 from scvi.module.base import PyroBaseModuleClass
 
 from ._constants import REGISTRY_KEYS
@@ -29,6 +28,7 @@ class PerTurboPyroModule(PyroBaseModuleClass):
         guide_by_element: Optional[torch.Tensor] = None,
         gene_by_element: Optional[torch.Tensor] = None,
         likelihood: Optional[str] = "nb",
+        effect_prior_dist="normal_mixture",
         n_factors=None,
         dispersion_effects=False,
         merge_guides=False,
@@ -40,8 +40,9 @@ class PerTurboPyroModule(PyroBaseModuleClass):
         self.dispersion_effects = dispersion_effects
         self.likelihood = likelihood
         self.merge_guides = merge_guides
-        self.lnnb_quad_points = 16
+        self.lnnb_quad_points = 8
         self.n_factors = n_factors
+        self.effect_prior_dist = effect_prior_dist
 
         # copy data summary stats
         self.n_cells = summary_stats.n_cells
@@ -73,17 +74,10 @@ class PerTurboPyroModule(PyroBaseModuleClass):
 
         self._guide = AutoGuideList(self.model, create_plates=self.create_plates)
         self._guide.append(
-            AutoNormal(
-                poutine.block(self.model, hide="element_effects"),
-                init_loc_fn=init_to_median,
-            )
+            AutoNormal(poutine.block(self.model, hide="element_effects"), init_loc_fn=init_to_median, init_scale=0.1)
         )
         self._guide.append(
-            AutoNormal(
-                poutine.block(self.model, expose="element_effects"),
-                init_loc_fn=init_to_median,
-                init_scale=0.01
-            )
+            AutoNormal(poutine.block(self.model, expose="element_effects"), init_loc_fn=init_to_median, init_scale=0.1)
         )
 
         ## register hyperparameters as buffers so they get automatically moved to GPU by scvi-tools
@@ -123,6 +117,9 @@ class PerTurboPyroModule(PyroBaseModuleClass):
         self.register_buffer("logit_efficacy_alpha", torch.tensor(5.0))
         self.register_buffer("logit_efficacy_beta", torch.tensor(1.0))
 
+        self.register_buffer("spike_slab_prior_scales", torch.tensor([1.0, 0.1]))
+        self.register_buffer("spike_slab_prior_probs", torch.tensor([0.001, 0.999]))
+
         if self.n_factors is not None:
             self.register_buffer("factor_element_prior_scale", torch.tensor(0.0001))
             self.register_buffer("factor_gene_prior_scale", torch.tensor(0.0001))
@@ -132,7 +129,7 @@ class PerTurboPyroModule(PyroBaseModuleClass):
 
     @staticmethod
     def _get_fn_args_from_batch(tensor_dict):
-        fit_size_factor_covariate=False
+        fit_size_factor_covariate = False
 
         if fit_size_factor_covariate:
             # tack on size factor after the other continuous covariates
@@ -181,12 +178,17 @@ class PerTurboPyroModule(PyroBaseModuleClass):
         size_factor = tensor_dict[REGISTRY_KEYS.SIZE_FACTOR_KEY]
         perturbations = tensor_dict[REGISTRY_KEYS.PERTURBATION_KEY]
         cont_covariates = tensor_dict[REGISTRY_KEYS.CONT_COVS_KEY]
+
+        if self.effect_prior_dist == "normal_mixture":
+            comp_dist = dist.Normal(0.0, self.spike_slab_prior_scales)
+            mix_dist = dist.Categorical(probs=self.spike_slab_prior_probs)
+            effects_dist = dist.MixtureSameFamily(mix_dist, comp_dist)
+        else:
+            effects_dist = dist.Cauchy(0.0, self.element_effects_prior_scale)
+
         if self.local_effects:
             with element_effects_plate:
-                element_local_effects_values = pyro.sample(
-                    "element_effects",
-                    dist.Cauchy(0.0, self.element_effects_prior_scale),
-                )
+                element_local_effects_values = pyro.sample("element_effects", effects_dist)
                 element_local_effects = torch.sparse_coo_tensor(
                     self.element_by_gene_idx,
                     element_local_effects_values,
@@ -194,10 +196,7 @@ class PerTurboPyroModule(PyroBaseModuleClass):
                 )
         else:
             with element_plate, gene_plate:
-                element_local_effects = pyro.sample(
-                    "element_effects",
-                    dist.Cauchy(0.0, self.element_effects_prior_scale),
-                )
+                element_local_effects = pyro.sample("element_effects", effects_dist)
 
         # estimate a single efficacy value per guide
         if self.multi_guide and not self.merge_guides:
@@ -316,3 +315,18 @@ class PerTurboPyroModule(PyroBaseModuleClass):
     @property
     def guide(self):
         return self._guide
+
+    @property
+    def list_obs_plate_vars(self):
+        """Model annotation for minibatch training with pyro plate.
+
+        A dictionary with:
+        1. "name" - the name of observation/minibatch plate;
+        2. "in" - indexes of model args to provide to encoder network when using amortised inference;
+        3. "sites" - dictionary with
+            keys - names of variables that belong to the observation plate (used to recognise
+             and merge posterior samples for minibatch variables)
+            values - the dimensions in non-plate axis of each variable (used to construct output
+             layer of encoder network when using amortised inference)
+        """
+        return {"name": "cells", "in": [], "sites": {"obs": 0}}
