@@ -1,5 +1,5 @@
 import logging
-from typing import Optional, Union
+from typing import List, Optional, Union
 
 import numpy as np
 import pandas as pd
@@ -9,9 +9,9 @@ from pandas import DataFrame
 from scipy.sparse import issparse
 from scipy.stats import chi2
 from scvi._types import AnnOrMuData
-from pyro.infer.autoguide import AutoNormal
 from scvi.data import AnnDataManager, fields
-from scvi.dataloaders import DeviceBackedDataSplitter
+from scvi.dataloaders import AnnDataLoader, DeviceBackedDataSplitter
+from scvi.model._utils import parse_device_args
 from scvi.model.base import (
     BaseModelClass,
     PyroJitGuideWarmup,
@@ -409,7 +409,8 @@ class PERTURBO(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
                 )
 
             element_effects = pd.merge(
-                make_long_df(loc_values.detach().cpu().numpy(), "loc"), make_long_df(scale_values.detach().cpu().numpy(), "scale")
+                make_long_df(loc_values.detach().cpu().numpy(), "loc"),
+                make_long_df(scale_values.detach().cpu().numpy(), "scale"),
             )
 
         element_effects = element_effects.assign(
@@ -419,3 +420,36 @@ class PERTURBO(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
         )
 
         return element_effects.sort_values("z_value")
+
+    def _get_data_subset(self, indices: Optional[List] = None):
+        loader = AnnDataLoader(
+            adata_manager=self.adata_manager,
+            indices=indices,
+            batch_size=len(indices) if indices is not None else len(self.adata),
+            data_and_attributes=self.data_and_attrs,
+        )
+        return self.module._get_fn_args_from_batch(next(iter(loader)))
+
+    def sample_posterior(
+        self,
+        num_samples: int = 1000,
+        return_sites: Optional[list] = None,
+        accelerator: str = "auto",
+        device: Union[int, str] = "auto",
+        return_observed: bool = False,
+    ):
+        _, _, device = parse_device_args(
+            accelerator=accelerator,
+            devices=device,
+        )
+
+        sample_args, sample_kwargs = self._get_data_subset()
+        sample_kwargs[REGISTRY_KEYS.X_KEY] = None
+
+        return self._get_posterior_samples(
+            sample_args,
+            kwargs=sample_kwargs,
+            num_samples=num_samples,
+            return_sites=return_sites,
+            return_observed=return_observed,
+        )

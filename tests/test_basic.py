@@ -116,11 +116,11 @@ def test_model_mdata(mdata: MuData, tmp_path, use_guide_by_element, use_gene_by_
 
     model.train(max_epochs=10, lr=0.1)
     model.train(max_epochs=10, lr=0.1, batch_size=None)
-    # samples = model.get_posterior_samples()
-    # assert samples["obs"].shape[-2:] == (
-    #     model.summary_stats.n_cells,
-    #     model.summary_stats.n_vars,
-    # )
+    samples = model.sample_posterior(model.summary_stats.n_cells)
+    assert samples["obs"].shape[-2:] == (
+        model.summary_stats.n_cells,
+        model.summary_stats.n_vars,
+    )
     fx = model.get_element_effects()
     assert isinstance(fx, pd.DataFrame)
     assert len(model.history["elbo_train"]) == 20
