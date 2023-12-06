@@ -439,16 +439,20 @@ class PERTURBO(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
         return_observed: bool = False,
     ):
         _, _, device = parse_device_args(
-            accelerator=accelerator,
-            devices=device,
+            accelerator=accelerator, devices=device, return_device="torch", validate_single_device=True
         )
 
-        sample_args, sample_kwargs = self._get_data_subset()
-        sample_kwargs[REGISTRY_KEYS.X_KEY] = None
+        args, kwargs = self._get_data_subset()
+        args = [a.to(device) for a in args]
+        kwargs = {k: v.to(device) for k, v in kwargs.items()}
+        kwargs[REGISTRY_KEYS.X_KEY] = None
+
+        self.to_device(device)
+
 
         return self._get_posterior_samples(
-            sample_args,
-            kwargs=sample_kwargs,
+            args,
+            kwargs=kwargs,
             num_samples=num_samples,
             return_sites=return_sites,
             return_observed=return_observed,
