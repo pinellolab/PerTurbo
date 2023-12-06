@@ -205,7 +205,8 @@ class PerTurboPyroModule(PyroBaseModuleClass):
                     "guide_efficacy",
                     dist.Beta(self.logit_efficacy_alpha, self.logit_efficacy_beta),
                 )
-            guide_efficacy = guide_efficacy_values * self.guide_by_element
+            # fix weird broadcasting error
+            guide_efficacy = guide_efficacy_values.expand(-1, self.n_elements) * self.guide_by_element
 
             # alternative: estimate efficacy for each guide--gene *cis* pair
             # with guide_effects_plate:
