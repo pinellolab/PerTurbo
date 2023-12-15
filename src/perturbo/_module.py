@@ -6,7 +6,7 @@ import pyro.distributions as dist
 import torch
 from pandas import DataFrame
 from pyro import poutine
-from pyro.infer.autoguide import AutoGuideList, AutoNormal, init_to_median
+from pyro.infer.autoguide import AutoGuideList, AutoNormal, init_to_median, init_to_mean
 from scvi.module.base import PyroBaseModuleClass
 
 from ._constants import REGISTRY_KEYS
@@ -28,7 +28,7 @@ class PerTurboPyroModule(PyroBaseModuleClass):
         guide_by_element: Optional[torch.Tensor] = None,
         gene_by_element: Optional[torch.Tensor] = None,
         likelihood: Optional[str] = "nb",
-        effect_prior_dist="normal_mixture",
+        effect_prior_dist="cauchy",
         n_factors=None,
         dispersion_effects=False,
         merge_guides=False,
@@ -74,10 +74,10 @@ class PerTurboPyroModule(PyroBaseModuleClass):
 
         self._guide = AutoGuideList(self.model, create_plates=self.create_plates)
         self._guide.append(
-            AutoNormal(poutine.block(self.model, hide="element_effects"), init_loc_fn=init_to_median, init_scale=0.1)
+            AutoNormal(poutine.block(self.model, hide="element_effects"), init_loc_fn=init_to_mean, init_scale=0.1)
         )
         self._guide.append(
-            AutoNormal(poutine.block(self.model, expose="element_effects"), init_loc_fn=init_to_median, init_scale=0.1)
+            AutoNormal(poutine.block(self.model, expose="element_effects"), init_loc_fn=init_to_median, init_scale=0.02)
         )
 
         ## register hyperparameters as buffers so they get automatically moved to GPU by scvi-tools
@@ -111,13 +111,13 @@ class PerTurboPyroModule(PyroBaseModuleClass):
         self.register_buffer("gene_mean_prior_scale", torch.tensor(3.0))
         self.register_buffer("gene_disp_prior_scale", torch.tensor(3.0))
         self.register_buffer("batch_effect_prior_scale", torch.tensor(3.0))
-        self.register_buffer("element_effects_prior_scale", torch.tensor(0.1))
+        self.register_buffer("element_effects_prior_scale", torch.tensor(0.01))
         self.register_buffer("covariate_prior_sigma", torch.tensor(3.0))
         self.register_buffer("covariate_disp_prior_sigma", torch.tensor(1.0))
         self.register_buffer("logit_efficacy_alpha", torch.tensor(5.0))
         self.register_buffer("logit_efficacy_beta", torch.tensor(1.0))
 
-        self.register_buffer("spike_slab_prior_scales", torch.tensor([1.0, 0.1]))
+        self.register_buffer("spike_slab_prior_scales", torch.tensor([1- self.element_effects_prior_scale, self.element_effects_prior_scale]))
         self.register_buffer("spike_slab_prior_probs", torch.tensor([0.001, 0.999]))
 
         if self.n_factors is not None:
