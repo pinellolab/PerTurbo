@@ -34,6 +34,7 @@ class PERTURBO(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
         likelihood: Optional[str] = "nb",
         n_factors: Optional[int] = None,
         fit_dispersion: Optional[bool] = False,
+        effect_prior_dist="normal_mixture",
         **model_kwargs,
     ):
         super().__init__(mdata)
@@ -74,6 +75,7 @@ class PERTURBO(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
             n_factors=n_factors,
             fit_dispersion=fit_dispersion,
             n_cats_per_cov=n_cats_per_cov,
+            effect_prior_dist=effect_prior_dist,
         )
 
         self._model_summary_string = f"MyPyroModel Model with params:\n{self.summary_stats}"
