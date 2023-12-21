@@ -31,10 +31,10 @@ class PERTURBO(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
     def __init__(
         self,
         mdata: AnnOrMuData,
-        likelihood: Optional[str] = "nb",
+        likelihood: Optional[str] = None,
         n_factors: Optional[int] = None,
-        fit_dispersion: Optional[bool] = False,
-        effect_prior_dist="normal_mixture",
+        fit_dispersion: Optional[bool] = None,
+        effect_prior_dist=None,
         **model_kwargs,
     ):
         super().__init__(mdata)

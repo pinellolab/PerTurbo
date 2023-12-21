@@ -77,7 +77,7 @@ class PerTurboPyroModule(PyroBaseModuleClass):
             AutoNormal(poutine.block(self.model, hide="element_effects"), init_loc_fn=init_to_mean, init_scale=0.1)
         )
         self._guide.append(
-            AutoNormal(poutine.block(self.model, expose="element_effects"), init_loc_fn=init_to_median, init_scale=0.02)
+            AutoNormal(poutine.block(self.model, expose="element_effects"), init_loc_fn=init_to_median, init_scale=0.05)
         )
 
         ## register hyperparameters as buffers so they get automatically moved to GPU by scvi-tools
