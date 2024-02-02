@@ -117,7 +117,10 @@ class PerTurboPyroModule(PyroBaseModuleClass):
         self.register_buffer("logit_efficacy_alpha", torch.tensor(5.0))
         self.register_buffer("logit_efficacy_beta", torch.tensor(1.0))
 
-        self.register_buffer("spike_slab_prior_scales", torch.tensor([1- self.element_effects_prior_scale, self.element_effects_prior_scale]))
+        self.register_buffer(
+            "spike_slab_prior_scales",
+            torch.tensor([1 - self.element_effects_prior_scale, self.element_effects_prior_scale]),
+        )
         self.register_buffer("spike_slab_prior_probs", torch.tensor([0.001, 0.999]))
 
         if self.n_factors is not None:
