@@ -1,6 +1,6 @@
 {
   "template": "https://github.com/scverse/cookiecutter-scverse",
-  "commit": "647649ca9f440214013ccec917c4713759223b2c",
+  "commit": "722725204d70783354e7a27a6d49220e6357176a",
   "checkout": null,
   "context": {
     "cookiecutter": {
@@ -13,9 +13,15 @@
       "project_repo": "https://github.com/pinellolab/PerTurbo",
       "license": "MIT License",
       "_copy_without_render": [
-        ".github/workflows/**.yaml",
+        ".github/workflows/build.yaml",
+        ".github/workflows/test.yaml",
         "docs/_templates/autosummary/**.rst"
       ],
+      "_render_devdocs": false,
+      "_jinja2_env_vars": {
+        "lstrip_blocks": true,
+        "trim_blocks": true
+      },
       "_template": "https://github.com/scverse/cookiecutter-scverse"
     }
   },

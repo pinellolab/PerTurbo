@@ -5,6 +5,8 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  schedule:
+    - cron: "0 5 1,15 * *"
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -48,7 +50,10 @@ jobs:
           PLATFORM: ${{ matrix.os }}
           DISPLAY: :42
         run: |
-          pytest -v --cov --color=yes
+          coverage run -m pytest -v --color=yes
+      - name: Report coverage
+        run: |
+          coverage report
       - name: Upload coverage
         uses: codecov/codecov-action@v3
         with:
