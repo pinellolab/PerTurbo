@@ -1,5 +1,5 @@
 import logging
-from typing import List, Optional, Union
+from typing import Optional, Union
 
 import numpy as np
 import pandas as pd
@@ -31,10 +31,6 @@ class PERTURBO(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
     def __init__(
         self,
         mdata: AnnOrMuData,
-        likelihood: Optional[str] = None,
-        n_factors: Optional[int] = None,
-        fit_dispersion: Optional[bool] = None,
-        effect_prior_dist=None,
         **model_kwargs,
     ):
         super().__init__(mdata)
@@ -71,11 +67,8 @@ class PERTURBO(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
             gene_summary_stats=gene_summary_stats,
             guide_by_element=guide_by_element,
             gene_by_element=gene_by_element,
-            likelihood=likelihood,
-            n_factors=n_factors,
-            fit_dispersion=fit_dispersion,
             n_cats_per_cov=n_cats_per_cov,
-            effect_prior_dist=effect_prior_dist,
+            **model_kwargs,
         )
 
         self._model_summary_string = f"MyPyroModel Model with params:\n{self.summary_stats}"
@@ -96,7 +89,7 @@ class PERTURBO(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
 
     @classmethod
     def setup_anndata(cls):
-        """Required by scvi-tools"""
+        """Required by scvi-tools."""
         raise NotImplementedError("MuData input required, use setup_mudata.")
 
     @classmethod
@@ -374,7 +367,7 @@ class PERTURBO(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
     def get_element_effects(
         self,
     ):
-        """Return a DataFrame summary of the effects for targeted elements on each gene"""
+        """Return a DataFrame summary of the effects for targeted elements on each gene."""
         if REGISTRY_KEYS.GUIDE_BY_ELEMENT_KEY in self.adata_manager.data_registry:
             element_ids = self.adata_manager.get_state_registry(REGISTRY_KEYS.GUIDE_BY_ELEMENT_KEY).column_names
         else:
@@ -423,7 +416,7 @@ class PERTURBO(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
 
         return element_effects.sort_values("z_value")
 
-    def _get_data_subset(self, indices: Optional[List] = None):
+    def _get_data_subset(self, indices: Optional[list] = None):
         loader = AnnDataLoader(
             adata_manager=self.adata_manager,
             indices=indices,
@@ -448,13 +441,13 @@ class PERTURBO(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
         args = [a.to(device) for a in args]
         kwargs = {k: v.to(device) for k, v in kwargs.items()}
         kwargs[REGISTRY_KEYS.X_KEY] = None
-
         self.to_device(device)
 
-        return self._get_posterior_samples(
+        samples = self._get_posterior_samples(
             args,
             kwargs=kwargs,
             num_samples=num_samples,
             return_sites=return_sites,
             return_observed=return_observed,
         )
+        return samples

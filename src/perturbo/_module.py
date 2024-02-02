@@ -6,7 +6,7 @@ import pyro.distributions as dist
 import torch
 from pandas import DataFrame
 from pyro import poutine
-from pyro.infer.autoguide import AutoGuideList, AutoNormal, init_to_median, init_to_mean
+from pyro.infer.autoguide import AutoGuideList, AutoNormal, init_to_mean, init_to_median
 from scvi.module.base import PyroBaseModuleClass
 
 from ._constants import REGISTRY_KEYS
@@ -117,7 +117,10 @@ class PerTurboPyroModule(PyroBaseModuleClass):
         self.register_buffer("logit_efficacy_alpha", torch.tensor(5.0))
         self.register_buffer("logit_efficacy_beta", torch.tensor(1.0))
 
-        self.register_buffer("spike_slab_prior_scales", torch.tensor([1- self.element_effects_prior_scale, self.element_effects_prior_scale]))
+        self.register_buffer(
+            "spike_slab_prior_scales",
+            torch.tensor([1 - self.element_effects_prior_scale, self.element_effects_prior_scale]),
+        )
         self.register_buffer("spike_slab_prior_probs", torch.tensor([0.001, 0.999]))
 
         if self.n_factors is not None:
@@ -312,22 +315,9 @@ class PerTurboPyroModule(PyroBaseModuleClass):
                         ),
                         obs=observations,
                     )
+                else:
+                    raise NotImplementedError(f"{self.likelihood} likelihood not implemented")
 
     @property
     def guide(self):
         return self._guide
-
-    @property
-    def list_obs_plate_vars(self):
-        """Model annotation for minibatch training with pyro plate.
-
-        A dictionary with:
-        1. "name" - the name of observation/minibatch plate;
-        2. "in" - indexes of model args to provide to encoder network when using amortised inference;
-        3. "sites" - dictionary with
-            keys - names of variables that belong to the observation plate (used to recognise
-             and merge posterior samples for minibatch variables)
-            values - the dimensions in non-plate axis of each variable (used to construct output
-             layer of encoder network when using amortised inference)
-        """
-        return {"name": "cells", "in": [], "sites": {"obs": 0}}

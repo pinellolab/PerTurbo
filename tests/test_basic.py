@@ -15,7 +15,6 @@ guide_by_element_key = "guide_by_element"
 gene_by_element_key = "gene_by_element"
 
 
-
 @pytest.fixture
 def adata():
     """Create an example AnnData object representing a single cell perturbation screen"""
@@ -31,24 +30,19 @@ def adata():
             "batch_id": np.random.choice(["batch_1", "batch_2"], size=(n_cells)),
         }
     )
-    rna_counts = np.random.negative_binomial(100, 0.9, size=(n_cells, n_genes)).astype(
-        np.float64
-    )
-    rna_adata = AnnData(rna_counts, obs=total_rna)
+    rna_counts = np.random.negative_binomial(100, 0.9, size=(n_cells, n_genes)).astype(np.float64)
+    rna_adata = AnnData(csr_matrix(rna_counts), obs=total_rna)
     rna_adata.var_names = "gene" + rna_adata.var_names
 
     # generate fake guide status (for AnnData only version)
     rna_adata.obsm[perturb_key] = np.random.binomial(1, 0.5, size=(n_cells, n_grna))
 
     # generate gene/element pairing
-    rna_adata.uns['elements'] = [f"element{str(i)}" for i in range(n_elements)]
+    rna_adata.uns["elements"] = [f"element{str(i)}" for i in range(n_elements)]
     gene_by_element = np.random.binomial(1, 0.5, size=(n_genes, n_elements)).astype(np.float32)
     rna_adata.varm[gene_by_element_key] = pd.DataFrame(
-        gene_by_element,
-        index = rna_adata.var_names,
-        columns = rna_adata.uns['elements']
+        gene_by_element, index=rna_adata.var_names, columns=rna_adata.uns["elements"]
     )
-
 
     return rna_adata
 
@@ -64,17 +58,14 @@ def mdata(adata: AnnData):
     n_cells = len(adata)
 
     # generate fake guide status
-    perturb_adata = AnnData(
-        np.random.binomial(1, 0.5, size=(n_cells, n_grna)).astype(np.float32)
-    )
+    grna_counts = np.random.binomial(1, 0.5, size=(n_cells, n_grna)).astype(np.float32)
+    perturb_adata = AnnData(csr_matrix(grna_counts))
     perturb_adata.var_names = "guide" + perturb_adata.var_names
-    perturb_adata.uns['elements'] = rna_adata.uns['elements']
+    perturb_adata.uns["elements"] = rna_adata.uns["elements"]
 
     guide_by_element = np.random.binomial(1, 0.8, size=(n_grna, n_elements)).astype(np.float32)
     perturb_adata.varm[guide_by_element_key] = pd.DataFrame(
-        guide_by_element,
-        index = perturb_adata.var_names,
-        columns = perturb_adata.uns['elements']
+        guide_by_element, index=perturb_adata.var_names, columns=perturb_adata.uns["elements"]
     )
 
     # combine into MuData
@@ -86,8 +77,9 @@ def test_package_has_version():
     logging.info("version: " + perturbo.__version__)
     assert perturbo.__version__ is not None
 
-@pytest.mark.parametrize('use_gene_by_element', [True, False])
-@pytest.mark.parametrize('use_guide_by_element', [True, False])
+
+@pytest.mark.parametrize("use_gene_by_element", [True, False])
+@pytest.mark.parametrize("use_guide_by_element", [True, False])
 def test_model_mdata(mdata: MuData, tmp_path, use_guide_by_element, use_gene_by_element):
     """Check that we can register our MuData object with our model and perform training"""
     if use_gene_by_element and not use_guide_by_element:
@@ -116,7 +108,8 @@ def test_model_mdata(mdata: MuData, tmp_path, use_guide_by_element, use_gene_by_
 
     model.train(max_epochs=10, lr=0.1)
     model.train(max_epochs=10, lr=0.1, batch_size=None)
-    samples = model.sample_posterior(model.summary_stats.n_cells)
+    samples = model.sample_posterior(num_samples=1, return_observed=True)
+
     assert samples["obs"].shape[-2:] == (
         model.summary_stats.n_cells,
         model.summary_stats.n_vars,
@@ -129,7 +122,6 @@ def test_model_mdata(mdata: MuData, tmp_path, use_guide_by_element, use_gene_by_
     model = perturbo.PERTURBO.load(tmp_path / "model")
     # model.train(max_epochs=1, lr=0.1)
     # p_loc, p_scale = model.moduleget_perturbation_effects()
-
 
 
 # def test_model_adata(adata: AnnData, tmp_path):

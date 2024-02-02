@@ -1,7 +1,5 @@
 [envs.default]
-dependencies = [
-    "perturbo[test]",
-]
+dependencies = ["perturbo[test]"]
 
 [envs.default.scripts]
 test = "pytest {args:tests}"
@@ -10,15 +8,13 @@ test = "pytest {args:tests}"
 dependencies = [
     "perturbo[test]",
     # For notebooks
+    "pytest",
     "ipykernel",
     "ipython",
     "seaborn",
     "scanpy",
     "matplotlib",
     "graphviz",
-    # For VSCode
-    "black",
-    "ruff"
 ]
 
 [[envs.all.matrix]]
