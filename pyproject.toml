@@ -19,6 +19,7 @@ dependencies = [
     "scvi-tools>=1.0.4",
     "torch>=1.11.0",
     "pyro-ppl>=1.8.6",
+    "numpyro>=0.14.0",
     "mudata>0.2.0",
     "pandas>=1.5.3",
     "scipy>=1.11.4",
