@@ -82,6 +82,7 @@ def perturbseq_model(
                 dist.Beta(efficiency_alpha, efficiency_beta),
                 obs=efficiency,
             )
+
     prior_inclusion_prob = 0.05
     inclusion_probs = jnp.stack([1 - prior_inclusion_prob, prior_inclusion_prob], axis=-1)
 
@@ -101,7 +102,6 @@ def perturbseq_model(
         #     ,
         #     infer={"enumerate": "parallel"},
         # )
-        # print(inclusion.shape)
 
         log2_fc = numpyro.sample(
             "log2_fold_change",
@@ -170,9 +170,9 @@ def train(args, kwargs, model, guide, lr=0.01, n_steps=1000):
 def main(args):
     n_genes = 1  # currently only support single_gene analysis
 
-    n_control = args["n_control"]
-    n_guides = args["n_guides"]
-    n_perturbed = args["n_perturbed"]
+    n_control = args.n_control
+    n_guides = args.n_guides
+    n_perturbed = args.n_perturbed
     guides = generate_guides_array(n_control=n_control, n_guides=n_guides, n_perturbed=n_perturbed)
 
     numpyro.render_model(
@@ -187,10 +187,10 @@ def main(args):
     # Define your model parameters
     model_params = {
         "guides": guides,
-        "log2_fc": args["log2_fc"],
-        "efficiency": args["efficiency"],
-        "gene_mean": args["gene_mean"],
-        "gene_disp": args["gene_disp"],
+        "log2_fc": jnp.array(args.log2_fc),
+        "efficiency": jnp.array(args.efficiency),
+        "gene_mean": jnp.array(args.gene_mean),
+        "gene_disp": jnp.array(args.gene_disp),
     }
 
     # Create a predictive model
@@ -199,9 +199,6 @@ def main(args):
     # Sample from the model
     samples = predictive(rng_key, None, **model_params)
 
-    # The samples object will be a dictionary where each key is a variable name in your model
-    # and the value is an array of samples for that variable.
-    # For example, to get the shape of the 'gene_obs' samples:
     gene_obs = samples["gene_obs"][0, ...]
 
     perturbseq_guide = AutoNormal(
@@ -220,11 +217,10 @@ def main(args):
 
     unconstrained_locs = {}
     for k, v in svi_result.params.items():
-        print(k, v.shape, v)
         param, param_type = k.split("_auto_")
         if param_type == "loc":
             unconstrained_locs[param] = v
-    print(unconstrained_locs)
+
     predictive_svi = Predictive(
         perturbseq_guide,
         params=svi_result.params,
@@ -266,4 +262,7 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
     numpyro.set_platform(args.device)
-    main(args)
+    svi_posterior_samples, mcmc_posterior_samples = main(args)
+    for samples in [svi_posterior_samples, mcmc_posterior_samples]:
+        for k, v in samples.items():
+            print(k, v.shape)
