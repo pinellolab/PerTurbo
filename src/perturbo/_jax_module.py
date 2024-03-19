@@ -148,7 +148,7 @@ def generate_guides_array(n_control, n_guides, n_perturbed):
 
 def main(args):
     n_genes = 1  # currently only support single_gene analysis
-    rng_key = random.PRNGKey(0)
+    prng_key = random.PRNGKey(args.random_seed)
     n_control = args.n_control
     n_guides = args.n_guides
     n_perturbed = args.n_perturbed
@@ -165,12 +165,12 @@ def main(args):
 
     # Sample data from the prior with frozen values
     predictive = Predictive(perturbseq_model, num_samples=1)
-    samples = predictive(rng_key, None, **model_params)
+    samples = predictive(prng_key, None, **model_params)
     gene_obs = samples["gene_obs"][0, ...]
 
     # construct AutoNormal guide for model
     perturbseq_guide = AutoNormal(
-        handlers.block(handlers.seed(perturbseq_model, random.PRNGKey(0)), hide=["include"]),
+        handlers.block(handlers.seed(perturbseq_model, prng_key), hide=["include"]),
         init_loc_fn=init_to_median,
         create_plates=create_plates,
     )
@@ -182,22 +182,19 @@ def main(args):
         if param_type == "loc":
             unconstrained_locs[param] = v
 
-    predictive_svi = Predictive(perturbseq_guide, params=svi_result.params, num_samples=10000)
-    svi_posterior_samples = predictive_svi(rng_key, None, guide_obs=guide_obs, n_genes=n_genes)
-    mcmc_dir = "output/svi"
-    for k, v in svi_posterior_samples.items():
-        output_path = os.path.join(mcmc_dir, f"{k}.npz")
-        jnp.save(output_path, v)
+    # Create output directories if they don't exist
+    output_dir = args.output_dir
+    os.makedirs(output_dir)
 
+    # Save SVI results
+    predictive_svi = Predictive(perturbseq_guide, params=svi_result.params, num_samples=args.num_samples)
+    svi_posterior_samples = predictive_svi(prng_key, None, guide_obs=guide_obs, n_genes=n_genes)
+    jnp.savez(os.path.join(output_dir, "svi"), **svi_posterior_samples)
+
+    # Save MCMC results
     mcmc = run_mcmc(guide_obs, gene_obs, unconstrained_locs, num_samples=args.num_samples)
     mcmc_posterior_samples = mcmc.get_samples()
-
-    mcmc_dir = "output/mcmc"
-    for k, v in mcmc_posterior_samples.items():
-        output_path = os.path.join(mcmc_dir, f"{k}.npz")
-        jnp.save(output_path, v)
-
-    return svi_posterior_samples, mcmc_posterior_samples
+    jnp.savez(os.path.join(output_dir, "mcmc"), **mcmc_posterior_samples)
 
 
 if __name__ == "__main__":
@@ -210,7 +207,11 @@ if __name__ == "__main__":
     parser.add_argument("--n_guides", default=2, type=int, help="number of guides")
     parser.add_argument("--log2_fc", default=0.0, type=float, help="log2 fold change")
     parser.add_argument("--num_samples", default=1000, type=int, help="Number of posterior samples from MCMC/SVI")
-    parser.add_argument("--efficiency", default=[0.5, 0.1], type=float, nargs="*", help="guide efficiency")
+    parser.add_argument("--random_seed", default=0, type=int, help="Random seed for Jax")
+    parser.add_argument(
+        "--efficiency", default=[0.5, 0.1], type=float, nargs="*", help="Guide efficiency (list of values)"
+    )
+    parser.add_argument("--output_dir", type=str, help="Output directory for posterior samples")
 
     args = parser.parse_args()
     numpyro.set_platform(args.device)
