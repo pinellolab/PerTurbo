@@ -2,6 +2,7 @@ import argparse
 import os
 
 import jax.numpy as jnp
+from networkx import efficiency
 import numpyro
 import numpyro.distributions as dist
 from jax import random
@@ -154,6 +155,14 @@ def main(args):
     n_perturbed = args.n_perturbed
     guide_obs = generate_guides_array(n_control=n_control, n_guides=n_guides, n_perturbed=n_perturbed)
 
+    print("Simulating data with parameters:")
+    print("# guides:", n_guides)
+    print("# control cells:", n_control)
+    print("# perturbed cells:", n_perturbed)
+    print(f"gene mean, dispersion: {args.gene_mean:0.2f}, {args.gene_disp:0.2f}")
+    print("log_2 fold change:", args.log2_fc)
+    print("guide efficiency:", args.efficiency)
+
     # Define your model parameters
     model_params = {
         "guide_obs": guide_obs,
@@ -184,7 +193,8 @@ def main(args):
 
     # Create output directories if they don't exist
     output_dir = args.output_dir
-    os.makedirs(output_dir)
+    if not os.path.exists(output_dir):
+        os.makedirs(output_dir)
 
     # Save SVI results
     predictive_svi = Predictive(perturbseq_guide, params=svi_result.params, num_samples=args.num_samples)
@@ -203,7 +213,7 @@ if __name__ == "__main__":
     parser.add_argument("--n_control", default=1000, type=int, help="number of control cells")
     parser.add_argument("--n_perturbed", default=50, type=int, help="number of perturbed cells")
     parser.add_argument("--gene_mean", default=2.0, type=float, help="mean expression level of genes")
-    parser.add_argument("--gene_disp", default=10.0, help="dispersion of genes")
+    parser.add_argument("--gene_disp", default=10.0, type=float, help="dispersion of genes")
     parser.add_argument("--n_guides", default=2, type=int, help="number of guides")
     parser.add_argument("--log2_fc", default=0.0, type=float, help="log2 fold change")
     parser.add_argument("--num_samples", default=1000, type=int, help="Number of posterior samples from MCMC/SVI")
@@ -211,7 +221,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--efficiency", default=[0.5, 0.1], type=float, nargs="*", help="Guide efficiency (list of values)"
     )
-    parser.add_argument("--output_dir", type=str, help="Output directory for posterior samples")
+    parser.add_argument("--output_dir", required=True, type=str, help="Output directory for posterior samples")
 
     args = parser.parse_args()
     numpyro.set_platform(args.device)
