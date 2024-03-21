@@ -18,6 +18,7 @@ dependencies = [
     "anndata>=0.8.0",
     "scvi-tools>=1.0.4",
     "torch>=1.11.0",
+    "tensorflow-probability>0.24",
     "pyro-ppl>=1.8.6",
     "numpyro>=0.14.0",
     "mudata>0.2.0",
