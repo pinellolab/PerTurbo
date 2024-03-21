@@ -5,14 +5,13 @@ from typing import Literal, Optional
 import jax.numpy as jnp
 import numpyro
 import numpyro.distributions as dist
-from jax import random
-from numpyro import handlers
+from jax.random import PRNGKey
 from numpyro.infer import MCMC, NUTS, SVI, Predictive, TraceMeanField_ELBO
 from numpyro.infer.autoguide import AutoNormal, init_to_median
 from tensorflow_probability.substrates.jax import distributions as tfd
 
 
-def create_plates(genes, guide_obs=None, n_cells=None, n_guides=None, subsample_size=None, n_genes=None, **kwargs):
+def _create_plates(genes, guide_obs=None, n_cells=None, n_guides=None, subsample_size=None, n_genes=None, **kwargs):
     if guide_obs is not None:
         n_cells, n_guides = guide_obs.shape
     if genes is not None:
@@ -42,7 +41,7 @@ def perturbseq_model(
     non_effect_scale: float = 0.05,
     effect_scale: float = 3.0,
     likelihood: Literal["NegBin", "Poisson", "PoissonLogNorm"] = "NegBin",
-    efficiency_type: Literal["scale", "mixture"] = "scale",
+    effect_type: Literal["scale", "mixture"] = "scale",
     efficiency_alpha: float = 3.0,
     efficiency_beta: float = 1.0,
     eps: float = 1e-6,
@@ -56,7 +55,7 @@ def perturbseq_model(
         assert genes.shape[0] == guide_obs.shape[0]
 
     # create plates
-    cell_plate, guide_plate, guide_plate_T, gene_plate = create_plates(
+    cell_plate, guide_plate, guide_plate_T, gene_plate = _create_plates(
         genes, n_cells=n_cells, n_guides=n_guides, n_genes=n_genes, subsample_size=subsample_size
     )
 
@@ -83,7 +82,7 @@ def perturbseq_model(
             guide_prob = jnp.array(1 / n_guides)
             guide_obs = numpyro.sample("guide_obs", dist.Binomial(1, probs=guide_prob), obs=guide_obs)
 
-        if efficiency_type == "mixture":
+        if effect_type == "mixture":
             # guide_inactivity = (1 - guide_obs * guide_efficiency).prod()
             guide_inactivity_logit = jnp.log(
                 1 - jnp.tile(jnp.expand_dims(guide_obs, axis=-1), (1, 1, n_genes)) * guide_efficiency
@@ -107,7 +106,7 @@ def perturbseq_model(
                 raise NotImplementedError("Only NegBin and Poisson likelihoods implemented for mixture model.")
             obs_dist = dist.MixtureSameFamily(mix_dist, component_dist)
 
-        elif efficiency_type == "scale":
+        elif effect_type == "scale":
             guide_effect = guide_obs @ (log2_fc * guide_efficiency) * jnp.log(2)
             if likelihood == "Poisson":
                 component_dist = dist.Poisson(jnp.exp(guide_effect) * baseline_mean)
@@ -128,6 +127,14 @@ def perturbseq_model(
     return gene_obs
 
 
+def perturbseq_guide_autonormal():
+    return AutoNormal(
+        perturbseq_model,
+        init_loc_fn=init_to_median,
+        create_plates=_create_plates,
+    )
+
+
 def sample_effect_sizes(non_effect_scale, effect_scale, prior_inclusion_prob, log2_fc=None):
     inclusion_probs = jnp.stack([1 - prior_inclusion_prob, prior_inclusion_prob], axis=-1)
     effect_scales = jnp.stack([non_effect_scale, effect_scale], axis=-1)
@@ -137,23 +144,30 @@ def sample_effect_sizes(non_effect_scale, effect_scale, prior_inclusion_prob, lo
     return log2_fc
 
 
-def run_svi(args, kwargs, model, guide, lr=0.01, n_steps=1000):
-    # adam_params = {"lr": lr}
+def run_svi(args, kwargs, model, guide, lr=0.01, n_steps=1000, random_seed=0):
     adam = numpyro.optim.Adam(step_size=lr)
     svi = SVI(model, guide, adam, loss=TraceMeanField_ELBO())
-    svi_result = svi.run(random.PRNGKey(0), n_steps, args, **kwargs)
+    svi_result = svi.run(PRNGKey(random_seed), n_steps, args, **kwargs)
     return svi_result
 
 
 def render_model():
-    numpyro.render_model(perturbseq_model, model_args=(None,), render_distributions=True, render_params=True)
+    gene_obs = jnp.zeros((1, 1))
+    guide_obs = jnp.zeros((1,))
+    return numpyro.render_model(
+        perturbseq_model,
+        model_args=(gene_obs,),
+        model_kwargs={"guide_obs": guide_obs},
+        render_distributions=True,
+        render_params=True,
+    )
 
 
-def run_mcmc(guide_obs, gene_obs, unconstrained_locs=None, dense_mass=False, num_samples=1000):
+def run_mcmc(guide_obs, gene_obs, unconstrained_locs=None, dense_mass=False, num_samples=1000, random_seed=0):
     n_chains = 1
     kernel = NUTS(perturbseq_model, dense_mass=dense_mass)
     mcmc = MCMC(kernel, num_samples=num_samples, num_warmup=1000, num_chains=n_chains)
-    mcmc.run(random.PRNGKey(0), gene_obs, guide_obs=guide_obs, init_params=unconstrained_locs)
+    mcmc.run(PRNGKey(random_seed), gene_obs, guide_obs=guide_obs, init_params=unconstrained_locs)
     return mcmc
 
 
@@ -166,7 +180,6 @@ def generate_guides_array(n_control, n_guides, n_perturbed):
 
 def main(args):
     n_genes = 1  # currently only support single_gene analysis
-    prng_key = random.PRNGKey(args.random_seed)
     n_control = args.n_control
     n_guides = args.n_guides
     n_perturbed = args.n_perturbed
@@ -191,16 +204,14 @@ def main(args):
 
     # Sample data from the prior with frozen values
     predictive = Predictive(perturbseq_model, num_samples=1)
-    samples = predictive(prng_key, None, **model_params)
+    samples = predictive(PRNGKey(args.random_seed), None, **model_params)
     gene_obs = samples["gene_obs"][0, ...]
 
     # construct AutoNormal guide for model
-    perturbseq_guide = AutoNormal(
-        handlers.block(handlers.seed(perturbseq_model, prng_key), hide=["include"]),
-        init_loc_fn=init_to_median,
-        create_plates=create_plates,
+    perturbseq_guide = perturbseq_guide_autonormal()
+    svi_result = run_svi(
+        gene_obs, {"guide_obs": guide_obs}, perturbseq_model, perturbseq_guide, random_seed=args.random_seed
     )
-    svi_result = run_svi(gene_obs, {"guide_obs": guide_obs}, perturbseq_model, perturbseq_guide, n_steps=4000, lr=0.01)
 
     unconstrained_locs = {}
     for k, v in svi_result.params.items():
@@ -215,11 +226,11 @@ def main(args):
 
     # Save SVI results
     predictive_svi = Predictive(perturbseq_guide, params=svi_result.params, num_samples=args.num_samples)
-    svi_posterior_samples = predictive_svi(prng_key, None, guide_obs=guide_obs, n_genes=n_genes)
+    svi_posterior_samples = predictive_svi(PRNGKey(args.random_seed), None, guide_obs=guide_obs, n_genes=n_genes)
     jnp.savez(os.path.join(output_dir, "svi"), **svi_posterior_samples)
 
     # Save MCMC results
-    mcmc = run_mcmc(guide_obs, gene_obs, unconstrained_locs, num_samples=args.num_samples)
+    mcmc = run_mcmc(guide_obs, gene_obs, unconstrained_locs, num_samples=args.num_samples, random_seed=args.random_seed)
     mcmc_posterior_samples = mcmc.get_samples()
     jnp.savez(os.path.join(output_dir, "mcmc"), **mcmc_posterior_samples)
 
