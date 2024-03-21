@@ -1,14 +1,15 @@
 import argparse
 import os
+from typing import Literal, Optional
 
 import jax.numpy as jnp
-from networkx import efficiency
 import numpyro
 import numpyro.distributions as dist
 from jax import random
 from numpyro import handlers
 from numpyro.infer import MCMC, NUTS, SVI, Predictive, TraceMeanField_ELBO
 from numpyro.infer.autoguide import AutoNormal, init_to_median
+from tensorflow_probability.substrates.jax import distributions as tfd
 
 
 def create_plates(genes, guide_obs=None, n_cells=None, n_guides=None, subsample_size=None, n_genes=None, **kwargs):
@@ -27,27 +28,26 @@ def create_plates(genes, guide_obs=None, n_cells=None, n_guides=None, subsample_
     return plates
 
 
-# @config_enumerate
 def perturbseq_model(
-    genes,
-    guide_obs=None,
-    log2_fc=None,
-    gene_mean=None,
-    gene_disp=None,
-    efficiency=None,
-    n_guides=5,
-    n_cells=101,
-    n_genes=1,
-    prior_inclusion_prob=0.05,
-    non_effect_scale=0.05,
-    effect_scale=3.0,
-    efficiency_type="mixture",
-    efficiency_alpha=3.0,
-    efficiency_beta=1.0,
-    eps=1e-6,
-    subsample_size=None,
-):
-    # infer cell/guide numbers from data
+    genes: Optional[jnp.ndarray] = None,
+    guide_obs: Optional[jnp.ndarray] = None,
+    log2_fc: Optional[jnp.ndarray] = None,
+    gene_mean: Optional[jnp.ndarray] = None,
+    gene_disp: Optional[jnp.ndarray] = None,
+    efficiency: Optional[jnp.ndarray] = None,
+    n_guides: Optional[int] = 5,
+    n_cells: Optional[int] = 101,
+    n_genes: Optional[int] = 1,
+    prior_inclusion_prob: float = 0.05,
+    non_effect_scale: float = 0.05,
+    effect_scale: float = 3.0,
+    likelihood: Literal["NegBin", "Poisson", "PoissonLogNorm"] = "NegBin",
+    efficiency_type: Literal["scale", "mixture"] = "scale",
+    efficiency_alpha: float = 3.0,
+    efficiency_beta: float = 1.0,
+    eps: float = 1e-6,
+    subsample_size: Optional[int] = None,
+) -> jnp.ndarray:
     if guide_obs is not None:
         n_cells, n_guides = guide_obs.shape
     if genes is not None:
@@ -96,15 +96,32 @@ def perturbseq_model(
             mix_logits = jnp.stack([guide_inactivity_logit, guide_activity_logit], axis=-1)
             mix_dist = dist.Categorical(logits=mix_logits)
             guide_effect = log2_fc * jnp.log(2)
-            base_logit = jnp.log(baseline_mean) - jnp.log(dispersion)
-            logits = jnp.stack([base_logit, guide_effect + base_logit], axis=-1)
-            component_dist = dist.NegativeBinomialLogits(logits=logits, total_count=dispersion)
+            if likelihood == "NegBin":
+                base_logit = jnp.log(baseline_mean) - jnp.log(dispersion)
+                logits = jnp.stack([base_logit, guide_effect + base_logit], axis=-1)
+                component_dist = dist.NegativeBinomialLogits(logits=logits, total_count=dispersion)
+            elif likelihood == "Poisson":
+                rates = jnp.stack([baseline_mean, baseline_mean * jnp.exp(guide_effect)], axis=-1)
+                component_dist = dist.Poisson(rates)
+            else:
+                raise NotImplementedError("Only NegBin and Poisson likelihoods implemented for mixture model.")
             obs_dist = dist.MixtureSameFamily(mix_dist, component_dist)
 
         elif efficiency_type == "scale":
             guide_effect = guide_obs @ (log2_fc * guide_efficiency) * jnp.log(2)
-            logits = guide_effect + jnp.log(baseline_mean) - jnp.log(dispersion)
-            obs_dist = dist.NegativeBinomialLogits(logits=logits, total_count=dispersion)
+            if likelihood == "Poisson":
+                component_dist = dist.Poisson(jnp.exp(guide_effect) * baseline_mean)
+            elif likelihood == "NegBin":
+                logits = guide_effect + jnp.log(baseline_mean) - jnp.log(dispersion)
+                obs_dist = dist.NegativeBinomialLogits(logits=logits, total_count=dispersion)
+            elif likelihood == "PoissonLogNorm":
+                obs_dist = tfd.PoissonLogNormalQuadratureCompound(
+                    loc=guide_effect + jnp.log(baseline_mean),
+                    scale=1 / dispersion,
+                    quadrature_size=32,
+                    quadrature_fn=tfd.quadrature_scheme_lognormal_gauss_hermite,
+                )
+
         with gene_plate:
             gene_obs = numpyro.sample("gene_obs", obs_dist, obs=genes)
 
