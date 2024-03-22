@@ -29,9 +29,9 @@ def _create_plates(
     else:
         n_covariates = covariates.shape[1]
     if guide_targets is None:
-        n_elements = 1
+        n_elements = n_guides
     else:
-        n_elements = guide_targets.shape
+        n_elements = guide_targets.shape[1]
 
     cell_plate = numpyro.plate("cells", n_cells, dim=-2, subsample_size=subsample_size)
     covariate_plate = numpyro.plate("covariates", n_covariates, dim=-2)
@@ -73,7 +73,7 @@ def perturbseq_model_turbo(
     if covariates is None:
         covariates = jnp.zeros((n_cells, 1))
     if guide_targets is None:
-        guide_targets = jnp.ones((n_guides, 1))
+        guide_targets = jnp.eye(n_guides)
 
     # create plates
     cell_plate, covariates_plate, guide_plate, guide_plate_T, element_plate, gene_plate = _create_plates(
@@ -119,7 +119,8 @@ def perturbseq_model_turbo(
             guide_prob = jnp.array(1 / n_guides)
             guide_obs = numpyro.sample("guide_obs", dist.Binomial(1, probs=guide_prob), obs=guide_obs)
 
-        guide_effect = guide_obs @ (log2_fc * guide_efficiency) * jnp.log(2)
+        # (n_cells x n_guide) @ (n_guide x n_element @ n_element x n_gene) = n_cells x n_genes
+        guide_effect = guide_obs @ (guide_targets @ log2_fc * guide_efficiency) * jnp.log(2)
         guide_effect += covariate_effect
 
         if likelihood == "Poisson":
