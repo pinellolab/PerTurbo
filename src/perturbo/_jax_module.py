@@ -6,9 +6,11 @@ import jax.numpy as jnp
 import numpyro
 import numpyro.distributions as dist
 from jax.random import PRNGKey
-from numpyro.infer import MCMC, NUTS, SVI, Predictive, TraceMeanField_ELBO
+from numpyro.infer import Predictive
 from numpyro.infer.autoguide import AutoNormal, init_to_median
 from tensorflow_probability.substrates.jax import distributions as tfd
+
+from ._jax_utils import run_mcmc, run_svi
 
 
 def _create_plates(
@@ -171,33 +173,6 @@ def perturbseq_guide_autonormal(init_loc_fn=init_to_median):
     )
 
 
-def run_svi(args, kwargs, model, guide, lr=0.01, n_steps=1000, random_seed=0):
-    adam = numpyro.optim.Adam(step_size=lr)
-    svi = SVI(model, guide, adam, loss=TraceMeanField_ELBO())
-    svi_result = svi.run(PRNGKey(random_seed), n_steps, *args, **kwargs)
-    return svi_result
-
-
-def render_model():
-    gene_obs = jnp.zeros((1, 1))
-    guide_obs = jnp.zeros((1,))
-    return numpyro.render_model(
-        perturbseq_model,
-        model_args=(gene_obs,),
-        model_kwargs={"guide_obs": guide_obs},
-        render_distributions=True,
-        render_params=True,
-    )
-
-
-def run_mcmc(args, kwargs, unconstrained_locs=None, dense_mass=False, num_samples=1000, random_seed=0):
-    n_chains = 1
-    kernel = NUTS(perturbseq_model, dense_mass=dense_mass)
-    mcmc = MCMC(kernel, num_samples=num_samples, num_warmup=1000, num_chains=n_chains)
-    mcmc.run(PRNGKey(random_seed), *args, **kwargs, init_params=unconstrained_locs)
-    return mcmc
-
-
 def generate_guides_array(n_control, n_guides, n_perturbed):
     guides_control = jnp.zeros((n_control, n_guides))
     guides_perturbed = jnp.eye(n_guides).repeat(n_perturbed // n_guides, axis=0)
@@ -256,7 +231,12 @@ def main(args):
 
     # Save MCMC results
     mcmc = run_mcmc(
-        model_args, model_kwargs, unconstrained_locs, num_samples=args.num_samples, random_seed=args.random_seed
+        model_args,
+        model_kwargs,
+        perturbseq_model,
+        unconstrained_locs,
+        num_samples=args.num_samples,
+        random_seed=args.random_seed,
     )
     mcmc_posterior_samples = mcmc.get_samples()
     jnp.savez(os.path.join(output_dir, "mcmc"), **mcmc_posterior_samples)
