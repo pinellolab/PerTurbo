@@ -9,6 +9,8 @@ from tensorflow_probability.substrates.jax import distributions as tfd
 
 def _create_plates(
     genes,
+    n_factors=None,
+    n_cell_factors=None,
     guide_obs=None,
     covariates=None,
     n_cells=None,
@@ -32,7 +34,6 @@ def _create_plates(
         n_elements = n_guides
     else:
         n_elements = guide_target_elements.shape[1]
-    n_factors = 1000
     cell_plate = numpyro.plate("cells", n_cells, dim=-2, subsample_size=subsample_size)
     covariate_plate = numpyro.plate("covariates", n_covariates, dim=-2)
     gene_plate = numpyro.plate("genes", n_genes, dim=-1)
@@ -41,6 +42,9 @@ def _create_plates(
     guide_plate = numpyro.plate("guides", n_guides, dim=-1)
     factor_plate = numpyro.plate("factors", n_factors, dim=-1)
     loading_plate = numpyro.plate("factors_T", n_factors, dim=-2)
+    cell_factor_plate = numpyro.plate("cell_factors", n_cell_factors, dim=-1)
+    cell_loading_plate = numpyro.plate("cell_factors_T", n_cell_factors, dim=-2)
+
     plates = (
         cell_plate,
         covariate_plate,
@@ -50,6 +54,8 @@ def _create_plates(
         gene_plate,
         factor_plate,
         loading_plate,
+        cell_factor_plate,
+        cell_loading_plate,
     )
     return plates
 
@@ -67,6 +73,8 @@ def perturbseq_model_turbo(
     n_guides: Optional[int] = 5,
     n_cells: Optional[int] = 101,
     n_genes: Optional[int] = 1,
+    n_factors: Optional[int] = 1000,
+    n_cell_factors: Optional[int] = 5,
     prior_inclusion_prob: float = 0.05,
     non_effect_scale: float = 0.05,
     effect_scale: float = 3.0,
@@ -88,16 +96,27 @@ def perturbseq_model_turbo(
         guide_target_elements = jnp.eye(n_guides)
 
     # create plates
-    cell_plate, covariates_plate, guide_plate, guide_plate_T, element_plate, gene_plate, factor_plate, loading_plate = (
-        _create_plates(
-            genes,
-            covariates=covariates,
-            guide_target_elements=guide_target_elements,
-            n_cells=n_cells,
-            n_guides=n_guides,
-            n_genes=n_genes,
-            subsample_size=subsample_size,
-        )
+    (
+        cell_plate,
+        covariates_plate,
+        guide_plate,
+        guide_plate_T,
+        element_plate,
+        gene_plate,
+        factor_plate,
+        loading_plate,
+        cell_factor_plate,
+        cell_loading_plate,
+    ) = _create_plates(
+        genes,
+        covariates=covariates,
+        guide_target_elements=guide_target_elements,
+        n_factors=n_factors,
+        n_cell_factors=n_cell_factors,
+        n_cells=n_cells,
+        n_guides=n_guides,
+        n_genes=n_genes,
+        subsample_size=subsample_size,
     )
 
     # sample gene-level params
@@ -110,32 +129,41 @@ def perturbseq_model_turbo(
     with guide_plate_T:
         guide_efficiency = numpyro.sample("efficiency", dist.Beta(efficiency_alpha, efficiency_beta), obs=efficiency)
         guide_efficiency = 1
-        # # sample element effect sizes (dense full)
-        # with element_plate, gene_plate:
-        inclusion_probs = jnp.stack([1.0 - prior_inclusion_prob, prior_inclusion_prob], axis=-1)
-        effect_scales = jnp.stack([non_effect_scale, effect_scale], axis=-1)
-        mix_dist = dist.Categorical(inclusion_probs)
-        effect_dist = dist.Normal(0.0, effect_scales)
-        spike_and_slab_dist = dist.MixtureSameFamily(mix_dist, effect_dist)
-        #     log2_fc = numpyro.sample("log2_fold_change", dist.MixtureSameFamily(mix_dist, effect_dist), obs=log2_fc)
 
+    # sample element effect sizes (dense from spike and slab)
+    inclusion_probs = jnp.stack([1.0 - prior_inclusion_prob, prior_inclusion_prob], axis=-1)
+    effect_scales = jnp.stack([non_effect_scale, effect_scale], axis=-1)
+    mix_dist = dist.Categorical(inclusion_probs)
+    effect_dist = dist.Normal(0.0, effect_scales)
+    spike_and_slab_dist = dist.MixtureSameFamily(mix_dist, effect_dist)
+    with element_plate, gene_plate:
+        log2_fc = numpyro.sample("log2_fold_change", spike_and_slab_dist, obs=log2_fc)
+
+    ## factor model
     # sample cis element effect sizes (sparse)
-    with element_plate:
-        log2_fc = numpyro.sample("log2_fold_change", dist.Normal(0, effect_scale), obs=log2_fc) * element_target_genes
+    # with element_plate:
+    #     log2_fc = numpyro.sample("log2_fold_change", dist.Normal(0, effect_scale), obs=log2_fc) * element_target_genes
 
-    with element_plate, factor_plate:
-        factors = numpyro.sample("factor", dist.Cauchy(0, 0.01))
+    # with element_plate, factor_plate:
+    #     factors = numpyro.sample("factor", dist.Cauchy(0, 0.01))
 
-    with loading_plate, gene_plate:
-        loadings = numpyro.sample("loading", dist.Cauchy(0, 0.01))
-    # log2_fc = numpyro.deterministic("log2_fold_change", factors @ loadings)
-    log2_fc += factors @ loadings
+    # with loading_plate, gene_plate:
+    #     loadings = numpyro.sample("loading", dist.Cauchy(0, 0.01))
+    # # log2_fc = numpyro.deterministic("log2_fold_change", factors @ loadings)
+    # log2_fc += factors @ loadings
 
     with covariates_plate, gene_plate:
         covariate_weights = numpyro.sample("covariate_weight", dist.Normal(0.0, 1.0))
 
+    with cell_loading_plate, gene_plate:
+        cell_loadings = numpyro.sample("cell_loading", dist.Normal(0, 0.1))
+        # log2_fc = numpyro.deterministic("log2_fold_change", factors @ loadings)
+
     # sample gene values for each cell
     with cell_plate:
+        with cell_factor_plate:
+            cell_factors = numpyro.sample("cell_factor", dist.Normal(0, 0.1))
+        baseline_mean *= jnp.exp(cell_factors @ cell_loadings)
         if guide_obs is not None:
             guide_obs = numpyro.subsample(guide_obs, event_dim=0)
         if genes is not None:
