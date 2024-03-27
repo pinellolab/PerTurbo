@@ -10,7 +10,7 @@ from numpyro.infer import Predictive
 from numpyro.infer.autoguide import AutoNormal, init_to_median
 from tensorflow_probability.substrates.jax import distributions as tfd
 
-from ._jax_utils import run_mcmc, run_svi
+from perturbo._jax_utils import run_mcmc, run_svi
 
 
 def _create_plates(
