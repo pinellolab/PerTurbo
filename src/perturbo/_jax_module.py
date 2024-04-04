@@ -14,12 +14,13 @@ from perturbo._jax_utils import run_mcmc, run_svi
 
 
 def _create_plates(
-    genes,
+    genes=None,
     guide_obs=None,
     covariates=None,
     n_cells=None,
     n_guides=None,
     subsample_size=None,
+    gene_subsample_size=100,
     n_genes=None,
     **kwargs,
 ):
@@ -35,7 +36,7 @@ def _create_plates(
         n_covariates = covariates.shape[1]
 
     cell_plate = numpyro.plate("cells", n_cells, dim=-2, subsample_size=subsample_size)
-    covariate_plate = numpyro.plate("covariates", n_covariates, dim=-2, subsample_size=subsample_size)
+    covariate_plate = numpyro.plate("covariates", n_covariates, dim=-2)
     genes_plate = numpyro.plate("genes", n_genes, dim=-1)
     guide_plate_T = numpyro.plate("guides_T", n_guides, dim=-2)
     guide_plate = numpyro.plate("guides", n_guides, dim=-1)
@@ -97,7 +98,8 @@ def perturbseq_model(
         effect_scales = jnp.stack([non_effect_scale, effect_scale], axis=-1)
         mix_dist = dist.Categorical(inclusion_probs)
         effect_dist = dist.Normal(0.0, effect_scales)
-        log2_fc = numpyro.sample("log2_fold_change", dist.MixtureSameFamily(mix_dist, effect_dist), obs=log2_fc)
+        # log2_fc = numpyro.sample("log2_fold_change", dist.MixtureSameFamily(mix_dist, effect_dist), obs=log2_fc)
+        log2_fc = numpyro.sample("log2_fold_change", dist.Normal(0, 0.1), obs=log2_fc)
 
     with covariates_plate, gene_plate:
         covariate_weights = numpyro.sample("covariate_weights", dist.Normal(0.0, 1.0))
@@ -143,7 +145,7 @@ def perturbseq_model(
                 raise NotImplementedError("Only NegBin and Poisson likelihoods implemented for mixture model.")
             obs_dist = dist.MixtureSameFamily(mix_dist, component_dist)
 
-        elif effect_type == "scale":
+        elif effect_type == "scale_old":
             guide_effect = guide_obs @ (log2_fc * guide_efficiency) * jnp.log(2)
             guide_effect += covariate_effect
 
@@ -158,6 +160,19 @@ def perturbseq_model(
                     scale=1 / dispersion,
                     quadrature_fn=tfd.quadrature_scheme_lognormal_gauss_hermite,
                 )
+        elif effect_type == "scale":
+            # guide_effect = guide_obs @ (log2_fc * jnp.log(2))
+            guide_effect = log2_fc * jnp.log(2)
+            print(guide_obs.shape, guide_efficiency.shape, log2_fc.shape)
+            scaled_guide_effect = 1 - (guide_obs @ guide_efficiency) * (jnp.exp(guide_effect) + 1)
+            # guide_effect += covariate_effect
+
+            if likelihood == "NegBin":
+                obs_dist = dist.NegativeBinomial2(
+                    scaled_guide_effect * baseline_mean * jnp.exp(covariate_effect), dispersion
+                )
+            else:
+                raise NotImplementedError("only NegBin supported")
 
         with gene_plate:
             gene_obs = numpyro.sample("gene_obs", obs_dist, obs=genes)
