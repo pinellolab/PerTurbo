@@ -76,6 +76,7 @@ class PerTurboPyroModule(PyroBaseModuleClass):
         self._guide.append(
             AutoNormal(poutine.block(self.model, hide="element_effects"), init_loc_fn=init_to_mean, init_scale=0.1)
         )
+
         self._guide.append(
             AutoNormal(poutine.block(self.model, expose="element_effects"), init_loc_fn=init_to_median, init_scale=0.05)
         )

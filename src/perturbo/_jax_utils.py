@@ -7,6 +7,8 @@ import optax
 from jax.random import PRNGKey
 from mudata import MuData
 from numpyro.infer import MCMC, NUTS, SVI, TraceMeanField_ELBO
+from pandas import DataFrame
+from scipy.sparse import spmatrix
 
 
 def render_perturbseq_model(model):
@@ -29,10 +31,12 @@ def run_mcmc(args, kwargs, model, unconstrained_locs=None, dense_mass=False, num
     return mcmc
 
 
-def run_svi(args, kwargs, model, guide, lr=0.03, n_steps=5000, random_seed=0, decay_rate=0.03):
-    # decay lr exponentially to a final value of lr * decay_rate, starting at n_steps // 2
-    learning_rate = optax.exponential_decay(lr, n_steps // 2, decay_rate, transition_begin=n_steps // 2, staircase=True)
-    adam = numpyro.optim.Adam(step_size=learning_rate)
+def run_svi(args, kwargs, model, guide, lr=0.03, n_steps=5000, random_seed=0, decay_rate=0.03, decay_lr=False):
+    if decay_lr:
+        # decay lr exponentially to a final value of lr * decay_rate, starting at n_steps // 2
+        lr = optax.exponential_decay(lr, n_steps // 2, decay_rate, transition_begin=n_steps // 2, staircase=True)
+
+    adam = numpyro.optim.Adam(step_size=lr)
     svi = SVI(model, guide, adam, loss=TraceMeanField_ELBO())
     svi_result = svi.run(PRNGKey(random_seed), n_steps, *args, **kwargs)
     return svi_result
@@ -81,11 +85,69 @@ def get_mdata_subset(
     return MuData({rna_modality: rna_subset, guide_modality: grna_subset})
 
 
-def get_model_args_from_mudata(mdata, rna_modality="gene", guide_modality="guide"):
+def convert_counts_to_jnp_array(adata, layer=None):
+    X = adata.X
+    if layer is not None:
+        X = adata.layers[layer]
+    X_max = X.max()
+    if X_max <= 1:
+        dtype = jnp.bool_
+    elif X_max < 2**16:
+        dtype = jnp.uint16
+    else:
+        dtype = jnp.uint32
+    if isinstance(X, spmatrix):
+        X_dense = X.toarray()
+        X_jnp = jnp.array(X_dense, dtype=dtype)
+    else:
+        X_jnp = jnp.array(X, dtype=dtype)
+
+    assert jnp.all(jnp.equal(X_jnp, X_jnp.astype(int))), "Layer must contain integer-valued counts"
+
+    return X_jnp
+
+
+def convert_varm_to_jnp_array(adata, varm_field):
+    varm = adata.varm[varm_field]
+    if isinstance(varm, np.ndarray):
+        values = varm
+    elif isinstance(varm, spmatrix):
+        values = varm.toarray()
+    elif isinstance(varm, DataFrame):
+        values = varm.values
+    else:
+        raise ValueError("Unsupported varm field type")
+    assert jnp.all(jnp.equal(values, values.astype(bool))), ".varm must contain binary observations"
+    varm_jnp = jnp.array(values, dtype=jnp.bool_)
+
+    return varm_jnp
+
+
+def get_model_args_from_mudata(
+    mdata,
+    rna_modality="gene",
+    guide_modality="guide",
+    covariates=None,
+    covariates_transform=None,
+    gene_counts_layer=None,
+    guide_counts_layer=None,
+    guide_target_elements_varm_field=None,
+    element_target_genes_varm_field=None,
+):
     rna_subset = mdata[rna_modality]
     grna_subset = mdata[guide_modality]
-    gene_obs = jnp.array(rna_subset.X.toarray()).astype(int)
-    guide_obs = jnp.array(grna_subset.X).astype(bool)
+    gene_obs = convert_counts_to_jnp_array(rna_subset, layer=gene_counts_layer)
+    guide_obs = convert_counts_to_jnp_array(grna_subset, layer=guide_counts_layer)
     model_args = (gene_obs,)
     model_kwargs = {"guide_obs": guide_obs}
+    if guide_target_elements_varm_field is not None:
+        grna_varm_jnp = convert_varm_to_jnp_array(grna_subset, guide_target_elements_varm_field)
+        model_kwargs.update({"guide_target_elements": grna_varm_jnp})
+    if element_target_genes_varm_field is not None:
+        rna_varm_jnp = convert_varm_to_jnp_array(rna_subset, element_target_genes_varm_field)
+        model_kwargs.update({"element_target_genes": rna_varm_jnp.T})  # we transpose this here!
+    if covariates is not None:
+        covariates_jnp = get_covariates_array(rna_subset, columns=covariates, transform=covariates_transform)
+        model_kwargs.update({"covariates": covariates_jnp})
+
     return model_args, model_kwargs
