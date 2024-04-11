@@ -1,3 +1,4 @@
+from dbm.ndbm import library
 from typing import Literal, Optional
 
 import jax.numpy as jnp
@@ -23,12 +24,35 @@ def render_perturbseq_model(model):
     )
 
 
-def run_mcmc(args, kwargs, model, unconstrained_locs=None, dense_mass=False, num_samples=1000, random_seed=0):
+def run_mcmc(
+    args,
+    kwargs,
+    model,
+    unconstrained_locs=None,
+    dense_mass=False,
+    num_samples=1000,
+    random_seed=0,
+    target_accept_prob=0.8,
+):
     n_chains = 1
-    kernel = NUTS(model, dense_mass=dense_mass)
+    kernel = NUTS(model, dense_mass=dense_mass, target_accept_prob=target_accept_prob, step_size=0.1)
     mcmc = MCMC(kernel, num_samples=num_samples, num_warmup=1000, num_chains=n_chains)
     mcmc.run(PRNGKey(random_seed), *args, **kwargs, init_params=unconstrained_locs)
     return mcmc
+
+
+def get_targeting_guides(
+    mdata,
+    gene,
+    gene_modality=None,
+    guide_modality=None,
+    element_target_genes_varm_field=None,
+    guide_target_elements_varm_field=None,
+):
+    element_target_genes_df = mdata[gene_modality].varm[element_target_genes_varm_field].loc[gene]
+    tested_elements = list(element_target_genes_df[element_target_genes_df > 0].index)
+    guide_target_elements_df = mdata[guide_modality].varm[guide_target_elements_varm_field][tested_elements]
+    return list(guide_target_elements_df[guide_target_elements_df.sum(axis=1) > 0].index)
 
 
 def run_svi(args, kwargs, model, guide, lr=0.03, n_steps=5000, random_seed=0, decay_rate=0.03, decay_lr=False):
@@ -66,21 +90,30 @@ def get_covariates_array(
         feature_medians = jnp.median(covariates_array, axis=0)
         feature_mads = jnp.median(jnp.abs(covariates_array - feature_medians), axis=0)
         covariates_array = (covariates_array - feature_medians) / feature_mads
-
     return covariates_array
 
 
 def get_mdata_subset(
     mdata: MuData,
-    targeting_guides: Optional[list[str]] = None,
-    control_guides: Optional[list[str]] = None,
+    guides: Optional[list[str]] = None,
     genes: Optional[list[str]] = None,
-    subset_cells: bool = True,
+    guide_target_elements_varm_field=None,
+    subset_cells: bool = False,
     rna_modality: str = "gene",
     guide_modality: str = "guide",
 ):
-    rna_subset = mdata[rna_modality][:, genes]
-    grna_subset = mdata[guide_modality][:, targeting_guides + control_guides]
+    if genes is None:
+        rna_subset = mdata[rna_modality]
+    else:
+        rna_subset = mdata[rna_modality][:, genes]
+    if guides is None:
+        grna_subset = mdata[guide_modality]
+    else:
+        grna_subset = mdata[guide_modality][:, guides]
+
+    if guide_target_elements_varm_field is not None:
+        grna_by_element = grna_subset.varm[guide_target_elements_varm_field]
+        grna_subset.varm[guide_target_elements_varm_field] = grna_by_element.loc[:, grna_by_element.sum() != 0]
 
     return MuData({rna_modality: rna_subset, guide_modality: grna_subset})
 
@@ -92,10 +125,10 @@ def convert_counts_to_jnp_array(adata, layer=None):
     X_max = X.max()
     if X_max <= 1:
         dtype = jnp.bool_
-    elif X_max < 2**16:
-        dtype = jnp.uint16
+    elif X_max < 2**15:
+        dtype = jnp.int16
     else:
-        dtype = jnp.uint32
+        dtype = jnp.int32
     if isinstance(X, spmatrix):
         X_dense = X.toarray()
         X_jnp = jnp.array(X_dense, dtype=dtype)
@@ -123,31 +156,40 @@ def convert_varm_to_jnp_array(adata, varm_field):
     return varm_jnp
 
 
-def get_model_args_from_mudata(
-    mdata,
-    rna_modality="gene",
-    guide_modality="guide",
+def get_model_args(
+    mdata=None,
+    rna_adata=None,
+    grna_adata=None,
     covariates=None,
-    covariates_transform=None,
+    rna_modality=None,
+    guide_modality=None,
+    library_size_column=None,
+    covariates_transform="z_score",
     gene_counts_layer=None,
     guide_counts_layer=None,
     guide_target_elements_varm_field=None,
     element_target_genes_varm_field=None,
 ):
-    rna_subset = mdata[rna_modality]
-    grna_subset = mdata[guide_modality]
-    gene_obs = convert_counts_to_jnp_array(rna_subset, layer=gene_counts_layer)
-    guide_obs = convert_counts_to_jnp_array(grna_subset, layer=guide_counts_layer)
+    if mdata is not None:
+        assert rna_adata is None and grna_adata is None
+        rna_adata = mdata[rna_modality]
+        grna_adata = mdata[guide_modality]
+
+    gene_obs = convert_counts_to_jnp_array(rna_adata, layer=gene_counts_layer)
+    guide_obs = convert_counts_to_jnp_array(grna_adata, layer=guide_counts_layer)
     model_args = (gene_obs,)
     model_kwargs = {"guide_obs": guide_obs}
     if guide_target_elements_varm_field is not None:
-        grna_varm_jnp = convert_varm_to_jnp_array(grna_subset, guide_target_elements_varm_field)
+        grna_varm_jnp = convert_varm_to_jnp_array(grna_adata, guide_target_elements_varm_field)
         model_kwargs.update({"guide_target_elements": grna_varm_jnp})
     if element_target_genes_varm_field is not None:
-        rna_varm_jnp = convert_varm_to_jnp_array(rna_subset, element_target_genes_varm_field)
+        rna_varm_jnp = convert_varm_to_jnp_array(rna_adata, element_target_genes_varm_field)
         model_kwargs.update({"element_target_genes": rna_varm_jnp.T})  # we transpose this here!
     if covariates is not None:
-        covariates_jnp = get_covariates_array(rna_subset, columns=covariates, transform=covariates_transform)
+        covariates_jnp = get_covariates_array(rna_adata, columns=covariates, transform=covariates_transform)
         model_kwargs.update({"covariates": covariates_jnp})
-
+    if library_size_column is not None:
+        lib_size_jnp = get_covariates_array(rna_adata, columns=[library_size_column])
+        log_lib_size = jnp.log(lib_size_jnp / jnp.mean(lib_size_jnp))
+        model_kwargs.update({"size_factor": log_lib_size})
     return model_args, model_kwargs

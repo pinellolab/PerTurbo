@@ -17,7 +17,7 @@ def _create_plates(
     n_cells=None,
     n_guides=None,
     subsample_size=None,
-    gene_subsample_size=1024,
+    gene_subsample_size=None,
     guide_target_elements=None,
     n_genes=None,
     **kwargs,
@@ -78,13 +78,14 @@ def perturbseq_model_turbo(
     n_factors: Optional[int] = None,
     n_cell_factors: Optional[int] = None,
     prior_inclusion_prob: float = 0.001,
-    non_effect_scale: float = 0.01,
-    effect_scale: float = 3.0,
+    # non_effect_scale: float = 0.01,
+    effect_scale: float = 1.0,
     likelihood: Literal["NegBin", "Poisson", "PoissonLogNorm"] = "NegBin",
     efficiency_alpha: float = 2,
     efficiency_beta: float = 5,
     eps: float = 1e-6,
     subsample_size: Optional[int] = None,
+    gene_subsample_size: Optional[int] = None,
 ) -> jnp.ndarray:
     if guide_obs is not None:
         n_cells, n_guides = guide_obs.shape
@@ -119,6 +120,7 @@ def perturbseq_model_turbo(
         n_guides=n_guides,
         n_genes=n_genes,
         subsample_size=subsample_size,
+        gene_subsample_size=gene_subsample_size,
     )
 
     # sample gene-level params
@@ -140,7 +142,7 @@ def perturbseq_model_turbo(
 
     if n_factors is None:
         with element_plate, gene_plate:
-            log2_fc = numpyro.sample("log2_fold_change", dist.Normal(0, 1.0), obs=log2_fc)
+            log2_fc = numpyro.sample("log2_fold_change", dist.Normal(0, effect_scale), obs=log2_fc)
     else:
         ## factor model
         with element_plate, factor_plate:
