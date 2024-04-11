@@ -20,7 +20,6 @@ def _create_plates(
     n_cells=None,
     n_guides=None,
     subsample_size=None,
-    gene_subsample_size=100,
     n_genes=None,
     **kwargs,
 ):
@@ -98,8 +97,9 @@ def perturbseq_model(
         effect_scales = jnp.stack([non_effect_scale, effect_scale], axis=-1)
         mix_dist = dist.Categorical(inclusion_probs)
         effect_dist = dist.Normal(0.0, effect_scales)
-        # log2_fc = numpyro.sample("log2_fold_change", dist.MixtureSameFamily(mix_dist, effect_dist), obs=log2_fc)
-        log2_fc = numpyro.sample("log2_fold_change", dist.Normal(0, 0.1), obs=log2_fc)
+        log2_fc = numpyro.sample("log2_fold_change", dist.MixtureSameFamily(mix_dist, effect_dist), obs=log2_fc)
+        # log2_fc = numpyro.sample("log2_fold_change", dist.Normal(0, effect_scale), obs=log2_fc)
+        # log2_fc = numpyro.sample("log2_fold_change", dist.Normal(0, 0.1), obs=log2_fc)
 
     with covariates_plate, gene_plate:
         covariate_weights = numpyro.sample("covariate_weights", dist.Normal(0.0, 1.0))
@@ -163,14 +163,12 @@ def perturbseq_model(
         elif effect_type == "scale":
             # guide_effect = guide_obs @ (log2_fc * jnp.log(2))
             guide_effect = log2_fc * jnp.log(2)
-            print(guide_obs.shape, guide_efficiency.shape, log2_fc.shape)
-            scaled_guide_effect = 1 - (guide_obs @ guide_efficiency) * (jnp.exp(guide_effect) + 1)
+            scaled_guide_effect = 1 + (guide_obs @ guide_efficiency) * jnp.expm1(guide_effect)
+            mean = scaled_guide_effect * baseline_mean * jnp.exp(covariate_effect)
             # guide_effect += covariate_effect
 
             if likelihood == "NegBin":
-                obs_dist = dist.NegativeBinomial2(
-                    scaled_guide_effect * baseline_mean * jnp.exp(covariate_effect), dispersion
-                )
+                obs_dist = dist.NegativeBinomial2(mean + 1e-4, dispersion)
             else:
                 raise NotImplementedError("only NegBin supported")
 
