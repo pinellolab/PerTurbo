@@ -5,7 +5,7 @@ import numpyro
 import numpyro.distributions as dist
 from numpyro.infer import init_to_median
 from numpyro.infer.autoguide import AutoDelta, AutoGuideList, AutoNormal
-from tensorflow_probability.substrates.jax import distributions as tfd
+# from tensorflow_probability.substrates.jax import distributions as tfd
 
 
 def _create_plates(

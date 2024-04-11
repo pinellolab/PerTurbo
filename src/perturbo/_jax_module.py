@@ -8,7 +8,7 @@ import numpyro.distributions as dist
 from jax.random import PRNGKey
 from numpyro.infer import Predictive
 from numpyro.infer.autoguide import AutoNormal, init_to_median
-from tensorflow_probability.substrates.jax import distributions as tfd
+# from tensorflow_probability.substrates.jax import distributions as tfd
 
 from perturbo._jax_utils import run_mcmc, run_svi
 
@@ -154,12 +154,12 @@ def perturbseq_model(
             elif likelihood == "NegBin":
                 logits = guide_effect + jnp.log(baseline_mean) - jnp.log(dispersion)
                 obs_dist = dist.NegativeBinomialLogits(logits=logits, total_count=dispersion)
-            elif likelihood == "PoissonLogNorm":
-                obs_dist = tfd.PoissonLogNormalQuadratureCompound(
-                    loc=guide_effect + jnp.log(baseline_mean),
-                    scale=1 / dispersion,
-                    quadrature_fn=tfd.quadrature_scheme_lognormal_gauss_hermite,
-                )
+            # elif likelihood == "PoissonLogNorm":
+            #     obs_dist = tfd.PoissonLogNormalQuadratureCompound(
+            #         loc=guide_effect + jnp.log(baseline_mean),
+            #         scale=1 / dispersion,
+            #         quadrature_fn=tfd.quadrature_scheme_lognormal_gauss_hermite,
+            #     )
         elif effect_type == "scale":
             # guide_effect = guide_obs @ (log2_fc * jnp.log(2))
             guide_effect = log2_fc * jnp.log(2)
