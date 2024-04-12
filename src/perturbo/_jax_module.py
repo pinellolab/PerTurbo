@@ -8,7 +8,6 @@ import numpyro.distributions as dist
 from jax.random import PRNGKey
 from numpyro.infer import Predictive
 from numpyro.infer.autoguide import AutoNormal, init_to_median
-# from tensorflow_probability.substrates.jax import distributions as tfd
 
 from perturbo._jax_utils import run_mcmc, run_svi
 
@@ -19,27 +18,30 @@ def _create_plates(
     covariates=None,
     n_cells=None,
     n_guides=None,
+    guide_by_element=None,
     subsample_size=None,
-    n_genes=None,
     **kwargs,
 ):
     if guide_obs is not None:
         n_cells, n_guides = guide_obs.shape
     if genes is not None:
-        n_cells, n_genes = genes.shape
+        n_cells, _ = genes.shape
     if guide_obs is not None and genes is not None:
         assert genes.shape[0] == guide_obs.shape[0]
     if covariates is None:
         n_covariates = 1
     else:
         n_covariates = covariates.shape[1]
+    if guide_by_element is None:
+        n_elements = n_guides
+    else:
+        _, n_elements = guide_by_element.shape
 
     cell_plate = numpyro.plate("cells", n_cells, dim=-2, subsample_size=subsample_size)
     covariate_plate = numpyro.plate("covariates", n_covariates, dim=-2)
-    genes_plate = numpyro.plate("genes", n_genes, dim=-1)
-    guide_plate_T = numpyro.plate("guides_T", n_guides, dim=-2)
     guide_plate = numpyro.plate("guides", n_guides, dim=-1)
-    plates = (cell_plate, covariate_plate, guide_plate, guide_plate_T, genes_plate)
+    element_plate = numpyro.plate("elements", n_elements, dim=-2)
+    plates = (cell_plate, covariate_plate, guide_plate, element_plate)
     return plates
 
 
@@ -51,15 +53,14 @@ def perturbseq_model(
     gene_mean: Optional[jnp.ndarray] = None,
     gene_disp: Optional[jnp.ndarray] = None,
     efficiency: Optional[jnp.ndarray] = None,
+    guide_by_element=None,
     n_guides: Optional[int] = 5,
     n_cells: Optional[int] = 101,
-    n_genes: Optional[int] = 1,
     prior_inclusion_prob: float = 0.05,
     non_effect_scale: float = 0.05,
     effect_scale: float = 3.0,
     likelihood: Literal["NegBin", "Poisson", "PoissonLogNorm"] = "NegBin",
-    effect_type: Literal["scale", "mixture"] = "scale",
-    efficiency_alpha: float = 3.0,
+    efficiency_alpha: float = 5.0,
     efficiency_beta: float = 1.0,
     eps: float = 1e-6,
     subsample_size: Optional[int] = None,
@@ -67,41 +68,48 @@ def perturbseq_model(
     if guide_obs is not None:
         n_cells, n_guides = guide_obs.shape
     if genes is not None:
-        n_cells, n_genes = genes.shape
+        n_cells = genes.shape[0]
     if guide_obs is not None and genes is not None:
         assert genes.shape[0] == guide_obs.shape[0]
     if covariates is None:
         covariates = jnp.zeros((n_cells, 1))
     # create plates
-    cell_plate, covariates_plate, guide_plate, guide_plate_T, gene_plate = _create_plates(
+    cell_plate, covariates_plate, guide_plate, element_plate = _create_plates(
         genes,
         covariates=covariates,
         n_cells=n_cells,
         n_guides=n_guides,
-        n_genes=n_genes,
+        guide_by_element=guide_by_element,
         subsample_size=subsample_size,
     )
+    if guide_by_element is None:
+        guide_by_element = jnp.eye(n_guides)
+        if efficiency is None:
+            efficiency = jnp.ones((n_guides,))
 
     # sample gene-level params
-    with gene_plate:
-        baseline_mean = numpyro.sample("mean", dist.LogNormal(0.0, 4.0), obs=gene_mean)
-        dispersion = numpyro.sample("dispersion", dist.LogNormal(2.0, 2.0), obs=gene_disp)
+    baseline_mean = numpyro.sample("mean", dist.LogNormal(0.0, 4.0), obs=gene_mean)
+    dispersion = numpyro.sample("dispersion", dist.LogNormal(2.0, 2.0), obs=gene_disp)
 
     # sample guide efficiency
-    with guide_plate_T, gene_plate:
+    with guide_plate:
         guide_efficiency = numpyro.sample("efficiency", dist.Beta(efficiency_alpha, efficiency_beta), obs=efficiency)
+        # alpha = numpyro.sample("efficiency", dist.Uniform(), obs=efficiency)
+        # guide_efficiency = jnp.expand_dims(guide_efficiency, axis=-1)
+    # guide_efficiency = jnp.ones((n_guides, 1))
 
     # sample element effect sizes
-    with gene_plate:
-        inclusion_probs = jnp.stack([1.0 - prior_inclusion_prob, prior_inclusion_prob], axis=-1)
-        effect_scales = jnp.stack([non_effect_scale, effect_scale], axis=-1)
+    with element_plate:
+        inclusion_probs = jnp.array([1.0 - prior_inclusion_prob, prior_inclusion_prob])
+        effect_scales = jnp.array([non_effect_scale, effect_scale])
         mix_dist = dist.Categorical(inclusion_probs)
         effect_dist = dist.Normal(0.0, effect_scales)
         log2_fc = numpyro.sample("log2_fold_change", dist.MixtureSameFamily(mix_dist, effect_dist), obs=log2_fc)
-        # log2_fc = numpyro.sample("log2_fold_change", dist.Normal(0, effect_scale), obs=log2_fc)
-        # log2_fc = numpyro.sample("log2_fold_change", dist.Normal(0, 0.1), obs=log2_fc)
 
-    with covariates_plate, gene_plate:
+    # element_by_guide = jnp.ones((1, n_guides))
+    # guide_by_element = jnp.ones((n_guides, 1))
+
+    with covariates_plate:
         covariate_weights = numpyro.sample("covariate_weights", dist.Normal(0.0, 1.0))
 
     # sample gene values for each cell
@@ -116,64 +124,20 @@ def perturbseq_model(
         with guide_plate:
             guide_prob = jnp.array(1 / n_guides)
             guide_obs = numpyro.sample("guide_obs", dist.Binomial(1, probs=guide_prob), obs=guide_obs)
-
-        if effect_type == "mixture":
-            # guide_inactivity = (1 - guide_obs * guide_efficiency).prod()
-            guide_inactivity_logit = jnp.log(
-                1.0 - jnp.tile(jnp.expand_dims(guide_obs, axis=-1), (1, 1, n_genes)) * guide_efficiency
-            ).sum(axis=-2)
-
-            # guide_activity_logit = jnp.log(1 - jnp.exp(guide_inactivity_logit))
-            guide_activity_logit = jnp.log1p(-jnp.exp(guide_inactivity_logit) + eps)
-
-            # mix_probs = jnp.stack([guide_inactivity, 1 - guide_inactivity], axis=-1)
-            mix_logits = jnp.stack([guide_inactivity_logit, guide_activity_logit], axis=-1)
-            mix_dist = dist.Categorical(logits=mix_logits)
-            guide_effect = log2_fc * jnp.log(2)
-
-            if likelihood == "NegBin":
-                base_logit = jnp.log(baseline_mean) - jnp.log(dispersion)
-                base_logit = base_logit + covariate_effect
-                logits = jnp.stack([base_logit, guide_effect + base_logit], axis=-1)
-                component_dist = dist.NegativeBinomialLogits(logits=logits, total_count=dispersion)
-            elif likelihood == "Poisson":
-                no_guide_effect = jnp.ones_like(guide_effect)
-                baseline_mean = baseline_mean * jnp.exp(covariate_effect)
-                rates = jnp.stack([no_guide_effect * baseline_mean, jnp.exp(guide_effect) * baseline_mean], axis=-1)
-                component_dist = dist.Poisson(rates)
-            else:
-                raise NotImplementedError("Only NegBin and Poisson likelihoods implemented for mixture model.")
-            obs_dist = dist.MixtureSameFamily(mix_dist, component_dist)
-
-        elif effect_type == "scale_old":
-            guide_effect = guide_obs @ (log2_fc * guide_efficiency) * jnp.log(2)
-            guide_effect += covariate_effect
-
-            if likelihood == "Poisson":
-                obs_dist = dist.Poisson(jnp.exp(guide_effect) * baseline_mean)
-            elif likelihood == "NegBin":
-                logits = guide_effect + jnp.log(baseline_mean) - jnp.log(dispersion)
-                obs_dist = dist.NegativeBinomialLogits(logits=logits, total_count=dispersion)
-            # elif likelihood == "PoissonLogNorm":
-            #     obs_dist = tfd.PoissonLogNormalQuadratureCompound(
-            #         loc=guide_effect + jnp.log(baseline_mean),
-            #         scale=1 / dispersion,
-            #         quadrature_fn=tfd.quadrature_scheme_lognormal_gauss_hermite,
-            #     )
-        elif effect_type == "scale":
-            # guide_effect = guide_obs @ (log2_fc * jnp.log(2))
-            guide_effect = log2_fc * jnp.log(2)
-            scaled_guide_effect = 1 + (guide_obs @ guide_efficiency) * jnp.expm1(guide_effect)
-            mean = scaled_guide_effect * baseline_mean * jnp.exp(covariate_effect)
-            # guide_effect += covariate_effect
-
-            if likelihood == "NegBin":
-                obs_dist = dist.NegativeBinomial2(mean + 1e-4, dispersion)
-            else:
-                raise NotImplementedError("only NegBin supported")
-
-        with gene_plate:
-            gene_obs = numpyro.sample("gene_obs", obs_dist, obs=genes)
+        # (n_cell x n_guides) * (n_guides)
+        cell_guide_efficiency = guide_obs * guide_efficiency
+        # (n_cell x n_guides) @ (n_guides x n_element)
+        cell_element_efficiency = cell_guide_efficiency @ guide_by_element
+        # (n_cell x n_guides) @ (n_guides x n_element)
+        guide_effect = jnp.exp(cell_element_efficiency @ log2_fc * jnp.log(2))
+        mean = guide_effect * baseline_mean * jnp.exp(covariate_effect)
+        # scaled_guide_effect = 1 + (guide_obs @ guide_efficiency) * jnp.expm1(guide_effect)
+        # mean = scaled_guide_effect * baseline_mean * jnp.exp(covariate_effect)
+        if likelihood == "NegBin":
+            obs_dist = dist.NegativeBinomial2(mean + 1e-4, dispersion)
+        else:
+            raise NotImplementedError("only NegBin supported")
+        gene_obs = numpyro.sample("gene_obs", obs_dist, obs=genes)
 
     return gene_obs
 
@@ -211,8 +175,8 @@ def main(args):
     # Define your model parameters
     model_params = {
         "guide_obs": guide_obs,
-        "log2_fc": jnp.array(args.log2_fc),
-        "efficiency": jnp.array(args.efficiency).reshape(-1, 1),
+        "log2_fc": jnp.array(args.log2_fc).reshape(1, -1),
+        "efficiency": jnp.array(args.efficiency),
         "gene_mean": jnp.array(args.gene_mean),
         "gene_disp": jnp.array(args.gene_disp),
     }
