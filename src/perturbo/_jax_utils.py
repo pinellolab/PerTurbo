@@ -24,6 +24,16 @@ def render_perturbseq_model(model):
     )
 
 
+def generate_guide_arrays(n_control=100, n_cells_per_guide=100, n_guides_per_element=1, n_elements=1):
+    n_guides = n_guides_per_element * n_elements
+    guides_control = jnp.zeros((n_control, n_guides))
+    guides_perturbed = jnp.eye(n_guides).repeat(n_cells_per_guide, axis=0)
+    guide_obs = jnp.vstack((guides_control, guides_perturbed))
+
+    guide_by_element = jnp.eye(n_elements).repeat(n_guides_per_element, axis=0)
+    return guide_obs, guide_by_element
+
+
 def run_mcmc(
     args,
     kwargs,

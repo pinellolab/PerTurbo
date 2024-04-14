@@ -9,7 +9,7 @@ from jax.random import PRNGKey
 from numpyro.infer import Predictive
 from numpyro.infer.autoguide import AutoNormal, init_to_median
 
-from perturbo._jax_utils import run_mcmc, run_svi
+from perturbo._jax_utils import generate_guide_arrays, run_mcmc, run_svi
 
 
 def _create_plates(
@@ -150,19 +150,12 @@ def perturbseq_guide_autonormal(init_loc_fn=init_to_median):
     )
 
 
-def generate_guides_array(n_control, n_guides, n_perturbed):
-    guides_control = jnp.zeros((n_control, n_guides))
-    guides_perturbed = jnp.eye(n_guides).repeat(n_perturbed // n_guides, axis=0)
-    guide_obs = jnp.vstack((guides_control, guides_perturbed))
-    return guide_obs
-
-
 def main(args):
     n_genes = 1  # currently only support single_gene analysis
     n_control = args.n_control
     n_guides = args.n_guides
     n_perturbed = args.n_perturbed
-    guide_obs = generate_guides_array(n_control=n_control, n_guides=n_guides, n_perturbed=n_perturbed)
+    guide_obs = generate_guide_arrays(n_control=n_control, n_guides_per_element=n_guides, n_cells_per_guide=n_perturbed)
 
     print("Simulating data with parameters:")
     print("# guides:", n_guides)
