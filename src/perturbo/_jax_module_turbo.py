@@ -4,7 +4,8 @@ import jax.numpy as jnp
 import numpyro
 import numpyro.distributions as dist
 from numpyro.infer import init_to_median
-from numpyro.infer.autoguide import AutoDelta, AutoNormal
+from numpyro.infer.autoguide import AutoNormal
+
 # from tensorflow_probability.substrates.jax import distributions as tfd
 
 
@@ -219,25 +220,5 @@ def make_perturbseq_guide_autonormal_turbo(init_loc_fn=None, init_scale=0.1):
         init_loc_fn=init_loc_fn if init_loc_fn is not None else init_to_median(num_samples=100),
         create_plates=_create_plates,
         init_scale=init_scale,
-    )
-    return guide
-    guide = AutoGuideList(
-        perturbseq_model_turbo,
-        init_loc_fn=init_loc_fn,
-        create_plates=_create_plates,
-    )
-    guide.append(
-        AutoNormal(
-            numpyro.handlers.block(
-                numpyro.handlers.seed(perturbseq_model_turbo, rng_seed=0), hide=["factor", "loading"]
-            )
-        )
-    )
-    guide.append(
-        AutoDelta(
-            numpyro.handlers.block(
-                numpyro.handlers.seed(perturbseq_model_turbo, rng_seed=1), expose=["factor", "loading"]
-            )
-        )
     )
     return guide
