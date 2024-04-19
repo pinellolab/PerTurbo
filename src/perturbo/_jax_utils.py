@@ -5,7 +5,7 @@ import jax.numpy as jnp
 import numpy as np
 import numpyro
 import optax
-from jax.random import PRNGKey
+from jax.random import PRNGKey, choice
 from mudata import MuData
 from numpyro.infer import MCMC, NUTS, SVI, TraceMeanField_ELBO
 from pandas import DataFrame
@@ -42,7 +42,7 @@ def run_mcmc(
     dense_mass=False,
     num_samples=1000,
     random_seed=0,
-    target_accept_prob=0.8,
+    target_accept_prob=0.7,
 ):
     n_chains = 1
     kernel = NUTS(model, dense_mass=dense_mass, target_accept_prob=target_accept_prob, step_size=0.1)
@@ -108,6 +108,7 @@ def get_mdata_subset(
     guides: Optional[list[str]] = None,
     genes: Optional[list[str]] = None,
     guide_target_elements_varm_field=None,
+    n_extra_cells=1000,
     subset_cells: bool = False,
     rna_modality: str = "gene",
     guide_modality: str = "guide",
@@ -124,6 +125,15 @@ def get_mdata_subset(
     if guide_target_elements_varm_field is not None:
         grna_by_element = grna_subset.varm[guide_target_elements_varm_field]
         grna_subset.varm[guide_target_elements_varm_field] = grna_by_element.loc[:, grna_by_element.sum() != 0]
+
+    if subset_cells:
+        targeted_cells = jnp.where(grna_subset.X.sum(axis=1) > 0)[0]
+        control_cells = jnp.where(grna_subset.X.sum(axis=1) == 0)[0]
+        assert len(control_cells) > n_extra_cells, "n_extra_cells must be smaller than number of non-targeted cells"
+        selected_control_cells = choice(PRNGKey(0), control_cells, (n_extra_cells,), replace=False)
+        selected_cells = np.concatenate([targeted_cells, selected_control_cells])
+        rna_subset = rna_subset[selected_cells, :]
+        grna_subset = grna_subset[selected_cells, :]
 
     return MuData({rna_modality: rna_subset, guide_modality: grna_subset})
 
@@ -201,5 +211,5 @@ def get_model_args(
     if library_size_column is not None:
         lib_size_jnp = get_covariates_array(rna_adata, columns=[library_size_column])
         log_lib_size = jnp.log(lib_size_jnp / jnp.mean(lib_size_jnp))
-        model_kwargs.update({"size_factor": log_lib_size})
+        model_kwargs.update({"size_factor": jnp.exp(log_lib_size)})
     return model_args, model_kwargs

@@ -18,7 +18,7 @@ def _create_plates(
     covariates=None,
     n_cells=None,
     n_guides=None,
-    guide_by_element=None,
+    guide_target_elements=None,
     subsample_size=None,
     **kwargs,
 ):
@@ -32,10 +32,10 @@ def _create_plates(
         n_covariates = 1
     else:
         n_covariates = covariates.shape[1]
-    if guide_by_element is None:
+    if guide_target_elements is None:
         n_elements = n_guides
     else:
-        _, n_elements = guide_by_element.shape
+        _, n_elements = guide_target_elements.shape
 
     cell_plate = numpyro.plate("cells", n_cells, dim=-2, subsample_size=subsample_size)
     covariate_plate = numpyro.plate("covariates", n_covariates, dim=-2)
@@ -53,15 +53,17 @@ def perturbseq_model(
     gene_mean: Optional[jnp.ndarray] = None,
     gene_disp: Optional[jnp.ndarray] = None,
     efficiency: Optional[jnp.ndarray] = None,
-    guide_by_element=None,
+    size_factor: Optional[jnp.ndarray] = None,
+    guide_target_elements: Optional[jnp.ndarray] = None,
     n_guides: Optional[int] = 5,
     n_cells: Optional[int] = 101,
     prior_inclusion_prob: float = 0.05,
-    non_effect_scale: float = 0.05,
-    effect_scale: float = 3.0,
+    non_effect_scale: float = 0.02,
+    effect_scale: float = 1.0,
     likelihood: Literal["NegBin", "Poisson", "PoissonLogNorm"] = "NegBin",
     efficiency_alpha: float = 5.0,
     efficiency_beta: float = 1.0,
+    fit_efficiency: bool = False,
     eps: float = 1e-6,
     subsample_size: Optional[int] = None,
 ) -> jnp.ndarray:
@@ -79,13 +81,12 @@ def perturbseq_model(
         covariates=covariates,
         n_cells=n_cells,
         n_guides=n_guides,
-        guide_by_element=guide_by_element,
+        guide_target_elements=guide_target_elements,
         subsample_size=subsample_size,
     )
-    if guide_by_element is None:
-        guide_by_element = jnp.eye(n_guides)
-        if efficiency is None:
-            efficiency = jnp.ones((n_guides,))
+
+    if guide_target_elements is None:
+        guide_target_elements = jnp.eye(n_guides)
 
     # sample gene-level params
     baseline_mean = numpyro.sample("mean", dist.LogNormal(0.0, 4.0), obs=gene_mean)
@@ -93,7 +94,14 @@ def perturbseq_model(
 
     # sample guide efficiency
     with guide_plate:
-        guide_efficiency = numpyro.sample("efficiency", dist.Beta(efficiency_alpha, efficiency_beta), obs=efficiency)
+        if fit_efficiency:
+            guide_efficiency = numpyro.sample(
+                "efficiency", dist.Beta(efficiency_alpha, efficiency_beta), obs=efficiency
+            )
+        elif efficiency is None:
+            guide_efficiency = jnp.ones((n_guides,))
+        else:
+            guide_efficiency = efficiency
         # alpha = numpyro.sample("efficiency", dist.Uniform(), obs=efficiency)
         # guide_efficiency = jnp.expand_dims(guide_efficiency, axis=-1)
     # guide_efficiency = jnp.ones((n_guides, 1))
@@ -107,7 +115,7 @@ def perturbseq_model(
         log2_fc = numpyro.sample("log2_fold_change", dist.MixtureSameFamily(mix_dist, effect_dist), obs=log2_fc)
 
     # element_by_guide = jnp.ones((1, n_guides))
-    # guide_by_element = jnp.ones((n_guides, 1))
+    # guide_target_elements = jnp.ones((n_guides, 1))
 
     with covariates_plate:
         covariate_weights = numpyro.sample("covariate_weights", dist.Normal(0.0, 1.0))
@@ -127,10 +135,15 @@ def perturbseq_model(
         # (n_cell x n_guides) * (n_guides)
         cell_guide_efficiency = guide_obs * guide_efficiency
         # (n_cell x n_guides) @ (n_guides x n_element)
-        cell_element_efficiency = cell_guide_efficiency @ guide_by_element
+        cell_element_efficiency = cell_guide_efficiency @ guide_target_elements
         # (n_cell x n_guides) @ (n_guides x n_element)
         guide_effect = jnp.exp(cell_element_efficiency @ log2_fc * jnp.log(2))
         mean = guide_effect * baseline_mean * jnp.exp(covariate_effect)
+
+        if size_factor is not None:
+            size_factor = numpyro.subsample(size_factor, event_dim=0)
+            mean *= size_factor
+
         # scaled_guide_effect = 1 + (guide_obs @ guide_efficiency) * jnp.expm1(guide_effect)
         # mean = scaled_guide_effect * baseline_mean * jnp.exp(covariate_effect)
         if likelihood == "NegBin":

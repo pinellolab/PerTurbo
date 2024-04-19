@@ -4,7 +4,7 @@ import jax.numpy as jnp
 import numpyro
 import numpyro.distributions as dist
 from numpyro.infer import init_to_median
-from numpyro.infer.autoguide import AutoDelta, AutoGuideList, AutoNormal
+from numpyro.infer.autoguide import AutoDelta, AutoNormal
 # from tensorflow_probability.substrates.jax import distributions as tfd
 
 
