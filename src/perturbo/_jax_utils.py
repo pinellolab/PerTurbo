@@ -42,8 +42,8 @@ def run_mcmc(
     num_samples=1000,
     random_seed=0,
     target_accept_prob=0.7,
+    n_chains=1,
 ):
-    n_chains = 1
     kernel = NUTS(model, dense_mass=dense_mass, target_accept_prob=target_accept_prob, step_size=0.1)
     mcmc = MCMC(kernel, num_samples=num_samples, num_warmup=1000, num_chains=n_chains)
     mcmc.run(PRNGKey(random_seed), *args, **kwargs, init_params=unconstrained_locs)
