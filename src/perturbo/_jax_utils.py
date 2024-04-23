@@ -105,6 +105,7 @@ def get_covariates_array(
 def get_mdata_subset(
     mdata: MuData,
     guides: Optional[list[str]] = None,
+    control_guides: Optional[list[str]] = None,
     genes: Optional[list[str]] = None,
     guide_target_elements_varm_field=None,
     n_extra_cells=1000,
@@ -115,21 +116,25 @@ def get_mdata_subset(
     if genes is None:
         rna_subset = mdata[rna_modality]
     else:
-        rna_subset = mdata[rna_modality][:, genes]
+        rna_subset = mdata[rna_modality][:, genes].copy()
     if guides is None:
         grna_subset = mdata[guide_modality]
     else:
-        grna_subset = mdata[guide_modality][:, guides]
+        grna_subset = mdata[guide_modality][:, guides].copy()
 
     if guide_target_elements_varm_field is not None:
         grna_by_element = grna_subset.varm[guide_target_elements_varm_field]
         grna_subset.varm[guide_target_elements_varm_field] = grna_by_element.loc[:, grna_by_element.sum() != 0]
 
     if subset_cells:
-        targeted_cells = jnp.where(grna_subset.X.sum(axis=1) > 0)[0]
-        control_cells = jnp.where(grna_subset.X.sum(axis=1) == 0)[0]
+        targeted_cells = np.where(grna_subset.X.sum(axis=1) > 0)[0]
+        if control_guides is None:
+            control_cells = np.where(grna_subset.X.sum(axis=1) == 0)[0]
+        else:
+            control_grna_subset = mdata[guide_modality][:, control_guides]
+            control_cells = np.where(control_grna_subset.X.sum(axis=1) == 0)[0]
         assert len(control_cells) > n_extra_cells, "n_extra_cells must be smaller than number of non-targeted cells"
-        selected_control_cells = choice(PRNGKey(0), control_cells, (n_extra_cells,), replace=False)
+        selected_control_cells = np.random.choice(control_cells, size=n_extra_cells, replace=False)
         selected_cells = np.concatenate([targeted_cells, selected_control_cells])
         rna_subset = rna_subset[selected_cells, :]
         grna_subset = grna_subset[selected_cells, :]
