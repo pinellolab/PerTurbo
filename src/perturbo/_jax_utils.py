@@ -52,15 +52,18 @@ def run_mcmc(
 
 def get_targeting_guides(
     mdata,
-    gene,
+    genes=None,
+    elements=None,
     gene_modality=None,
     guide_modality=None,
     element_target_genes_varm_field=None,
     guide_target_elements_varm_field=None,
 ):
-    element_target_genes_df = mdata[gene_modality].varm[element_target_genes_varm_field].loc[gene]
-    tested_elements = list(element_target_genes_df[element_target_genes_df > 0].index)
-    guide_target_elements_df = mdata[guide_modality].varm[guide_target_elements_varm_field][tested_elements]
+    assert (genes is None) != (elements is None), "only one of genes or elements can be specified"
+    if elements is None:
+        element_target_genes_df = mdata[gene_modality].varm[element_target_genes_varm_field].loc[genes]
+        elements = list(element_target_genes_df[element_target_genes_df > 0].index)
+    guide_target_elements_df = mdata[guide_modality].varm[guide_target_elements_varm_field][elements]
     return list(guide_target_elements_df[guide_target_elements_df.sum(axis=1) > 0].index)
 
 
@@ -116,15 +119,19 @@ def get_mdata_subset(
     if genes is None:
         rna_subset = mdata[rna_modality]
     else:
-        rna_subset = mdata[rna_modality][:, genes].copy()
+        rna_subset = mdata[rna_modality][:, genes]
     if guides is None:
         grna_subset = mdata[guide_modality]
     else:
-        grna_subset = mdata[guide_modality][:, guides].copy()
+        grna_subset = mdata[guide_modality][:, guides]
 
     if guide_target_elements_varm_field is not None:
         grna_by_element = grna_subset.varm[guide_target_elements_varm_field]
-        grna_subset.varm[guide_target_elements_varm_field] = grna_by_element.loc[:, grna_by_element.sum() != 0]
+        if isinstance(grna_by_element, DataFrame):
+            grna_subset.varm[guide_target_elements_varm_field] = grna_by_element.loc[:, grna_by_element.sum() != 0]
+        else:
+            targeted_elements = grna_subset.varm[guide_target_elements_varm_field].sum(axis=0).A1 > 0
+            grna_subset.varm[guide_target_elements_varm_field] = grna_by_element[:, targeted_elements]
 
     if subset_cells:
         targeted_cells = np.where(grna_subset.X.sum(axis=1) > 0)[0]
@@ -154,8 +161,7 @@ def convert_counts_to_jnp_array(adata, layer=None):
     else:
         dtype = jnp.int32
     if isinstance(X, spmatrix):
-        X_dense = X.toarray()
-        X_jnp = jnp.array(X_dense, dtype=dtype)
+        X_jnp = jnp.array(X.toarray(), dtype=dtype)
     else:
         X_jnp = jnp.array(X, dtype=dtype)
 

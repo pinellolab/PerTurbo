@@ -146,10 +146,8 @@ def perturbseq_model(
 
         # scaled_guide_effect = 1 + (guide_obs @ guide_efficiency) * jnp.expm1(guide_effect)
         # mean = scaled_guide_effect * baseline_mean * jnp.exp(covariate_effect)
-        if likelihood == "NegBin":
-            obs_dist = dist.NegativeBinomial2(mean + 1e-4, dispersion)
-        else:
-            raise NotImplementedError("only NegBin supported")
+        assert likelihood == "NegBin", "Only NegBin likelihood supported"
+        obs_dist = dist.NegativeBinomial2(mean + 1e-4, dispersion)
         gene_obs = numpyro.sample("gene_obs", obs_dist, obs=genes)
 
     return gene_obs
