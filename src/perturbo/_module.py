@@ -6,10 +6,11 @@ import pyro.distributions as dist
 import torch
 from pandas import DataFrame
 from pyro import poutine
+from pyro.distributions import constraints
 from pyro.infer import config_enumerate
 from pyro.infer.autoguide import AutoGuideList, AutoNormal, init_to_mean, init_to_median
-from scvi.module.base import PyroBaseModuleClass
 from pyro.ops.indexing import Vindex
+from scvi.module.base import PyroBaseModuleClass
 
 from ._constants import REGISTRY_KEYS
 
@@ -68,16 +69,17 @@ class PerTurboPyroModule(PyroBaseModuleClass):
             self.n_cat_list = []
         self.n_batches = summary_stats.n_batch
 
-        self._guide = AutoNormal(
-            poutine.block(self.model, hide="has_effect"),
-            init_loc_fn=init_to_median,
-            create_plates=self.create_plates,
-        )
-
-        # self._guide = AutoGuideList(self.model, create_plates=self.create_plates)
-        # self._guide.append(
-        #     AutoNormal(poutine.block(self.model, hide="element_effects"), init_loc_fn=init_to_mean, init_scale=0.1)
+        # self._guide = AutoNormal(
+        #     poutine.block(self.model, hide="has_effect"),
+        #     init_loc_fn=init_to_median,
+        #     create_plates=self.create_plates,
         # )
+
+        self._guide = AutoGuideList(self.model, create_plates=self.create_plates)
+        self._guide.append(
+            AutoNormal(poutine.block(self.model, hide="element_effects"), init_loc_fn=init_to_mean, init_scale=0.1)
+        )
+        self._guide.append(self.local_guide)
         # self._guide.append(
         #     AutoNormal(poutine.block(self.model, expose="element_effects"), init_loc_fn=init_to_median, init_scale=0.05)
         # )
@@ -86,11 +88,9 @@ class PerTurboPyroModule(PyroBaseModuleClass):
 
         self.local_effects = gene_by_element is not None
 
-        if self.local_effects and self.effect_prior_dist == "normal_mixture":
-            raise NotImplementedError("Can't use sparse effects model w/ discrete latent vars")
-            # self.register_buffer("guide_by_element", guide_by_element.to_sparse_coo())
-        # else:
-        self.register_buffer("guide_by_element", guide_by_element)
+        self.register_buffer("guide_by_element", guide_by_element.to_sparse_coo())
+        # # else:
+        # self.register_buffer("guide_by_element", guide_by_element)
 
         if self.local_effects:
             if gene_by_element.shape[1] != self.n_elements:
@@ -168,6 +168,43 @@ class PerTurboPyroModule(PyroBaseModuleClass):
             pyro.plate("factors_2", self.n_factors, dim=-2),
         )
 
+    def local_guide(self, idx, **tensor_dict):
+        # Create learnable parameters.
+        if self.local_effects:
+            mix_probs = pyro.param(
+                "element_effect_prob",
+                self.spike_slab_prior_probs.expand((self.n_element_effects, -1)),
+                constraint=constraints.simplex,
+            )
+            effect_loc = pyro.param("element_effect_loc", torch.zeros((self.n_element_effects, 2)))
+            effect_scale = pyro.param(
+                "element_effect_scale",
+                self.spike_slab_prior_scales.expand((self.n_element_effects, -1)),
+                constraint=constraints.positive,
+            )
+            with self.guide.plates["elements_sparse"]:
+                pyro.sample(
+                    "element_effects",
+                    dist.MixtureSameFamily(dist.Categorical(mix_probs), dist.Normal(effect_loc, effect_scale)),
+                )
+        else:
+            mix_probs = pyro.param(
+                "element_effect_prob",
+                self.spike_slab_prior_probs.expand((self.n_elements, self.n_genes, -1)),
+                constraint=constraints.simplex,
+            )
+            effect_loc = pyro.param("element_effect_loc", torch.zeros((self.n_elements, self.n_genes, 2)))
+            effect_scale = pyro.param(
+                "element_effect_scale",
+                self.spike_slab_prior_scales.expand((self.n_elements, self.n_genes, -1)),
+                constraint=constraints.positive,
+            )
+            with self.guide.plates["elements"], self.guide.plates["genes"]:
+                pyro.sample(
+                    "element_effects",
+                    dist.MixtureSameFamily(dist.Categorical(mix_probs), dist.Normal(effect_loc, effect_scale)),
+                )
+
     def model(self, idx, **tensor_dict):
         pyro.module("perturbo", self)
         (
@@ -188,16 +225,9 @@ class PerTurboPyroModule(PyroBaseModuleClass):
         cont_covariates = tensor_dict[REGISTRY_KEYS.CONT_COVS_KEY]
 
         if self.effect_prior_dist == "normal_mixture":
-            # comp_dist = dist.Normal(0.0, self.spike_slab_prior_scales)
+            comp_dist = dist.Normal(0.0, self.spike_slab_prior_scales)
             mix_dist = dist.Categorical(probs=self.spike_slab_prior_probs)
-            if self.local_effects:
-                with element_effects_plate:
-                    indicator = pyro.sample("has_effect", mix_dist, infer={"enumerate": "parallel"})
-            else:
-                with element_plate, gene_plate:
-                    indicator = pyro.sample("has_effect", mix_dist, infer={"enumerate": "parallel"})
-            effects_dist = dist.Normal(0.0, self.spike_slab_prior_scales[indicator])
-
+            effects_dist = dist.MixtureSameFamily(mix_dist, comp_dist)
         else:
             effects_dist = dist.Cauchy(0.0, self.element_effects_prior_scale)
 

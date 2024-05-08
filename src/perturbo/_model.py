@@ -6,7 +6,7 @@ import pandas as pd
 import torch
 from mudata import MuData
 from pandas import DataFrame
-from pyro.infer import TraceEnum_ELBO
+from pyro.infer import TraceEnum_ELBO, JitTrace_ELBO
 from scipy.sparse import issparse
 from scipy.stats import chi2
 from scvi._types import AnnOrMuData
@@ -320,8 +320,6 @@ class PERTURBO(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
         plan_kwargs = plan_kwargs if plan_kwargs is not None else {}
         if lr is not None and "optim" not in plan_kwargs.keys():
             plan_kwargs.update({"optim_kwargs": {"lr": lr}})
-        if self.module.effect_prior_dist == "normal_mixture":
-            plan_kwargs.update({"loss_fn": TraceEnum_ELBO(max_plate_nesting=2)})
         if data_splitter_kwargs is None:
             data_splitter_kwargs = {}
         if "data_and_attributes" not in data_splitter_kwargs:
