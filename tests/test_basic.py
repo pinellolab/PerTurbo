@@ -6,6 +6,8 @@ import pyro
 import pytest
 from mudata import AnnData, MuData
 from scipy.sparse import csr_matrix
+from pyro.infer import infer_discrete
+from pyro import poutine
 
 import perturbo
 
@@ -30,7 +32,7 @@ def adata():
             "batch_id": np.random.choice(["batch_1", "batch_2"], size=(n_cells)),
         }
     )
-    rna_counts = np.random.negative_binomial(100, 0.9, size=(n_cells, n_genes)).astype(np.float64)
+    rna_counts = np.random.negative_binomial(100, 0.9, size=(n_cells, n_genes)).astype(np.float32)
     rna_adata = AnnData(csr_matrix(rna_counts), obs=total_rna)
     rna_adata.var_names = "gene" + rna_adata.var_names
 
@@ -80,7 +82,8 @@ def test_package_has_version():
 
 @pytest.mark.parametrize("use_gene_by_element", [True, False])
 @pytest.mark.parametrize("use_guide_by_element", [True, False])
-def test_model_mdata(mdata: MuData, tmp_path, use_guide_by_element, use_gene_by_element):
+@pytest.mark.parametrize("effect_prior", ["cauchy", "normal_mixture"])
+def test_model_mdata(mdata: MuData, tmp_path, use_guide_by_element, use_gene_by_element, effect_prior):
     """Check that we can register our MuData object with our model and perform training"""
     if use_gene_by_element and not use_guide_by_element:
         pytest.skip("gene_by_element without guide_by_element test not implemented!")
@@ -101,7 +104,7 @@ def test_model_mdata(mdata: MuData, tmp_path, use_guide_by_element, use_gene_by_
         },
     )
 
-    model = perturbo.PERTURBO(mdata, n_factors=None)
+    model = perturbo.PERTURBO(mdata, n_factors=None, effect_prior_dist=effect_prior)
     assert model.summary_stats.n_cells == len(mdata)
     assert model.summary_stats.n_vars == len(mdata[rna_key].var)
     assert model.summary_stats.n_perturbations == len(mdata[perturb_key].var)
@@ -109,6 +112,14 @@ def test_model_mdata(mdata: MuData, tmp_path, use_guide_by_element, use_gene_by_
     model.train(max_epochs=10, lr=0.1)
     model.train(max_epochs=10, lr=0.1, batch_size=None)
     samples = model.sample_posterior(num_samples=1, return_observed=True)
+
+    # test infer discrete
+    if effect_prior == "normal_mixture":
+        args, kwargs = model._get_data_subset(np.arange(5))
+        guide_trace = poutine.trace(model.module.guide).get_trace(*args, **kwargs)  # record the globals
+        trained_model = poutine.replay(model.module, trace=guide_trace)  # replay the globals
+        serving_model = infer_discrete(trained_model, first_available_dim=-3, temperature=0)
+        serving_model(*args, **kwargs)
 
     assert samples["obs"].shape[-2:] == (
         model.summary_stats.n_cells,
