@@ -3,6 +3,7 @@ from typing import Optional, Union
 
 import numpy as np
 import pandas as pd
+from sympy import Trace
 import torch
 from mudata import MuData
 from pandas import DataFrame
@@ -320,6 +321,8 @@ class PERTURBO(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
         plan_kwargs = plan_kwargs if plan_kwargs is not None else {}
         if lr is not None and "optim" not in plan_kwargs.keys():
             plan_kwargs.update({"optim_kwargs": {"lr": lr}})
+        # if lr is not None and "optim" not in plan_kwargs.keys():
+        plan_kwargs.update({"loss_fn": TraceEnum_ELBO()})
         if data_splitter_kwargs is None:
             data_splitter_kwargs = {}
         if "data_and_attributes" not in data_splitter_kwargs:
@@ -383,33 +386,33 @@ class PERTURBO(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
         #         # scale_values = loc_plus_scale_values - loc_values
         loc_values, scale_values = self.module.guide._get_loc_and_scale("element_effects")
 
-        if self.module.local_effects:
-            # loc/scale_values are the nonzero elements of a sparse matrix of elements by genes
-            i, j = self.module.element_by_gene_idx.detach().cpu().numpy().astype(int)
+        # if self.module.local_effects:
+        #     # loc/scale_values are the nonzero elements of a sparse matrix of elements by genes
+        #     i, j = self.module.element_by_gene_idx.detach().cpu().numpy().astype(int)
 
-            # pert_ids = self.adata_manager.get_state_registry("perturbations").column_names
-            element_effects = pd.DataFrame(
-                {
-                    "loc": loc_values.detach().cpu().numpy(),
-                    "scale": scale_values.detach().cpu().numpy(),
-                    "element": [element_ids[idx] for idx in i],
-                    "gene": [gene_ids[idx] for idx in j],
-                }
+        #     # pert_ids = self.adata_manager.get_state_registry("perturbations").column_names
+        #     element_effects = pd.DataFrame(
+        #         {
+        #             "loc": loc_values.detach().cpu().numpy(),
+        #             "scale": scale_values.detach().cpu().numpy(),
+        #             "element": [element_ids[idx] for idx in i],
+        #             "gene": [gene_ids[idx] for idx in j],
+        #         }
+        #     )
+        # else:
+        # loc/scale_values are dense matrices of elements by genes
+
+        def make_long_df(mat, value_name):
+            return (
+                pd.DataFrame(data=mat, index=element_ids, columns=gene_ids)
+                .melt(var_name="gene", value_name=value_name, ignore_index=False)
+                .reset_index(names="element")
             )
-        else:
-            # loc/scale_values are dense matrices of elements by genes
 
-            def make_long_df(mat, value_name):
-                return (
-                    pd.DataFrame(data=mat, index=element_ids, columns=gene_ids)
-                    .melt(var_name="gene", value_name=value_name, ignore_index=False)
-                    .reset_index(names="element")
-                )
-
-            element_effects = pd.merge(
-                make_long_df(loc_values.detach().cpu().numpy(), "loc"),
-                make_long_df(scale_values.detach().cpu().numpy(), "scale"),
-            )
+        element_effects = pd.merge(
+            make_long_df(loc_values.detach().cpu().numpy(), "loc"),
+            make_long_df(scale_values.detach().cpu().numpy(), "scale"),
+        )
 
         element_effects = element_effects.assign(
             z_value=lambda x: x["loc"] / x["scale"],

@@ -69,17 +69,17 @@ class PerTurboPyroModule(PyroBaseModuleClass):
             self.n_cat_list = []
         self.n_batches = summary_stats.n_batch
 
-        # self._guide = AutoNormal(
-        #     poutine.block(self.model, hide="has_effect"),
-        #     init_loc_fn=init_to_median,
-        #     create_plates=self.create_plates,
-        # )
-
-        self._guide = AutoGuideList(self.model, create_plates=self.create_plates)
-        self._guide.append(
-            AutoNormal(poutine.block(self.model, hide="element_effects"), init_loc_fn=init_to_mean, init_scale=0.1)
+        self._guide = AutoNormal(
+            poutine.block(self.model, hide="has_effect"),
+            init_loc_fn=init_to_median,
+            create_plates=self.create_plates,
         )
-        self._guide.append(self.local_guide)
+
+        # self._guide = AutoGuideList(self.model, create_plates=self.create_plates)
+        # self._guide.append(
+        #     AutoNormal(poutine.block(self.model, hide="element_effects"), init_loc_fn=init_to_mean, init_scale=0.1)
+        # )
+        # self._guide.append(self.local_guide)
         # self._guide.append(
         #     AutoNormal(poutine.block(self.model, expose="element_effects"), init_loc_fn=init_to_median, init_scale=0.05)
         # )
@@ -88,9 +88,9 @@ class PerTurboPyroModule(PyroBaseModuleClass):
 
         self.local_effects = gene_by_element is not None
 
-        self.register_buffer("guide_by_element", guide_by_element.to_sparse_coo())
+        # self.register_buffer("guide_by_element", guide_by_element.to_sparse_coo())
         # # else:
-        # self.register_buffer("guide_by_element", guide_by_element)
+        self.register_buffer("guide_by_element", guide_by_element.to_dense())
 
         if self.local_effects:
             if gene_by_element.shape[1] != self.n_elements:
@@ -125,8 +125,8 @@ class PerTurboPyroModule(PyroBaseModuleClass):
         self.register_buffer("logit_efficacy_alpha", torch.tensor(5.0))
         self.register_buffer("logit_efficacy_beta", torch.tensor(1.0))
 
-        self.register_buffer("spike_slab_prior_scales", torch.tensor([1.0, 0.05]))
-        self.register_buffer("spike_slab_prior_probs", torch.tensor([0.001, 0.999]))
+        self.register_buffer("spike_slab_prior_scales", torch.tensor([0.05, 1.0]))
+        self.register_buffer("spike_slab_prior_probs", torch.tensor([0.9, 0.1]))
 
         if self.n_factors is not None:
             self.register_buffer("factor_element_prior_scale", torch.tensor(0.0001))
@@ -224,25 +224,34 @@ class PerTurboPyroModule(PyroBaseModuleClass):
         perturbations = tensor_dict[REGISTRY_KEYS.PERTURBATION_KEY]
         cont_covariates = tensor_dict[REGISTRY_KEYS.CONT_COVS_KEY]
 
-        if self.effect_prior_dist == "normal_mixture":
-            comp_dist = dist.Normal(0.0, self.spike_slab_prior_scales)
-            mix_dist = dist.Categorical(probs=self.spike_slab_prior_probs)
-            effects_dist = dist.MixtureSameFamily(mix_dist, comp_dist)
-        else:
-            effects_dist = dist.Cauchy(0.0, self.element_effects_prior_scale)
+        # comp_dist = dist.Normal(0.0, self.spike_slab_prior_scales)
 
-        if self.local_effects:
-            with element_effects_plate:
-                element_local_effects_values = pyro.sample("element_effects", effects_dist)
-                batch_dims = element_local_effects_values.shape[:-1]
-                element_local_effects = torch.sparse_coo_tensor(
-                    self.element_by_gene_idx,
-                    element_local_effects_values,
-                    size=batch_dims + torch.Size((self.n_elements, self.n_genes)),
-                )
-        else:
-            with element_plate, gene_plate:
-                element_local_effects = pyro.sample("element_effects", effects_dist)
+        # if self.effect_prior_dist == "normal_mixture":
+        # effects_dist = dist.MixtureSameFamily(mix_dist, comp_dist)
+
+        # else:
+        # effects_dist = dist.Cauchy(0.0, self.element_effects_prior_scale)
+
+        # if self.local_effects:
+        #     with element_effects_plate:
+        #         element_local_effects_values = pyro.sample("element_effects", effects_dist)
+        #         batch_dims = element_local_effects_values.shape[:-1]
+        #         element_local_effects = torch.sparse_coo_tensor(
+        #             self.element_by_gene_idx,
+        #             element_local_effects_values,
+        #             size=batch_dims + torch.Size((self.n_elements, self.n_genes)),
+        #         )
+        # else:
+
+        with element_plate, gene_plate:
+            mix_dist = dist.Categorical(probs=self.spike_slab_prior_probs)
+            has_effect = pyro.sample("has_effect", mix_dist, infer={"enumerate": "parallel"})
+            beta = pyro.sample("element_effects", dist.Normal(0.0, 1.0))
+            element_local_effects = has_effect * beta
+            # element_local_effects = beta
+
+            # raise Exception(has_effect.max())
+            # element_local_effects = pyro.sample("element_effects", effects_dist)
 
         # estimate a single efficacy value per guide
         # if self.multi_guide and not self.merge_guides:

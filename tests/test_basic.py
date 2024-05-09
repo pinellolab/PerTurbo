@@ -6,7 +6,8 @@ import pyro
 import pytest
 from mudata import AnnData, MuData
 from scipy.sparse import csr_matrix
-
+from pyro.infer import SVI, TraceEnum_ELBO, config_enumerate, infer_discrete
+from pyro import poutine
 import perturbo
 
 rna_key = "rna"
@@ -115,8 +116,14 @@ def test_model_mdata(mdata: MuData, tmp_path, use_guide_by_element, use_gene_by_
         model.summary_stats.n_cells,
         model.summary_stats.n_vars,
     )
-    # fx = model.get_element_effects()
-    # assert isinstance(fx, pd.DataFrame)
+    args, kwargs = model._get_data_subset()
+    guide_trace = poutine.trace(model.module.guide).get_trace(*args, **kwargs)  # record the globals
+    trained_model = poutine.replay(model.module, trace=guide_trace)  # replay the globals
+    inferred_model = infer_discrete(trained_model, temperature=1, first_available_dim=-3)
+    trace = poutine.trace(inferred_model).get_trace(*args, **kwargs)
+
+    fx = model.get_element_effects()
+    assert isinstance(fx, pd.DataFrame)
     assert len(model.history["elbo_train"]) == 20
     assert isinstance(model.history["elbo_train"], pd.DataFrame)
     model.save(tmp_path / "model", save_anndata=True)
