@@ -32,6 +32,7 @@ class PerTurboPyroModule(PyroBaseModuleClass):
         n_factors=None,
         dispersion_effects=False,
         merge_guides=False,
+        n_latent_factors: Optional[int] = None,
         n_cats_per_cov: Optional[Iterable[int]] = None,
         **module_kwargs,
     ) -> None:
@@ -43,6 +44,7 @@ class PerTurboPyroModule(PyroBaseModuleClass):
         self.lnnb_quad_points = 8
         self.n_factors = n_factors
         self.effect_prior_dist = effect_prior_dist
+        self.n_latent_factors = n_latent_factors
 
         # copy data summary stats
         self.n_cells = summary_stats.n_cells
@@ -66,11 +68,11 @@ class PerTurboPyroModule(PyroBaseModuleClass):
             self.n_cat_list = []
         self.n_batches = summary_stats.n_batch
 
-        self._guide = AutoNormal(
-            self.model,
-            init_loc_fn=init_to_median,
-            create_plates=self.create_plates,
-        )
+        # self._guide = AutoNormal(
+        #     self.model,
+        #     init_loc_fn=init_to_median,
+        #     create_plates=self.create_plates,
+        # )
 
         self._guide = AutoGuideList(self.model, create_plates=self.create_plates)
         self._guide.append(
@@ -112,7 +114,7 @@ class PerTurboPyroModule(PyroBaseModuleClass):
         self.register_buffer("gene_disp_prior_scale", torch.tensor(3.0))
         self.register_buffer("batch_effect_prior_scale", torch.tensor(3.0))
         self.register_buffer("element_effects_prior_scale", torch.tensor(0.01))
-        self.register_buffer("covariate_prior_sigma", torch.tensor(3.0))
+        self.register_buffer("covariate_prior_sigma", torch.tensor(1.0))
         self.register_buffer("covariate_disp_prior_sigma", torch.tensor(1.0))
         self.register_buffer("logit_efficacy_alpha", torch.tensor(5.0))
         self.register_buffer("logit_efficacy_beta", torch.tensor(1.0))
@@ -147,9 +149,9 @@ class PerTurboPyroModule(PyroBaseModuleClass):
             tensor_dict[REGISTRY_KEYS.CONT_COVS_KEY] = size_factor
 
         # return indices and then the rest of the tensors
-        return (tensor_dict[REGISTRY_KEYS.INDICES_KEY],), tensor_dict
+        return (tensor_dict[REGISTRY_KEYS.INDICES_KEY].squeeze(),), tensor_dict
 
-    def create_plates(self, idx, subsample_size=None, **tensor_dict):
+    def create_plates(self, idx, **tensor_dict):
         return (
             pyro.plate("cells", self.n_cells, dim=-2, subsample=idx),
             pyro.plate("guides", self.n_perturbations, dim=-2),
@@ -161,6 +163,8 @@ class PerTurboPyroModule(PyroBaseModuleClass):
             pyro.plate("guides_sparse", self.n_perturbations, dim=-1),
             pyro.plate("factors_1", self.n_factors, dim=-1),
             pyro.plate("factors_2", self.n_factors, dim=-2),
+            pyro.plate("n_latent_factors", self.n_latent_factors, dim=-1),
+            pyro.plate("latent_factors_T", self.n_latent_factors, dim=-2),
         )
 
     def model(self, idx, **tensor_dict):
@@ -176,6 +180,8 @@ class PerTurboPyroModule(PyroBaseModuleClass):
             guide_effects_plate,  # sparse mode
             factor_plate_1,
             factor_plate_2,
+            latent_factor_plate,
+            latent_factor_plate_T,
         ) = self.create_plates(idx)
         batch = tensor_dict[REGISTRY_KEYS.BATCH_KEY]
         size_factor = tensor_dict[REGISTRY_KEYS.SIZE_FACTOR_KEY]
@@ -241,6 +247,10 @@ class PerTurboPyroModule(PyroBaseModuleClass):
         else:
             total_perturbation_effect = guide_efficacy @ element_local_effects
 
+        if self.n_latent_factors is not None:
+            with cell_plate, latent_factor_plate:
+                latent_loadings = pyro.sample("latent_loadings", dist.Normal(0.0, self.covariate_prior_sigma))
+
         with gene_plate:
             # mean and dispersion of each gene's expression
             gene_base_log_mean = pyro.sample(
@@ -282,6 +292,10 @@ class PerTurboPyroModule(PyroBaseModuleClass):
                     )
                     covariate_disp_effects = cont_covariates @ cont_covariate_disp_effect_size
 
+            if self.n_latent_factors is not None:
+                with latent_factor_plate_T:
+                    latent_factors = pyro.sample("latent_factors", dist.Normal(0.0, self.covariate_prior_sigma))
+
             # calculate overall parameter values for unperturbed cells
             nb_log_mean_ctrl = gene_base_log_mean + size_factor + batch_effects + covariate_effects
 
@@ -290,11 +304,15 @@ class PerTurboPyroModule(PyroBaseModuleClass):
             else:
                 nb_log_dispersion = gene_log_dispersion + batch_disp_effects + covariate_disp_effects
 
-            # add perturbation effects to per-gene parameters
-            nb_log_mean = nb_log_mean_ctrl + perturbations @ total_perturbation_effect
-
             with cell_plate:
                 observations = tensor_dict.get(REGISTRY_KEYS.X_KEY)
+
+                if self.n_latent_factors is not None:
+                    nb_log_mean_ctrl += latent_loadings @ latent_factors
+
+                # add perturbation effects to per-gene parameters
+                nb_log_mean = nb_log_mean_ctrl + perturbations @ total_perturbation_effect
+
                 if self.likelihood == "lnnb":
                     return pyro.sample(
                         "obs",

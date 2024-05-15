@@ -78,9 +78,14 @@ def test_package_has_version():
     assert perturbo.__version__ is not None
 
 
+@pytest.mark.parametrize("batch_size", [None, 5])
+@pytest.mark.parametrize("n_factors", [None, 10])
+@pytest.mark.parametrize("n_latent_factors", [None, 10])
 @pytest.mark.parametrize("use_gene_by_element", [True, False])
 @pytest.mark.parametrize("use_guide_by_element", [True, False])
-def test_model_mdata(mdata: MuData, tmp_path, use_guide_by_element, use_gene_by_element):
+def test_model_mdata(
+    mdata: MuData, tmp_path, use_guide_by_element, use_gene_by_element, n_latent_factors, n_factors, batch_size
+):
     """Check that we can register our MuData object with our model and perform training"""
     if use_gene_by_element and not use_guide_by_element:
         pytest.skip("gene_by_element without guide_by_element test not implemented!")
@@ -101,13 +106,13 @@ def test_model_mdata(mdata: MuData, tmp_path, use_guide_by_element, use_gene_by_
         },
     )
 
-    model = perturbo.PERTURBO(mdata, n_factors=None)
+    model = perturbo.PERTURBO(mdata, n_factors=n_factors, n_latent_factors=n_latent_factors)
     assert model.summary_stats.n_cells == len(mdata)
     assert model.summary_stats.n_vars == len(mdata[rna_key].var)
     assert model.summary_stats.n_perturbations == len(mdata[perturb_key].var)
 
-    model.train(max_epochs=10, lr=0.1)
-    model.train(max_epochs=10, lr=0.1, batch_size=None)
+    model.train(max_epochs=10, lr=0.1, batch_size=batch_size)
+    model.train(max_epochs=10, lr=0.1, batch_size=batch_size)
     samples = model.sample_posterior(num_samples=1, return_observed=True)
 
     assert samples["obs"].shape[-2:] == (

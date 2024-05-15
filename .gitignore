@@ -18,6 +18,7 @@ __pycache__/
 */.ipynb_checkpoints
 */*/.ipynb_checkpoints
 docs/notebooks/checkpoints
+docs/notebooks/scvi_log
 
 # Tests and coverage
 /.pytest_cache/
