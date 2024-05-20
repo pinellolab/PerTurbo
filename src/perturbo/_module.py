@@ -126,8 +126,8 @@ class PerTurboPyroModule(PyroBaseModuleClass):
         self.register_buffer("spike_slab_prior_probs", torch.tensor([0.001, 0.999]))
 
         if self.n_factors is not None:
-            self.register_buffer("factor_element_prior_scale", torch.tensor(0.0001))
-            self.register_buffer("factor_gene_prior_scale", torch.tensor(0.0001))
+            self.register_buffer("factor_element_prior_scale", torch.tensor(1.0))
+            self.register_buffer("factor_gene_prior_scale", torch.tensor(1.0))
 
         if self.likelihood == "lnnb":
             self.register_buffer("noise_prior_rate", torch.tensor(2.0, requires_grad=False))
@@ -240,7 +240,7 @@ class PerTurboPyroModule(PyroBaseModuleClass):
             with factor_plate_2, gene_plate:
                 factor_x_gene = pyro.sample(
                     "factor_gene_loadings",
-                    dist.Cauchy(0.0, self.factor_gene_prior_scale),
+                    dist.Normal(0.0, self.factor_gene_prior_scale),
                 )
             element_factor_effects = element_x_factor @ factor_x_gene
             total_perturbation_effect = guide_efficacy @ (element_factor_effects + element_local_effects)
