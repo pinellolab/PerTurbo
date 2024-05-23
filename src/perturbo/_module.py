@@ -244,10 +244,14 @@ class PerTurboPyroModule(PyroBaseModuleClass):
         # else:
 
         with element_plate, gene_plate:
+            # print(el_idx[..., None].shape, gn_idx)
             mix_dist = dist.Categorical(probs=self.spike_slab_prior_probs)
             has_effect = pyro.sample("has_effect", mix_dist, infer={"enumerate": "parallel"})
-            beta = pyro.sample("element_effects", dist.Normal(0.0, 1.0))
-            element_local_effects = has_effect * beta
+            print("has_effect", has_effect.shape)
+            mix_scales = Vindex(self.spike_slab_prior_scales)
+            print("mix_scales", mix_scales.shape)
+            beta = pyro.sample("element_effects", dist.Normal(0.0, mix_scales))
+            element_local_effects = beta
             # element_local_effects = beta
 
             # raise Exception(has_effect.max())

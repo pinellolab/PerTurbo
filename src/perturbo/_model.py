@@ -3,11 +3,10 @@ from typing import Optional, Union
 
 import numpy as np
 import pandas as pd
-from sympy import Trace
 import torch
 from mudata import MuData
 from pandas import DataFrame
-from pyro.infer import TraceEnum_ELBO, JitTrace_ELBO
+from pyro.infer import TraceEnum_ELBO
 from scipy.sparse import issparse
 from scipy.stats import chi2
 from scvi._types import AnnOrMuData
@@ -322,7 +321,7 @@ class PERTURBO(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
         if lr is not None and "optim" not in plan_kwargs.keys():
             plan_kwargs.update({"optim_kwargs": {"lr": lr}})
         # if lr is not None and "optim" not in plan_kwargs.keys():
-        plan_kwargs.update({"loss_fn": TraceEnum_ELBO()})
+        plan_kwargs.update({"loss_fn": TraceEnum_ELBO(max_plate_nesting=2)})
         if data_splitter_kwargs is None:
             data_splitter_kwargs = {}
         if "data_and_attributes" not in data_splitter_kwargs:
