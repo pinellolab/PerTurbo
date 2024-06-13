@@ -6,21 +6,13 @@ import pyro.distributions as dist
 import torch
 from pandas import DataFrame
 from pyro import poutine
-from pyro.infer.autoguide import AutoGuideList, AutoNormal, AutoDelta, init_to_mean, init_to_median
+from pyro.infer.autoguide import AutoDelta, AutoGuideList, AutoNormal, init_to_mean, init_to_median
 from scvi.module.base import PyroBaseModuleClass
 
 from ._constants import REGISTRY_KEYS
 
 
-class LogNormalNegativeBinomial(dist.LogNormalNegativeBinomial):
-    def sample(self, sample_shape=torch.Size()):
-        normals = (
-            dist.Normal(0, self.multiplicative_noise_scale).expand(self.batch_shape).sample(sample_shape=sample_shape)
-        )
-        return dist.NegativeBinomial(total_count=self.total_count, logits=self.logits + normals).sample()
-
-
-class PerTurboPyroModule(PyroBaseModuleClass):
+class PerTurboModule(PyroBaseModuleClass):
     def __init__(
         self,
         summary_stats,
@@ -292,11 +284,6 @@ class PerTurboPyroModule(PyroBaseModuleClass):
                 dist.Normal(self.gene_disp_prior_loc, self.gene_disp_prior_scale),
             )
 
-            if self.likelihood == "lnnb":
-                # additional noise for LogNormalNegativeBinomial likelihood
-                multiplicative_noise = pyro.sample("multiplicative_noise", dist.Exponential(self.noise_prior_rate))
-                # multiplicative_noise = 1 / self.noise_prior_rate
-
             with batch_plate:
                 # batch effects: n_batches x n_genes
                 batch_effect_size = pyro.sample("batch_effect", dist.Normal(0.0, self.batch_effect_prior_scale))
@@ -343,18 +330,7 @@ class PerTurboPyroModule(PyroBaseModuleClass):
                 # add perturbation effects to per-gene parameters
                 nb_log_mean = nb_log_mean_ctrl + perturbations @ total_perturbation_effect
 
-                if self.likelihood == "lnnb":
-                    return pyro.sample(
-                        "obs",
-                        LogNormalNegativeBinomial(
-                            logits=nb_log_mean - nb_log_dispersion - multiplicative_noise**2 / 2,
-                            total_count=nb_log_dispersion.exp(),
-                            multiplicative_noise_scale=multiplicative_noise,
-                            num_quad_points=self.lnnb_quad_points,
-                        ),
-                        obs=observations,
-                    )
-                elif self.likelihood == "nb":
+                if self.likelihood == "nb":
                     return pyro.sample(
                         "obs",
                         dist.NegativeBinomial(
