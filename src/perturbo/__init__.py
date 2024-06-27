@@ -1,5 +1,5 @@
 from importlib.metadata import version
 
-from ._model import PERTURBO
+from .models import PERTURBO
 
 __version__ = version("perturbo")
