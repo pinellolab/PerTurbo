@@ -563,18 +563,16 @@ class Simulate_Data():
         self.mdata = mdata
         return(mdata)
     
-    def extract_to_h5mu(self):
-        mdata = self.mdata
+    @staticmethod
+    def extract_to_h5mu(mdata,
+                        mudata_path = "simulated_data/",
+                        mudata_name = "simulated_data.h5mu"):
 
-        mudata_path = "simulated_data" 
         if not os.path.exists(mudata_path):
             os.makedirs(mudata_path)
-        
-        if "negative_control" in self.guide_category:
-            mudata_train_name = f"/{self.simulate_distribution}_SimuData_Ncells{self.ncells}_PertRate{self.pert_rate}_Ngenes{self.ngenes}_Nguides{self.nguides_per_element}_LFC{abs(self.log2_fold_change)}_ReadDepth{self.read_depth}_ControlGuides{self.nguides_ntc}.h5mu"
-        else:
-            mudata_train_name = f"/{self.simulate_distribution}_SimuData_Ncells{self.ncells}_PertRate{self.pert_rate}_Ngenes{self.ngenes}_Nguides{self.nguides_per_element}_LFC{abs(self.log2_fold_change)}_ReadDepth{self.read_depth}.h5mu"
-        mdata.write(mudata_path + mudata_train_name)
+
+        mdata.write(mudata_path + mudata_name)
+        print("viola")
     
     def _set_names(self):
         """Set gene names, guide names, and element names. Distinguish between positive guides and non-targeting guides"""        
