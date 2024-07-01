@@ -22,7 +22,7 @@ import statsmodels.api as sm
 import time
 import warnings
 import os
-warnings.filterwarnings("ignore")
+#warnings.filterwarnings("ignore")
 
 import pyro
 import torch
@@ -224,7 +224,7 @@ class Fit_PerTurbo():  # keep consistent with perturbo / pyro
     ):
         """Get a model object (as in pyro) that could be trained."""
         # register data with perturbo
-        perturbo.model.PERTURBO.setup_mudata(
+        perturbo.models.PERTURBO.setup_mudata(
             self.mdata_train,
             batch_key = self.batch_key,
             library_size_key = self.library_size_key,
@@ -235,7 +235,7 @@ class Fit_PerTurbo():  # keep consistent with perturbo / pyro
             rna_element_uns_key = self.rna_element_uns_key,    # <------------ what is this?
             modalities = self.modalities,
         )
-        model = perturbo.model.PERTURBO(self.mdata_train, likelihood=likelihood, n_factors=None)
+        model = perturbo.models.PERTURBO(self.mdata_train, likelihood=likelihood, n_factors=None)
         
         self.model = model
         return(model)
