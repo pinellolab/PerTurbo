@@ -8,7 +8,7 @@ from scipy.sparse import random as sparse_random
 import mudata as md
 from mudata import MuData
 import perturbo
-from ..model._module import LogNormalNegativeBinomial
+from ..models._module import LogNormalNegativeBinomial
 
 import matplotlib.pyplot as plt
 import seaborn as sns
