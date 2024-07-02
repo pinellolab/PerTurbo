@@ -797,7 +797,6 @@ class Simulate_Data():
         slope, intercept = np.polyfit(samples_log_gene_mean, samples_log_gene_dispersion, 1)
 
         self.log_mean_disp_slope = slope
-        print(slope)
 
     def _get_logits_corrected(self):
         """Get the logits after correction. A torch.tensor, with ncell rows, ngene columns"""
