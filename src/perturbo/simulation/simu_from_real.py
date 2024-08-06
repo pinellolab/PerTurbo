@@ -130,6 +130,17 @@ class Fit_PerTurbo():  # keep consistent with perturbo / pyro
         self.n_steps = n_steps
         return(n_steps)
     
+    @staticmethod
+    def get_n_steps_static(
+        mdata,
+        max_steps: Optional[int] = 400,
+    ):
+        """Get number of training steps according to sample size. training steps decrease with increasing sample size. """
+        n_steps = min(max_steps, round(max_steps * (20000/mdata["rna"].X.shape[0])))  # if ncells > 20000 then n_steps decay
+        n_steps = max(n_steps, 1)
+
+        return(n_steps)
+    
     def get_model(
         self,
         likelihood: Optional[str] = None
@@ -491,7 +502,7 @@ class Simulate_Data():
         rna_modality.varm[self.gene_by_element_key] = self.element_tested.transpose()
         
         rna_modality.uns[self.gene_by_element_key] = self.element_tested_df
-        grna_modality.uns["elements"] = np.array(self.element_names)
+        rna_modality.uns["elements"] = np.array(self.element_names)
         
         # Construct mudata
         mdata = md.MuData({"rna": rna_modality, "grna": grna_modality})
@@ -621,17 +632,19 @@ class Simulate_Data():
 
         # for positive control elements
         element_tested_pos = eye(ngenes, dtype="float32").tocsr()
+
+        element_tested = element_tested_pos
         
         # add ntc elements (if there are any)            
         if "negative_control" in guide_category:
             element_tested_ntc_dense = np.ones((nelements_ntc, ngenes))
             element_tested_ntc = csr_matrix(element_tested_ntc_dense)
+            self.element_tested_ntc = element_tested_ntc
             
-        element_tested = vstack([element_tested_pos, element_tested_ntc])
+            element_tested = vstack([element_tested_pos, element_tested_ntc])
 
         self.element_tested = element_tested
         self.element_tested_pos = element_tested_pos
-        self.element_tested_ntc = element_tested_ntc
 
     def _get_element_tested_uns(self):
         """Generate rna.uns["element_tested"]. self.element_tested_df, a dataframe, with 2 columns | element | gene |. save element name and its targeting gene."""
@@ -663,11 +676,13 @@ class Simulate_Data():
         guide_efficacy_long_pos_mean = guide_efficacy_values * nelements_pos  # list of len nguides_pos, saving mean efficacy of each positive guide
         guide_efficacy_long_pos = np.random.binomial(n=1, p=guide_efficacy_long_pos_mean).tolist()  # list of len nguides_pos, saving efficacy generated from the means.
 
+        guide_efficacy_long = guide_efficacy_long_pos
+
         # if there are negative control guides
         if "negative_control" in guide_category:
             guide_efficacy_long_ntc = [0] * nguides_ntc  # list of nguides_ntc 0s. negative control guides having no efficacy, will not effect logit.
 
-        guide_efficacy_long = guide_efficacy_long_pos + guide_efficacy_long_ntc
+            guide_efficacy_long = guide_efficacy_long_pos + guide_efficacy_long_ntc
 
         # expand from (nguides, 1) list to (nguides, nelements) matrix
         guide_efficacy_values = torch.tensor(guide_efficacy_long).reshape(-1,1).expand(-1, nelements) 
