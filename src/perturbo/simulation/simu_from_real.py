@@ -94,6 +94,8 @@ class Fit_PerTurbo():  # keep consistent with perturbo / pyro
         self.rna_element_uns_key = rna_element_uns_key
         self.guide_element_uns_key = guide_element_uns_key
         self.modalities = modalities
+        self.rna_layer = modalities["rna_layer"]
+        self.grna_layer = modalities["perturbation_layer"]
         
 
     def fit_obs(
@@ -105,7 +107,7 @@ class Fit_PerTurbo():  # keep consistent with perturbo / pyro
         
         for obs_key in self.obs_continuous_covariates_keys:
             obs_param_key = "params_" + obs_key.replace('.', '_')
-            obs_values = self.mdata_train.mod["rna"].obs[obs_key]
+            obs_values = self.mdata_train.mod[self.rna_layer].obs[obs_key]
             if obs_key == self.library_size_key:
                 obs_values = (obs_values) # / 1e6 
                 obs_param = lognorm.fit(obs_values, floc=0)
@@ -124,7 +126,7 @@ class Fit_PerTurbo():  # keep consistent with perturbo / pyro
         max_steps: Optional[int] = 400,
     ):
         """Get number of training steps according to sample size. training steps decrease with increasing sample size. """
-        n_steps = min(max_steps, round(max_steps * (20000/self.mdata_train["rna"].X.shape[0])))  # if ncells > 20000 then n_steps decay
+        n_steps = min(max_steps, round(max_steps * (20000/self.mdata_train[self.rna_layer].X.shape[0])))  # if ncells > 20000 then n_steps decay
         n_steps = max(n_steps, 1)
         
         self.n_steps = n_steps
@@ -136,7 +138,7 @@ class Fit_PerTurbo():  # keep consistent with perturbo / pyro
         max_steps: Optional[int] = 400,
     ):
         """Get number of training steps according to sample size. training steps decrease with increasing sample size. """
-        n_steps = min(max_steps, round(max_steps * (20000/mdata["rna"].X.shape[0])))  # if ncells > 20000 then n_steps decay
+        n_steps = min(max_steps, round(max_steps * (20000/mdata[self.rna_layer].X.shape[0])))  # if ncells > 20000 then n_steps decay
         n_steps = max(n_steps, 1)
 
         return(n_steps)
@@ -292,7 +294,7 @@ class Fit_PerTurbo():  # keep consistent with perturbo / pyro
         
         i = 0
         for obs_key in self.obs_continuous_covariates_keys:
-            data = self.mdata_train['rna'].obs[obs_key]  # Your data for the histogram
+            data = self.mdata_train[self.rna_layer].obs[obs_key]  # Your data for the histogram
             if obs_key == self.library_size_key:
                 data = data # / 1e6
             axes[i].hist(data, bins=50, color="grey", edgecolor="black", density=True)  # Notice density=True for normalization
@@ -328,6 +330,7 @@ class Simulate_Data():
         df_dir_base: Optional[str] = "from_real_data",
         mdata_name: Optional[str] = None,
         estimator_type: Optional[str] = None,
+        batch_key: Optional[str] = "prep_batch",
         library_size_key: Optional[str] = "library_size",
         size_factor_key: Optional[str] = "size_factor",
         read_depth_key: Optional[str] = "read_depth",
@@ -348,6 +351,8 @@ class Simulate_Data():
             A given name of the dataset we are simulating from. Point to the directory where we save the estimated parameters
         estimator_type
             A given name of the type of estimator we are using (map/posterior). Point to the directory where we save the estimated parameters
+        batch_key
+            .obs key within the RNA AnnData that indicate where batch information is saved
         library_size_key
             .obs key within the RNA AnnData that can be directly observed, and can be used for generatig lisbrary size
         size_factor_key
@@ -547,6 +552,7 @@ class Simulate_Data():
         """Generate for .obs for RNA modality. A dataframe, each column is a obs, with ncells rows."""
         df = self.df
         ncells = self.ncells
+        batch_key = self.batch_key
         obs_continuous_covariates_keys = self.obs_continuous_covariates_keys
         library_size_key = self.library_size_key
         size_factor_key = self.size_factor_key
@@ -555,7 +561,7 @@ class Simulate_Data():
         
         # batch number
         prep_batch = np.full(ncells, "batch_1")
-        obs["prep_batch"] = prep_batch
+        obs[batch_key] = prep_batch
         
         # other obs
         for obs_key in obs_continuous_covariates_keys:
