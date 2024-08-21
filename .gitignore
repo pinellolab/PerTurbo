@@ -33,3 +33,4 @@ docs/notebooks/checkpoints
 /.vscode/
 /.hatch/
 
+src/perturbo/simulation/.ipynb_checkpoints/

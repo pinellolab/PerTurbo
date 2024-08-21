@@ -19,6 +19,7 @@ import scipy.stats as stats
 from scipy.stats import lognorm, gamma
 from scipy.optimize import curve_fit
 import statsmodels.api as sm
+from statsmodels.stats.multitest import multipletests  # for FDR correction
 
 import time
 import warnings
@@ -135,10 +136,11 @@ class Fit_PerTurbo():  # keep consistent with perturbo / pyro
     @staticmethod
     def get_n_steps_static(
         mdata,
+        rna_modality = "rna",
         max_steps: Optional[int] = 400,
     ):
         """Get number of training steps according to sample size. training steps decrease with increasing sample size. """
-        n_steps = min(max_steps, round(max_steps * (20000/mdata[self.rna_layer].X.shape[0])))  # if ncells > 20000 then n_steps decay
+        n_steps = min(max_steps, round(max_steps * (20000/mdata[rna_modality].X.shape[0])))  # if ncells > 20000 then n_steps decay
         n_steps = max(n_steps, 1)
 
         return(n_steps)
@@ -372,6 +374,7 @@ class Simulate_Data():
         self.df_dir_base = df_dir_base
         self.mdata_name = mdata_name
         self.estimator_type = estimator_type
+        self.batch_key = batch_key
         self.library_size_key = library_size_key
         self.size_factor_key = size_factor_key
         self.read_depth_key = read_depth_key
@@ -865,7 +868,7 @@ class Simulate_Data():
         if simulate_distribution == "nb":
             print("simulate from NB")
             for start_row in range(0, ncells, chunk_size):
-                print(f"Simulate chunk {i}.")
+                #print(f"Simulate chunk {i}.")
                 end_row = min(start_row + chunk_size, ncells)
                 logits_perturb_chunk = logits_perturb[start_row:end_row, :]
                 total_count_chunk = total_count_corrected[start_row:end_row, :]
@@ -880,7 +883,7 @@ class Simulate_Data():
         elif simulate_distribution == "lnnb":
             print("simulate from LNNB")
             for start_row in range(0, ncells, chunk_size):
-                print(f"Simulate chunk {i}.")
+                #print(f"Simulate chunk {i}.")
                 end_row = min(start_row + chunk_size, ncells)
                 logits_perturb_chunk = logits_perturb[start_row:end_row, :]
                 total_count_chunk = total_count_corrected[start_row:end_row, :]
@@ -1086,3 +1089,117 @@ class Support_Functions():
         element_effects_split_modified["positive_control"] = df_pos
         
         return(element_effects_split_modified)
+    
+    @staticmethod
+    def create_empty_list(method):
+
+        list_dict = {
+            "Gene_id": [],
+            "Element_id": [],
+            "Gene_Mean": [],
+            "Gene_Disp": [],
+            "NCellsPerGRNA": [],
+            "LogFoldChange": [],
+            "MeanReads": [],
+            "LFC_hat": [],
+            "P_value": [],
+            "alpha_cor": [], 
+            "Efficacy": [], 
+            "Method": [], 
+            "MTmethod": []
+        }
+        if method == "wilcoxon":
+            del list_dict["LFC_hat"]
+
+        return list_dict
+        
+    @staticmethod
+    def update_detailed_output(
+        list_dict = None,      # a dictionary of list that we will extend onto
+        element_effects = None, # an output table of the model, saving loc/z-value/p-vlaue of each tested element-gene pair
+        method = "perturbo",   # glm/SECPTRE/wilcoxo, when here is wilcoxon, then do not include LFC_hat_list
+        nguides_ntc = 200,
+        nguides_per_element = 4,
+        ngenes = 100,
+        gene_mean = None,      # a pd.Series of gene mean values, len = ngenes
+        gene_disp = None,      # a pd.Series of gene total_count values, len = ngenes
+        ncells_per_guide = 100,
+        lfc = 1,
+        mean_reads_per_gene = 5,
+        alpha_base = 0.05,     # write another function to create this
+        guide_efficacy_values = [1, 2/3, 1/3, 0],
+        MTmethod = "none",     # "none"/"FDR"/"FWER"
+    ):
+        list_dict["Gene_id"].extend(element_effects["gene"])
+        list_dict["Element_id"].extend(element_effects["element"])
+        gene_id = element_effects["gene"]
+        #print(f"gene_id has length {len(gene_id)}")
+
+        #nelements_ntc = nguides_ntc // nguides_per_element
+        list_dict["Gene_Mean"].extend(gene_mean[gene_id])
+        list_dict["Gene_Disp"].extend(gene_disp[gene_id])
+
+        # add some fixed parameters to the table
+        npairs = len(element_effects["gene"])  # number of pairs passed filtering
+        list_dict["NCellsPerGRNA"].extend([ncells_per_guide] * npairs)
+        list_dict["LogFoldChange"].extend([lfc] * npairs)
+        list_dict["MeanReads"].extend([mean_reads_per_gene] * npairs)
+
+        if method != "wilcoxon":
+            LFC_hats =  [x * np.log2(np.exp(1)) if x != None else None for x in element_effects["loc"]]
+            list_dict["LFC_hat"].extend(LFC_hats)
+
+        list_dict["P_value"].extend(element_effects["q_value"])
+
+        alpha_cor = Support_Functions.get_alpha_corrected(
+            alpha_base=alpha_base, 
+            MTmethod=MTmethod,
+            element_effects=element_effects,
+            ngenes=ngenes
+        )
+        list_dict["alpha_cor"].extend([alpha_cor] * npairs)
+        list_dict["Efficacy"].extend([str([round(x,2) for x in guide_efficacy_values])] * npairs)
+        list_dict["Method"].extend([method] * npairs)
+        list_dict["MTmethod"].extend([MTmethod] * npairs)
+
+        return(list_dict)
+    
+    @staticmethod
+    def get_alpha_corrected(
+        alpha_base = 0.05,
+        MTmethod = "none",  # "none"/"FDR"/"FWER"
+        element_effects = None,
+        ngenes = 100
+    ):
+        if MTmethod == "none":
+            alpha_cor = alpha_base
+        elif MTmethod == "FDR":
+            #pvals = element_effects.loc[0:ngenes, "q_value"]  # a list of p_values
+            pvals = element_effects[element_effects["element"].str.contains("gene")]["q_value"]
+            pvals_no_an = pvals[~np.isnan(pvals)]
+            rejected, pvals_corrected, _, _ = multipletests(pvals_no_an, alpha=alpha_base, method='fdr_bh')
+            alpha_cor = max(pvals_corrected[rejected]) if any(rejected) else alpha_base
+        elif MTmethod == "FWER":
+            alpha_cor = alpha_base / ngenes
+
+        return alpha_cor
+
+    @staticmethod
+    def get_power_sum(
+        power_detail,        # a dataframes of power details
+        test_type = "fixed"  # "fixed"/"empirical"
+    ):
+        positive_pairs = power_detail[power_detail["Element_id"].str.contains("gene")]
+        negative_pairs = power_detail[power_detail["Element_id"].str.contains("ntc")]
+        
+        if test_type == "fixed":
+            positive_pairs["significance"] = positive_pairs["P_value"] < positive_pairs["alpha_cor"]
+        elif test_type == "empirical":
+            print(0)
+
+        power_summary = (positive_pairs.groupby(["NCellsPerGRNA", "LogFoldChange", "MeanReads", "Efficacy", "Method", "MTmethod", "alpha_cor"])
+                                .agg(Power=("significance", "mean"))
+                                .reset_index())
+
+        return(power_summary)
+
