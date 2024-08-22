@@ -1193,7 +1193,7 @@ class Support_Functions():
         negative_pairs = power_detail[power_detail["Element_id"].str.contains("ntc")]
         
         if test_type == "fixed":
-            positive_pairs["significance"] = positive_pairs["P_value"] < positive_pairs["alpha_cor"]
+            positive_pairs["significance"] = positive_pairs["P_value"] <= positive_pairs["alpha_cor"]
         elif test_type == "empirical":
             print(0)
 
