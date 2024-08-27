@@ -1194,8 +1194,35 @@ class Support_Functions():
         
         if test_type == "fixed":
             positive_pairs["significance"] = positive_pairs["P_value"] <= positive_pairs["alpha_cor"]
+
         elif test_type == "empirical":
-            print(0)
+            results = []
+
+            # Loop through each unique combination of values in the specified columns
+            for _, pos_group in positive_pairs.groupby(group_columns):
+                # Get the same group from negative_pairs
+                neg_group = negative_pairs[
+                    (negative_pairs["NCellsPerGRNA"] == pos_group["NCellsPerGRNA"].iloc[0]) &
+                    (negative_pairs["LogFoldChange"] == pos_group["LogFoldChange"].iloc[0]) &
+                    (negative_pairs["MeanReads"] == pos_group["MeanReads"].iloc[0]) &
+                    (negative_pairs["Efficacy"] == pos_group["Efficacy"].iloc[0]) &
+                    (negative_pairs["Method"] == pos_group["Method"].iloc[0]) &
+                    (negative_pairs["MTmethod"] == pos_group["MTmethod"].iloc[0]) &
+                    (negative_pairs["alpha_cor"] == pos_group["alpha_cor"].iloc[0])
+                ]
+                
+                if not neg_group.empty:
+                    # Step 2: Compute the k-quantile for the negative_pairs
+                    k = pos_group["alpha_cor"].iloc[0]  # Since alpha_cor is unique within the group
+                    alpha_emp = neg_group["P_value"].quantile(k)
+                    
+                    # Step 3: Compare P_value with alpha_emp in positive_pairs and save the result
+                    pos_group["significance"] = pos_group["P_value"] <= alpha_emp
+                    
+                    # Append the result to the list
+                    results.append(pos_group)
+
+                positive_pairs = pd.concat(results)
 
         power_summary = (positive_pairs.groupby(["NCellsPerGRNA", "LogFoldChange", "MeanReads", "Efficacy", "Method", "MTmethod", "alpha_cor"])
                                 .agg(Power=("significance", "mean"))
