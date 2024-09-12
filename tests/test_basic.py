@@ -86,7 +86,18 @@ def test_package_has_version():
 @pytest.mark.parametrize("use_guide_by_element", [True, False])
 @pytest.mark.parametrize("use_gene_by_element", [True, False])
 @pytest.mark.parametrize("merge_guides_mode", ["partial", "shared"])
-def test_model_mdata(mdata: MuData, tmp_path, low_moi, use_guide_by_element, use_gene_by_element, merge_guides_mode):
+@pytest.mark.parametrize("n_factors", [None, 2])
+@pytest.mark.parametrize("n_pert_factors", [None, 2])
+def test_model_mdata(
+    mdata: MuData,
+    tmp_path,
+    low_moi,
+    use_guide_by_element,
+    use_gene_by_element,
+    merge_guides_mode,
+    n_factors,
+    n_pert_factors,
+):
     """Check that we can register our MuData object with our model and perform training"""
     if use_gene_by_element and not use_guide_by_element:
         pytest.skip("gene_by_element without guide_by_element test not implemented!")
@@ -107,7 +118,9 @@ def test_model_mdata(mdata: MuData, tmp_path, low_moi, use_guide_by_element, use
         },
     )
 
-    model = perturbo.PERTURBO(mdata, n_factors=None, low_moi=low_moi, merge_guides_mode=merge_guides_mode)
+    model = perturbo.PERTURBO(
+        mdata, n_factors=n_factors, n_pert_factors=n_pert_factors, low_moi=low_moi, merge_guides_mode=merge_guides_mode
+    )
     assert model.summary_stats.n_cells == len(mdata)
     assert model.summary_stats.n_vars == len(mdata[rna_key].var)
     assert model.summary_stats.n_perturbations == len(mdata[perturb_key].var)
