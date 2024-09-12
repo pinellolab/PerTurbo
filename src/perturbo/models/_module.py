@@ -1,5 +1,4 @@
-from collections.abc import Iterable
-from typing import Optional
+from typing import Iterable, Literal, Mapping, Optional  # noqa: UP035
 
 import pyro
 import pyro.distributions as dist
@@ -28,21 +27,39 @@ class PerTurboPyroModule(PyroBaseModuleClass):
         gene_summary_stats: Optional[DataFrame] = None,
         guide_by_element: Optional[torch.Tensor] = None,
         gene_by_element: Optional[torch.Tensor] = None,
-        likelihood: Optional[str] = "nb",
-        effect_prior_dist="cauchy",
+        likelihood: Literal["nb", "lnnb"] = "nb",
+        effect_prior_dist: Literal["cauchy", "normal_mixture", "normal"] = "normal",
         n_factors=None,
         n_pert_factors=None,
         low_moi=True,
         dispersion_effects=False,
-        merge_guides=False,
-        n_cats_per_cov: Optional[Iterable[int]] = None,
+        merge_guides_mode: Literal["partial", "shared", "independent"] = "partial",
+        prior_param_dict: Optional[Mapping[str, torch.Tensor]] = None,
         **module_kwargs,
     ) -> None:
+        """
+        PerTurboPyroModule: Pyro module underlying perturbo.
+
+        Args:
+        ---
+        summary_stats: summary stats object from scvi model.
+        gene_summary_stats: dict containing empirical gene mean values.
+        guide_by_element: Binary array encoding which element(s) are targeted by each guide
+        gene_by_element: Binary array encoding which element(s) may target each gene *a priori*
+        likelihood: Observation likelihood, either NegativeBinomial or LogNormalNegativeBinomial.
+        effect_prior_dist: Effect size prior, either Cauchy or NormalMixture ("soft" spike & slab)
+        n_factors: Number of cell-specific factors ("probabilistic PCs")
+        n_pert_factors: Number of perturbation-specific factors ("probabilistic contrastive PCs")
+        low_moi: Is the screen low-MOI? (one guide per cell)
+        dispersion_effects: Allow for different gene-level dispersion by batch?
+        prior_params: dict containing hyperparameter names and tensors to set prior values
+        merge_guides_mode: Should the model should pool information across guides targeting same element?
+        """
         super().__init__()
         # set user-defined options for model behavior
         self.dispersion_effects = dispersion_effects
         self.likelihood = likelihood
-        self.merge_guides = merge_guides
+        self.merge_guides_mode = merge_guides_mode
         self.lnnb_quad_points = 8
         self.n_factors = n_factors
         self.n_pert_factors = n_pert_factors
@@ -53,10 +70,12 @@ class PerTurboPyroModule(PyroBaseModuleClass):
         self.n_cells = summary_stats.n_cells
         self.n_genes = summary_stats.n_vars
         self.n_perturbations = summary_stats.n_perturbations
-        self.n_cont_covariates = 1  # include (inferred) size factor by default
-        self.multi_guide = "n_targeted_elements" in summary_stats
+        self.n_cont_covariates = 1  # include (inferred) size factor as covariate always
+        self.multi_guide = ("n_targeted_elements" in summary_stats) and (merge_guides_mode != "independent")
         self.discrete_sites = ["perturbed"]
-        if self.multi_guide:
+
+        # validate guide -> element mapping or use identity matrix as default
+        if ("n_targeted_elements" in summary_stats) and (merge_guides_mode != "independent"):
             assert summary_stats.n_targeted_elements == guide_by_element.shape[1]
         else:
             guide_by_element = torch.eye(self.n_perturbations)
@@ -64,12 +83,12 @@ class PerTurboPyroModule(PyroBaseModuleClass):
 
         if "n_extra_continuous_covs" in summary_stats:
             self.n_cont_covariates += summary_stats.n_extra_continuous_covs
-        if "n_extra_categorical_covs" in summary_stats:
-            self.n_cat_covariates = summary_stats.n_extra_categorical_covs
-            self.n_cat_list = n_cats_per_cov
-        else:
-            self.n_cat_covariates = 0
-            self.n_cat_list = []
+        # if "n_extra_categorical_covs" in summary_stats:
+        #     self.n_cat_covariates = summary_stats.n_extra_categorical_covs
+        #     self.n_cat_list = n_cats_per_cov
+        # else:
+        #     self.n_cat_covariates = 0
+        #     self.n_cat_list = []
         self.n_batches = summary_stats.n_batch
 
         self._guide = AutoNormal(
@@ -108,15 +127,14 @@ class PerTurboPyroModule(PyroBaseModuleClass):
         # intialize NegBin gene params to empirical mean estimates
         if gene_summary_stats is not None:
             e_x = gene_summary_stats["_gene_mean"].values
-            # v_x = gene_summary_stats["_gene_variance"].values
-            epsilon = 1e-12
-            gene_logits = torch.tensor(e_x + epsilon).log()
-            self.register_buffer("gene_mean_prior_loc", gene_logits)
+            epsilon = 1e-6
+            self.register_buffer("gene_mean_prior_loc", torch.tensor(e_x + epsilon).log())
             self.register_buffer("gene_disp_prior_loc", torch.tensor(1.0))
         else:
             self.register_buffer("gene_mean_prior_loc", torch.tensor(0.0))
             self.register_buffer("gene_disp_prior_loc", torch.tensor(0.0))
 
+        # set prior hyperparameters
         self.register_buffer("zero", torch.tensor(0.0))
         self.register_buffer("gene_mean_prior_scale", torch.tensor(3.0))
         self.register_buffer("gene_disp_prior_scale", torch.tensor(3.0))
@@ -127,18 +145,21 @@ class PerTurboPyroModule(PyroBaseModuleClass):
         self.register_buffer("logit_efficacy_alpha", torch.tensor(5.0))
         self.register_buffer("logit_efficacy_beta", torch.tensor(1.0))
         self.register_buffer("has_guide_prior", torch.tensor(0.9))
-
         self.register_buffer(
             "spike_slab_prior_scales",
             torch.tensor([1 - self.element_effects_prior_scale, self.element_effects_prior_scale]),
         )
         self.register_buffer("spike_slab_prior_probs", torch.tensor([0.001, 0.999]))
-
         self.register_buffer("factor_element_prior_scale", torch.tensor(0.1))
         self.register_buffer("factor_gene_prior_scale", torch.tensor(0.1))
+        self.register_buffer("noise_prior_rate", torch.tensor(2.0))
 
-        if self.likelihood == "lnnb":
-            self.register_buffer("noise_prior_rate", torch.tensor(2.0, requires_grad=False))
+        # override hyperparameters with user-provided values from prior_param_dict
+        if prior_param_dict is not None:
+            for k, v in prior_param_dict.items():
+                assert isinstance(v, torch.Tensor) and k in self.named_buffers
+                assert v.shape == self.get_buffer(k).shape
+                self.register_buffer(k, v)
 
     @staticmethod
     def _get_fn_args_from_batch(tensor_dict):
@@ -193,13 +214,17 @@ class PerTurboPyroModule(PyroBaseModuleClass):
         perturbations = tensor_dict[REGISTRY_KEYS.PERTURBATION_KEY]
         cont_covariates = tensor_dict[REGISTRY_KEYS.CONT_COVS_KEY]
 
+        # Effect size priors
         if self.effect_prior_dist == "normal_mixture":
             comp_dist = dist.Normal(0.0, self.spike_slab_prior_scales)
             mix_dist = dist.Categorical(probs=self.spike_slab_prior_probs)
             effects_dist = dist.MixtureSameFamily(mix_dist, comp_dist)
-        else:
+        elif self.effect_prior_dist == "cauchy":
             effects_dist = dist.Cauchy(0.0, self.element_effects_prior_scale)
+        elif self.effect_prior_dist == "normal":
+            effects_dist = dist.Normal(0.0, self.element_effects_prior_scale)
 
+        # Sample cis/trans effect sizes
         if self.local_effects:
             with element_effects_plate:
                 element_local_effects_values = pyro.sample("element_effects", effects_dist)
@@ -212,8 +237,8 @@ class PerTurboPyroModule(PyroBaseModuleClass):
             with element_plate, gene_plate:
                 element_local_effects = pyro.sample("element_effects", effects_dist)
 
-        # estimate a single efficacy value per guide
-        if self.multi_guide and not self.merge_guides:
+        # Pool guide information based on user-specified strategy
+        if self.merge_guides_mode != "shared":
             with guide_plate:
                 guide_efficacy_values = pyro.sample(
                     "guide_efficacy",
@@ -221,7 +246,8 @@ class PerTurboPyroModule(PyroBaseModuleClass):
                 )
             # fix weird broadcasting error
             guide_efficacy = guide_efficacy_values.expand(-1, self.n_elements) * self.guide_by_element
-
+        else:
+            guide_efficacy = self.guide_by_element
             # alternative: estimate efficacy for each guide--gene *cis* pair
             # with guide_effects_plate:
             #     guide_efficacy_values = pyro.sample(
@@ -233,10 +259,11 @@ class PerTurboPyroModule(PyroBaseModuleClass):
             #     guide_efficacy_values,
             #     size=(self.n_perturbations, self.n_elements),
             # )
-        else:
-            guide_efficacy = self.guide_by_element
 
-        if self.n_pert_factors is not None:
+        # Sample dense or factorized perturbation effects
+        if self.n_pert_factors is None:
+            total_perturbation_effect = guide_efficacy @ element_local_effects
+        else:
             with pert_factor_plate, element_plate:
                 pert_factors = pyro.sample(
                     "pert_factors",
@@ -249,9 +276,8 @@ class PerTurboPyroModule(PyroBaseModuleClass):
                 )
             element_factor_effects = torch.einsum("fei,fjg->eg", pert_factors, pert_loadings)
             total_perturbation_effect = guide_efficacy @ (element_factor_effects + element_local_effects)
-        else:
-            total_perturbation_effect = guide_efficacy @ element_local_effects
 
+        # Sample cell-specific factors (linear unobserved confounders) if using
         if self.n_factors is not None:
             with cell_factor_plate, cell_plate:
                 cell_factors = pyro.sample(
@@ -268,7 +294,7 @@ class PerTurboPyroModule(PyroBaseModuleClass):
             cell_factor_effects = 0
 
         with gene_plate:
-            # mean and dispersion of each gene's expression
+            # Sample parameters of baseline gene expression distribution
             gene_base_log_mean = pyro.sample(
                 "log_gene_mean",
                 dist.Normal(self.gene_mean_prior_loc, self.gene_mean_prior_scale),
@@ -277,7 +303,6 @@ class PerTurboPyroModule(PyroBaseModuleClass):
                 "log_gene_dispersion",
                 dist.Normal(self.gene_disp_prior_loc, self.gene_disp_prior_scale),
             )
-
             if self.likelihood == "lnnb":
                 # additional noise for LogNormalNegativeBinomial likelihood
                 multiplicative_noise = pyro.sample("multiplicative_noise", dist.Exponential(self.noise_prior_rate))
@@ -308,7 +333,7 @@ class PerTurboPyroModule(PyroBaseModuleClass):
                     )
                     covariate_disp_effects = cont_covariates @ cont_covariate_disp_effect_size
 
-            # calculate overall parameter values for unperturbed cells
+            # Calculate final expression distribution parameters for unperturbed cells
             nb_log_mean_ctrl = (
                 gene_base_log_mean + size_factor + batch_effects + covariate_effects + cell_factor_effects
             )
@@ -324,9 +349,10 @@ class PerTurboPyroModule(PyroBaseModuleClass):
             else:
                 nb_log_dispersion = gene_log_dispersion + batch_disp_effects + covariate_disp_effects
 
-            # add perturbation effects to per-gene parameters
+            # Add perturbation effects to gene expression parameters
             nb_log_mean = nb_log_mean_ctrl + (perturbations @ total_perturbation_effect) * has_effect
 
+            # Sample read counts from distributions
             with cell_plate:
                 observations = tensor_dict.get(REGISTRY_KEYS.X_KEY)
                 if self.likelihood == "lnnb":
@@ -350,7 +376,7 @@ class PerTurboPyroModule(PyroBaseModuleClass):
                         obs=observations,
                     )
                 else:
-                    raise NotImplementedError(f"{self.likelihood} likelihood not implemented")
+                    raise NotImplementedError(f"'{self.likelihood}' likelihood not implemented")
 
     @property
     def guide(self):
