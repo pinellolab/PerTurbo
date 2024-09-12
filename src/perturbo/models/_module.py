@@ -1,5 +1,6 @@
 from typing import Iterable, Literal, Mapping, Optional  # noqa: UP035
 
+from networkx import efficiency
 import pyro
 import pyro.distributions as dist
 import torch
@@ -31,7 +32,7 @@ class PerTurboPyroModule(PyroBaseModuleClass):
         effect_prior_dist: Literal["cauchy", "normal_mixture", "normal"] = "normal",
         n_factors=None,
         n_pert_factors=None,
-        low_moi=False,
+        efficiency_mode: Literal["mixture", "scaled"] = "scaled",
         dispersion_effects=False,
         merge_guides_mode: Literal["partial", "shared"] = "partial",
         prior_param_dict: Optional[Mapping[str, torch.Tensor]] = None,
@@ -64,7 +65,8 @@ class PerTurboPyroModule(PyroBaseModuleClass):
         self.n_factors = n_factors
         self.n_pert_factors = n_pert_factors
         self.effect_prior_dist = effect_prior_dist
-        self.low_moi = low_moi
+        # self.low_moi = low_moi
+        self.efficiency_mode = efficiency_mode
 
         # copy data summary stats
         self.n_cells = summary_stats.n_cells
@@ -296,9 +298,9 @@ class PerTurboPyroModule(PyroBaseModuleClass):
 
         # Account for cell-specific latent "perturbation status" variable(s)
         with cell_plate:
-            if not self.low_moi:
+            if self.efficiency_mode == "scaled":
                 cell_element_efficacy = guides_observed @ guide_efficacy_by_element
-            else:
+            elif self.efficiency_mode == "mixture":
                 pert_prob = guides_observed @ guide_efficacy_values
                 perturbed = pyro.sample("perturbed", dist.Bernoulli(pert_prob))
                 cell_element_efficacy = perturbed * guides_observed @ self.guide_by_element
