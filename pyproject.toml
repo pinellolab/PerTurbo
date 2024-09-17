@@ -7,7 +7,7 @@ name = "perturbo"
 version = "0.0.1"
 description = "Estimating perturbation effects on single cell phenotypes using variational inference."
 readme = "README.md"
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 license = { file = "LICENSE" }
 authors = [{ name = "Logan Blaine" }]
 maintainers = [{ name = "Logan Blaine", email = "loganblaine@g.harvard.edu" }]
