@@ -31,7 +31,7 @@ If you are familiar with git and knows how to handle git conflicts, you can go a
 If you are looking at this document in the [cookiecutter-scverse-instance][] repository documentation, throughout this document the name of the project is `cookiecutter-scverse-instance`. Otherwise it should be replaced by your new project name: `perturbo`.
 :::
 
-Now that your new project repository has been created on github at `https://github.com/logan-blaine/perturbo` you can push your first commit to github.
+Now that your new project repository has been created on github at `https://github.com/pinellolab/perturbo` you can push your first commit to github.
 To do this, simply follow the instructions on your github repository page or a more verbose walkthrough here:
 
 Assuming you are in `/your/path/to/perturbo`. Add all files and commit.
@@ -59,14 +59,14 @@ Now that all the files of the newly created project have been committed, go ahea
 
 ```bash
 # update the `origin` of your local repo with the remote github link
-git remote add origin https://github.com/logan-blaine/perturbo.git
+git remote add origin https://github.com/pinellolab/perturbo.git
 # rename the default branch to main
 git branch -M main
 # push all your files to remote
 git push -u origin main
 ```
 
-Your project should be now available at `https://github.com/logan-blaine/perturbo`. While the repository at this point can be directly used, there are few remaining steps that needs to be done in order to achieve full functionality.
+Your project should be now available at `https://github.com/pinellolab/perturbo`. While the repository at this point can be directly used, there are few remaining steps that needs to be done in order to achieve full functionality.
 
 ### Coverage tests with _Codecov_
 

@@ -22,8 +22,8 @@ For reproducibility, see []
 
 ## Installation
 
-You need to have Python 3.9 or newer installed on your system. If you don't have
-Python installed, we recommend installing [Mambaforge](https://github.com/conda-forge/miniforge#mambaforge).
+You need to have Python 3.10 or newer installed on your system. If you don't have
+Python installed, we recommend installing [Miniforge](https://github.com/conda-forge/miniforge).
 
 Official PyPI and conda releases are still in the works, but in the meantime you can install the developer version with one of the following options:
 
@@ -54,3 +54,4 @@ If you found a bug, please use the [issue tracker][issue-tracker].
 [changelog]: https://perturbo.readthedocs.io/latest/changelog.html
 [link-docs]: https://perturbo.readthedocs.io
 [link-api]: https://perturbo.readthedocs.io/latest/api.html
+[link-pypi]: https://pypi.org/project/PerTurbo
