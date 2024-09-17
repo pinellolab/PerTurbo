@@ -73,7 +73,10 @@ class PerTurboPyroModule(PyroBaseModuleClass):
         self.n_genes = summary_stats.n_vars
         self.n_perturbations = summary_stats.n_perturbations
         self.n_cont_covariates = 1  # include (inferred) size factor as covariate always
-        self.discrete_sites = ["perturbed"]
+
+        self.discrete_sites = []
+        if efficiency_mode == "mixture":
+            self.discrete_sites.append("perturbed")
 
         # validate guide -> element mapping or use identity matrix as default
         if "n_targeted_elements" not in summary_stats:
@@ -141,7 +144,7 @@ class PerTurboPyroModule(PyroBaseModuleClass):
         self.register_buffer("gene_mean_prior_scale", torch.tensor(3.0))
         self.register_buffer("gene_disp_prior_scale", torch.tensor(3.0))
         self.register_buffer("batch_effect_prior_scale", torch.tensor(3.0))
-        self.register_buffer("element_effects_prior_scale", torch.tensor(0.01))
+        self.register_buffer("element_effects_prior_scale", torch.tensor(1.0))
         self.register_buffer("covariate_prior_sigma", torch.tensor(3.0))
         self.register_buffer("covariate_disp_prior_sigma", torch.tensor(1.0))
         self.register_buffer("logit_efficacy_alpha", torch.tensor(5.0))
@@ -152,8 +155,11 @@ class PerTurboPyroModule(PyroBaseModuleClass):
             torch.tensor([1 - self.element_effects_prior_scale, self.element_effects_prior_scale]),
         )
         self.register_buffer("spike_slab_prior_probs", torch.tensor([0.001, 0.999]))
-        self.register_buffer("factor_element_prior_scale", torch.tensor(0.1))
-        self.register_buffer("factor_gene_prior_scale", torch.tensor(0.1))
+        self.register_buffer("cell_factor_prior_scale", torch.tensor(1.0))
+        self.register_buffer("cell_loading_prior_scale", torch.tensor(0.3))
+        self.register_buffer("pert_factor_prior_scale", torch.tensor(0.3))
+        self.register_buffer("pert_loading_prior_scale", torch.tensor(0.3))
+
         self.register_buffer("noise_prior_rate", torch.tensor(2.0))
 
         # override hyperparameters with user-provided values from prior_param_dict
@@ -270,12 +276,20 @@ class PerTurboPyroModule(PyroBaseModuleClass):
             with pert_factor_plate, element_plate:
                 pert_factors = pyro.sample(
                     "pert_factors",
-                    dist.Laplace(0.0, self.factor_element_prior_scale),
+                    dist.Laplace(0.0, self.pert_factor_prior_scale),
                 )
+                # pert_factors = pyro.sample(
+                #     "pert_factors",
+                #     dist.Exponential(1.0 / self.factor_element_prior_scale),
+                # )
+                # pert_factors = pyro.sample(
+                #     "pert_factors",
+                #     dist.HalfCauchy(self.factor_element_prior_scale),
+                # )
             with pert_factor_plate, gene_plate:
                 pert_loadings = pyro.sample(
                     "pert_loadings",
-                    dist.Laplace(0.0, self.factor_gene_prior_scale),
+                    dist.Laplace(0.0, self.pert_loading_prior_scale),
                 )
             element_factor_effects = torch.einsum("fei,fjg->eg", pert_factors, pert_loadings)
             element_effects = element_factor_effects + element_local_effects
@@ -285,12 +299,12 @@ class PerTurboPyroModule(PyroBaseModuleClass):
             with cell_factor_plate, cell_plate:
                 cell_factors = pyro.sample(
                     "cell_factors",
-                    dist.Laplace(0.0, self.factor_element_prior_scale),
+                    dist.Laplace(0.0, self.cell_factor_prior_scale),
                 )
             with cell_factor_plate, gene_plate:
                 cell_loadings = pyro.sample(
                     "cell_loadings",
-                    dist.Laplace(0.0, self.factor_gene_prior_scale),
+                    dist.Laplace(0.0, self.cell_loading_prior_scale),
                 )
             cell_factor_effects = torch.einsum("fci,fjg->cg", cell_factors, cell_loadings)
         else:

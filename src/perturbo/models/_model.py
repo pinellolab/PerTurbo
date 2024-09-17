@@ -377,7 +377,8 @@ class PERTURBO(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
             Other keyword args for :class:`~scvi.train.Trainer`.
         """
         plan_kwargs = plan_kwargs if plan_kwargs is not None else {}
-        plan_kwargs.update({"loss_fn": TraceEnum_ELBO(max_plate_nesting=3)})
+        if len(self.module.discrete_sites) > 0:
+            plan_kwargs.update({"loss_fn": TraceEnum_ELBO(max_plate_nesting=3)})
         if lr is not None and "optim" not in plan_kwargs.keys():
             plan_kwargs.update({"optim_kwargs": {"lr": lr}})
         if data_splitter_kwargs is None:
