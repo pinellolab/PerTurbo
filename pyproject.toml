@@ -46,7 +46,11 @@ doc = [
     "sphinx-copybutton",
     "pandas",
 ]
-test = ["pytest", "coverage", "torch>=1.11.0+cpu"]
+test = [
+    "pytest",
+    "coverage",
+    "torch==2.0.1+cpu", # NOTE: doesn't automatically match package torch version requirement
+]
 
 [tool.coverage.run]
 source = ["perturbo"]
