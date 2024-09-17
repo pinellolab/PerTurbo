@@ -8,6 +8,7 @@ buck-out/
 __pycache__/
 .mypy_cache/
 .ruff_cache/
+.*cache/
 
 # Distribution / packaging
 /build/
@@ -19,10 +20,15 @@ __pycache__/
 */*/.ipynb_checkpoints
 docs/notebooks/checkpoints
 
+# Notebook temp files
+docs/notebooks/*.h5ad
+
 # Tests and coverage
 /.pytest_cache/
 /.cache/
 /data/
+/node_modules/
+
 
 # docs
 /docs/generated/

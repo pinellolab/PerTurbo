@@ -30,7 +30,7 @@ def adata():
             "batch_id": np.random.choice(["batch_1", "batch_2"], size=(n_cells)),
         }
     )
-    rna_counts = np.random.negative_binomial(100, 0.9, size=(n_cells, n_genes)).astype(np.float64)
+    rna_counts = np.random.negative_binomial(100, 0.9, size=(n_cells, n_genes)).astype(np.float32)
     rna_adata = AnnData(csr_matrix(rna_counts), obs=total_rna)
     rna_adata.var_names = "gene" + rna_adata.var_names
 
@@ -55,15 +55,19 @@ def mdata(adata: AnnData):
 
     # generate fake transcript counts
     rna_adata = adata
-    n_cells = len(adata)
+    n_cells = adata.n_obs
 
-    # generate fake guide status
-    grna_counts = np.random.binomial(1, 0.5, size=(n_cells, n_grna)).astype(np.float32)
+    # generate fake guide status (low MOI)
+    grna_counts = np.zeros((n_cells, n_grna), dtype=np.float32)
+    for i in range(n_cells):
+        grna_counts[i, np.random.choice(n_grna)] = 1
+
     perturb_adata = AnnData(csr_matrix(grna_counts))
     perturb_adata.var_names = "guide" + perturb_adata.var_names
     perturb_adata.uns["elements"] = rna_adata.uns["elements"]
 
     guide_by_element = np.random.binomial(1, 0.8, size=(n_grna, n_elements)).astype(np.float32)
+
     perturb_adata.varm[guide_by_element_key] = pd.DataFrame(
         guide_by_element, index=perturb_adata.var_names, columns=perturb_adata.uns["elements"]
     )
@@ -78,9 +82,22 @@ def test_package_has_version():
     assert perturbo.__version__ is not None
 
 
-@pytest.mark.parametrize("use_gene_by_element", [True, False])
+@pytest.mark.parametrize("efficiency_mode", ["mixture", "scaled"])
 @pytest.mark.parametrize("use_guide_by_element", [True, False])
-def test_model_mdata(mdata: MuData, tmp_path, use_guide_by_element, use_gene_by_element):
+@pytest.mark.parametrize("use_gene_by_element", [True, False])
+@pytest.mark.parametrize("merge_guides_mode", ["partial", "shared"])
+@pytest.mark.parametrize("n_factors", [None, 2])
+@pytest.mark.parametrize("n_pert_factors", [None, 2])
+def test_model_mdata(
+    mdata: MuData,
+    tmp_path,
+    efficiency_mode,
+    use_guide_by_element,
+    use_gene_by_element,
+    merge_guides_mode,
+    n_factors,
+    n_pert_factors,
+):
     """Check that we can register our MuData object with our model and perform training"""
     if use_gene_by_element and not use_guide_by_element:
         pytest.skip("gene_by_element without guide_by_element test not implemented!")
@@ -101,13 +118,18 @@ def test_model_mdata(mdata: MuData, tmp_path, use_guide_by_element, use_gene_by_
         },
     )
 
-    model = perturbo.PERTURBO(mdata, n_factors=None)
+    model = perturbo.PERTURBO(
+        mdata,
+        n_factors=n_factors,
+        n_pert_factors=n_pert_factors,
+        efficiency_mode=efficiency_mode,
+        merge_guides_mode=merge_guides_mode,
+    )
     assert model.summary_stats.n_cells == len(mdata)
     assert model.summary_stats.n_vars == len(mdata[rna_key].var)
     assert model.summary_stats.n_perturbations == len(mdata[perturb_key].var)
 
-    model.train(max_epochs=10, lr=0.1)
-    model.train(max_epochs=10, lr=0.1, batch_size=None)
+    model.train(max_epochs=10, lr=0.1, batch_size=20)
     samples = model.sample_posterior(num_samples=1, return_observed=True)
 
     assert samples["obs"].shape[-2:] == (
@@ -116,7 +138,7 @@ def test_model_mdata(mdata: MuData, tmp_path, use_guide_by_element, use_gene_by_
     )
     fx = model.get_element_effects()
     assert isinstance(fx, pd.DataFrame)
-    assert len(model.history["elbo_train"]) == 20
+    assert len(model.history["elbo_train"]) == 10
     assert isinstance(model.history["elbo_train"], pd.DataFrame)
     model.save(tmp_path / "model", save_anndata=True)
     model = perturbo.PERTURBO.load(tmp_path / "model")

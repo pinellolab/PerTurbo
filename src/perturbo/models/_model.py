@@ -4,8 +4,9 @@ from typing import Optional, Union
 import numpy as np
 import pandas as pd
 import torch
-from mudata import MuData
+from mudata import AnnData, MuData
 from pandas import DataFrame
+from pyro.infer import TraceEnum_ELBO
 from scipy.sparse import issparse
 from scipy.stats import chi2
 from scvi._types import AnnOrMuData
@@ -88,8 +89,67 @@ class PERTURBO(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
         return varm_tensor
 
     @classmethod
-    def setup_anndata(cls):
-        """Required by scvi-tools."""
+    def setup_anndata(
+        cls,
+        adata: AnnData,
+        batch_key: Optional[str] = None,
+        perturbation_key: Optional[str] = None,
+        library_size_key: Optional[str] = None,
+        size_factor_key: Optional[str] = None,
+        continuous_covariates_keys: Optional[str] = None,
+        **kwargs,
+    ):
+        setup_method_args = cls._get_setup_method_args(**locals())
+        anndata_fields = [
+            fields.LayerField(REGISTRY_KEYS.X_KEY, None, is_count_data=True),
+            fields.CategoricalObsField(REGISTRY_KEYS.BATCH_KEY, batch_key),
+            fields.CategoricalObsField(REGISTRY_KEYS.PERTURBATION_KEY, perturbation_key),
+            fields.NumericalObsField(REGISTRY_KEYS.SIZE_FACTOR_KEY, size_factor_key, required=False),
+            fields.NumericalJointObsField(REGISTRY_KEYS.CONT_COVS_KEY, continuous_covariates_keys),
+        ]
+        # add library size if not present
+        if library_size_key is None:
+            library_size_key = "_library_size"
+            library_size = adata.X.sum(axis=1)
+            if not library_size.all():
+                raise ValueError(
+                    "Cannot infer library size: cells with zero counts. Set library_size_key manually instead."
+                )
+            adata.obs[library_size_key] = library_size
+
+        # add size factor if not present
+        if size_factor_key is None:
+            size_factor_key = "_size_factor"
+            library_size = adata.obs[library_size_key]
+            if not library_size.all():
+                raise ValueError(
+                    "Cannot infer size factors: cells with zero library size. Set size_factor_key manually instead."
+                )
+            log_cpm = np.log(library_size / 1e6)
+            adata.obs[size_factor_key] = log_cpm - log_cpm.mean()
+
+        # add indices to enable pyro subsampling of local vars
+        adata.obs = adata.obs.assign(_ind_x=lambda x: np.arange(len(x)))
+        index_field = fields.MuDataNumericalObsField(
+            REGISTRY_KEYS.INDICES_KEY,
+            "_ind_x",
+        )
+
+        # add info for method of moments estimation of gene params
+        mean_counts = np.mean(adata.X, axis=0)
+        if isinstance(mean_counts, np.matrix):  # occurs when summing sparse array
+            mean_counts = mean_counts.A1
+        adata.var["_gene_mean"] = mean_counts
+        # rna_adata.var["_gene_variance"] = np.var(rna_adata.X, axis=0).squeeze()
+        gene_field = fields.MuDataNumericalJointVarField(
+            REGISTRY_KEYS.GENE_SUMMARY_STATS,
+            ["_gene_mean"],
+        )
+
+        adata_manager = AnnDataManager(fields=anndata_fields, setup_method_args=setup_method_args)
+        adata_manager.register_fields(adata, **kwargs)
+        cls.register_manager(adata_manager)
+
         raise NotImplementedError("MuData input required, use setup_mudata.")
 
     @classmethod
@@ -317,6 +377,7 @@ class PERTURBO(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
             Other keyword args for :class:`~scvi.train.Trainer`.
         """
         plan_kwargs = plan_kwargs if plan_kwargs is not None else {}
+        plan_kwargs.update({"loss_fn": TraceEnum_ELBO(max_plate_nesting=3)})
         if lr is not None and "optim" not in plan_kwargs.keys():
             plan_kwargs.update({"optim_kwargs": {"lr": lr}})
         if data_splitter_kwargs is None:

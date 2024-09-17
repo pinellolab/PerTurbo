@@ -1,6 +1,6 @@
 {
   "template": "https://github.com/scverse/cookiecutter-scverse",
-  "commit": "722725204d70783354e7a27a6d49220e6357176a",
+  "commit": "4c8f4683073074b201a45b173d91b2a352d4a194",
   "checkout": null,
   "context": {
     "cookiecutter": {
@@ -10,8 +10,9 @@
       "author_full_name": "Logan Blaine",
       "author_email": "loganblaine@g.harvard.edu",
       "github_user": "logan-blaine",
-      "project_repo": "https://github.com/pinellolab/PerTurbo",
+      "github_repo": "PerTurbo",
       "license": "MIT License",
+      "ide_integration": "True",
       "_copy_without_render": [
         ".github/workflows/build.yaml",
         ".github/workflows/test.yaml",
