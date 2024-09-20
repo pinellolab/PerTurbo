@@ -5,6 +5,7 @@ import numpy as np
 import scipy
 from scipy.sparse import csr_matrix, eye, coo_matrix, lil_matrix, vstack, hstack
 from scipy.sparse import random as sparse_random
+import math
 
 import mudata as md
 from mudata import MuData
@@ -68,7 +69,8 @@ class Fit_PerTurbo():  # keep consistent with perturbo / pyro
         continuous_covariates_keys
             list of .obs keys within the RNA AnnData object containing other continuous covariates to be "regressed out"
         obs_continuous_covariates_keys
-            list of .obs keys within the RNA AnnData object that can be directly observed, corresponding to the continuous covariates        gene_by_element_key
+            list of .obs keys within the RNA AnnData object that can be directly observed, corresponding to the continuous covariates        
+        gene_by_element_key
             .varm key within the RNA AnnData object containing a mask of which genes can be affected by which genetic elements
         guide_by_element_key
             .varm key within the perturbation AnnData object containing which perturbations target which genetic elements
@@ -293,6 +295,9 @@ class Fit_PerTurbo():  # keep consistent with perturbo / pyro
         
         # Create n_plots number of subplots
         fig, axes = plt.subplots(1, n_plots, figsize = (12, 5))
+
+        if n_plots == 1:
+            axes = [axes]  # Convert single Axes object to a list for consistent indexing
         
         i = 0
         for obs_key in self.obs_continuous_covariates_keys:
@@ -377,8 +382,15 @@ class Simulate_Data():
         self.batch_key = batch_key
         self.library_size_key = library_size_key
         self.size_factor_key = size_factor_key
-        self.read_depth_key = read_depth_key
-        self.Size_Factor_key = Size_Factor_key
+        if read_depth_key == None:
+            self.read_depth_key = library_size_key
+        else:
+            self.read_depth_key = read_depth_key         # in case it records total_umis, different from library_size (e.g. Gasperini_atscale)
+        if Size_Factor_key == None:
+            self.Size_Factor_key = size_factor_key
+        else:
+            self.Size_Factor_key = Size_Factor_key
+        self.Size_Factor_key = Size_Factor_key       # Size_Factor computed from read_depth that is considered in cont_cov but should not be directly sampled (e.g. Gasperini_atscale)
         self.continuous_covariates_keys = continuous_covariates_keys
         self.obs_continuous_covariates_keys = obs_continuous_covariates_keys
         self.guide_by_element_key = guide_by_element_key
@@ -474,9 +486,10 @@ class Simulate_Data():
 
         grna_modality = md.AnnData(self.grna_data)
         grna_modality.var_names = self.guide_names
-        grna_modality.varm[self.guide_by_element_key] = self.element_targeted
-        
-        grna_modality.uns[self.guide_by_element_key] = self.element_targeted_df
+        if self.guide_by_element_key is not None:
+            grna_modality.varm[self.guide_by_element_key] = self.element_targeted
+            
+            grna_modality.uns[self.guide_by_element_key] = self.element_targeted_df
         grna_modality.uns['guide_efficacy'] = self.guide_efficacy_values
         grna_modality.uns["elements"] = np.array(self.element_names)
 
@@ -499,6 +512,9 @@ class Simulate_Data():
         if self.read_depth_key is not None:
             rna_modality.obs[self.read_depth_key] = rna_modality.X.sum(axis=1) # add the library size obs
             log_cpm = np.log(rna_modality.obs[self.read_depth_key] / 1e6)
+        else:
+            self.read_depth_key = self.library_size_key
+
         if self.Size_Factor_key is not None:
             rna_modality.obs[self.Size_Factor_key] = log_cpm - np.mean(log_cpm)
         
@@ -507,13 +523,15 @@ class Simulate_Data():
         rna_modality.var["gene_mean_perturbed"] = (np.exp(self.logits_perturb) * self.total_count).mean(axis=0) 
 
         rna_modality.var_names = self.gene_names
-        rna_modality.varm[self.gene_by_element_key] = self.element_tested.transpose()
+        if self.gene_by_element_key is not None:
+            rna_modality.varm[self.gene_by_element_key] = self.element_tested.transpose()
         
-        rna_modality.uns[self.gene_by_element_key] = self.element_tested_df
+            rna_modality.uns[self.gene_by_element_key] = self.element_tested_df
         rna_modality.uns["elements"] = np.array(self.element_names)
         
         # Construct mudata
         mdata = md.MuData({"rna": rna_modality, "grna": grna_modality})
+        print(mdata)
         
         simulated_read_depth = mdata["rna"].obs[self.read_depth_key]
         print(f"when setting the read depth per cell as {read_depth}, simulated data has an average of {simulated_read_depth.mean()} reads per cell.")
@@ -726,8 +744,8 @@ class Simulate_Data():
         simulate_distribution = self.simulate_distribution
 
         # put size_factor in the last position of continuous covariates
-        if size_factor_key not in continuous_covariates_keys:
-            continuous_covariates_keys = continuous_covariates_keys + [size_factor_key]
+        #if size_factor_key not in continuous_covariates_keys:
+        #    continuous_covariates_keys = continuous_covariates_keys + [size_factor_key]
         
         # Get covariate effects
         cov_effect_sizes = {}
@@ -752,12 +770,12 @@ class Simulate_Data():
         # logit
         if simulate_distribution == "nb":
             logits = torch.from_numpy(samples_log_gene_mean +  # base mean
-                                      obs[size_factor_key].values.reshape(-1,1) +    # size factor
+            #                          obs[size_factor_key].values.reshape(-1,1) +    # size factor
                                       sum(cov_effect_sizes.values()) -  # covariate effect sizes
                                       samples_log_gene_dispersion)  # torch.tensor, length = ngenes  # torch.tensor, length = ngenes
         elif simulate_distribution == "lnnb":
             logits = torch.from_numpy(samples_log_gene_mean +  # base mean
-                                      obs[size_factor_key].values.reshape(-1,1) +    # size factor
+            #                          obs[size_factor_key].values.reshape(-1,1) +    # size factor
                                       sum(cov_effect_sizes.values()) -  # covariate effect sizes
                                       samples_log_gene_dispersion -
                                       samples_multiplicative_noise**2 / 2)  # torch.tensor, length = ngenes
@@ -863,7 +881,7 @@ class Simulate_Data():
         start_time = time.time()
         chunks = []
         i = 1
-        print(f"The data will be simulated with {round(ncells / chunk_size)} chunks.")
+        print(f"The data will be simulated with {math.ceil(ncells / chunk_size)} chunks.")
         
         if simulate_distribution == "nb":
             print("simulate from NB")
@@ -957,12 +975,17 @@ class Support_Functions():
         mdata_filtered
             a MuData object, whose main matrix of the "grna" have filtered columns, and 'element_test' in "rna" have filtered columns
         """
+        if guide_by_element_key is None:
+            print("Please indicate the correct guide_by_element_key.")
+            return
+        
         rna = mdata['rna'].X.toarray()
         grna = mdata['grna'].X.toarray()
         element = mdata['grna'].X @ mdata['grna'].varm[guide_by_element_key].toarray()
         
-        element_tested_array = mdata['rna'].varm[gene_by_element_key].toarray()
-        element_tested_filtered = mdata["rna"].varm[gene_by_element_key].copy()
+        if gene_by_element_key is not None:
+            element_tested_array = mdata['rna'].varm[gene_by_element_key].toarray()
+            element_tested_filtered = mdata["rna"].varm[gene_by_element_key].copy()
         
         for col_element in range(element.shape[1]):
             
@@ -990,12 +1013,13 @@ class Support_Functions():
         # Create filtered rna & grna modality
         mdata_filtered = mdata.copy()
         element_tested_filtered.eliminate_zeros()
-        mdata_filtered.mod["rna"].varm[gene_by_element_key] = element_tested_filtered
-        
-        # compare number of pairs before and after sampling
-        npairs_before = mdata["rna"].varm[gene_by_element_key].nnz
-        npairs_after = mdata_filtered["rna"].varm[gene_by_element_key].nnz
-        print(f"{npairs_after} element-gene pairs pass the filtering among all {npairs_before} pairs.")
+        if gene_by_element_key is not None:
+            mdata_filtered.mod["rna"].varm[gene_by_element_key] = element_tested_filtered
+            
+            # compare number of pairs before and after sampling
+            npairs_before = mdata["rna"].varm[gene_by_element_key].nnz
+            npairs_after = mdata_filtered["rna"].varm[gene_by_element_key].nnz
+            print(f"{npairs_after} element-gene pairs pass the filtering among all {npairs_before} pairs.")
         
         return(mdata_filtered)
     
