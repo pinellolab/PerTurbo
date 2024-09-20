@@ -7,7 +7,7 @@ import torch
 from pandas import DataFrame
 from pyro import poutine
 from pyro.infer import config_enumerate
-from pyro.infer.autoguide import AutoGuideList, AutoNormal, init_to_mean, init_to_median
+from pyro.infer.autoguide import AutoGuideList, AutoNormal, init_to_mean, init_to_median, AutoDelta
 from scvi.module.base import PyroBaseModuleClass
 
 from ._constants import REGISTRY_KEYS
@@ -34,6 +34,7 @@ class PerTurboPyroModule(PyroBaseModuleClass):
         n_pert_factors=None,
         efficiency_mode: Literal["mixture", "scaled"] = "scaled",
         dispersion_effects=False,
+        use_interactions=False,
         merge_guides_mode: Literal["partial", "shared"] = "partial",
         prior_param_dict: Optional[Mapping[str, torch.Tensor]] = None,
         **module_kwargs,
@@ -65,7 +66,7 @@ class PerTurboPyroModule(PyroBaseModuleClass):
         self.n_factors = n_factors
         self.n_pert_factors = n_pert_factors
         self.effect_prior_dist = effect_prior_dist
-        # self.low_moi = low_moi
+        self.use_interactions = use_interactions
         self.efficiency_mode = efficiency_mode
 
         # copy data summary stats
@@ -95,22 +96,34 @@ class PerTurboPyroModule(PyroBaseModuleClass):
         #     self.n_cat_list = []
         self.n_batches = summary_stats.n_batch
 
-        self._guide = AutoNormal(
-            self.model,
-            init_loc_fn=init_to_median,
-            create_plates=self.create_plates,
-        )
-
+        # self._guide = AutoNormal(
+        #     self.model,
+        #     init_loc_fn=init_to_median,
+        #     create_plates=self.create_plates,
+        # )
+        delta_sites = ["cell_factors", "cell_loadings"]
+        delta_sites = []
         self._guide = AutoGuideList(self.model, create_plates=self.create_plates)
         self._guide.append(
             AutoNormal(
-                poutine.block(self.model, hide=["element_effects"] + self.discrete_sites),
-                init_loc_fn=init_to_mean,
+                poutine.block(self.model, hide=["element_effects"] + delta_sites + self.discrete_sites),
+                init_loc_fn=lambda x: init_to_median(x, num_samples=100),
                 init_scale=0.1,
             )
         )
         self._guide.append(
-            AutoNormal(poutine.block(self.model, expose="element_effects"), init_loc_fn=init_to_median, init_scale=0.05)
+            AutoDelta(
+                poutine.block(self.model, expose=delta_sites),
+                init_loc_fn=lambda x: init_to_median(x, num_samples=100),
+            )
+        )
+
+        self._guide.append(
+            AutoNormal(
+                poutine.block(self.model, expose="element_effects"),
+                init_loc_fn=lambda x: init_to_median(x, num_samples=100),
+                init_scale=0.05,
+            )
         )
 
         ## register hyperparameters as buffers so they get automatically moved to GPU by scvi-tools
@@ -156,9 +169,9 @@ class PerTurboPyroModule(PyroBaseModuleClass):
         )
         self.register_buffer("spike_slab_prior_probs", torch.tensor([0.001, 0.999]))
         self.register_buffer("cell_factor_prior_scale", torch.tensor(1.0))
-        self.register_buffer("cell_loading_prior_scale", torch.tensor(0.3))
-        self.register_buffer("pert_factor_prior_scale", torch.tensor(0.3))
-        self.register_buffer("pert_loading_prior_scale", torch.tensor(0.3))
+        self.register_buffer("cell_loading_prior_scale", torch.tensor(0.1))
+        self.register_buffer("pert_factor_prior_scale", torch.tensor(1.0))
+        self.register_buffer("pert_loading_prior_scale", torch.tensor(0.1))
 
         self.register_buffer("noise_prior_rate", torch.tensor(2.0))
 
@@ -307,6 +320,15 @@ class PerTurboPyroModule(PyroBaseModuleClass):
                     dist.Laplace(0.0, self.cell_loading_prior_scale),
                 )
             cell_factor_effects = torch.einsum("fci,fjg->cg", cell_factors, cell_loadings)
+
+            if self.use_interactions:
+                with cell_factor_plate, element_plate:
+                    pert_cell_factors = pyro.sample(
+                        "pert_cell_factors",
+                        dist.Laplace(0.0, self.cell_factor_prior_scale),
+                    )
+                element_effects = torch.einsum("fei,fjg->eg", pert_cell_factors, cell_loadings) + element_effects
+
         else:
             cell_factor_effects = 0
 
