@@ -121,7 +121,7 @@ class Fit_PerTurbo():  # keep consistent with perturbo / pyro
         
         self.obs_param_keys = obs_param_keys
         self.params_for_simulation = params_for_simulation
-        return(params_for_simulation)
+        return params_for_simulation
             
     def get_n_steps(
         self,
@@ -132,7 +132,7 @@ class Fit_PerTurbo():  # keep consistent with perturbo / pyro
         n_steps = max(n_steps, 1)
         
         self.n_steps = n_steps
-        return(n_steps)
+        return n_steps
     
     @staticmethod
     def get_n_steps_static(
@@ -144,7 +144,7 @@ class Fit_PerTurbo():  # keep consistent with perturbo / pyro
         n_steps = min(max_steps, round(max_steps * (20000/mdata[rna_modality].X.shape[0])))  # if ncells > 20000 then n_steps decay
         n_steps = max(n_steps, 1)
 
-        return(n_steps)
+        return n_steps
     
     def get_model(
         self,
@@ -166,7 +166,7 @@ class Fit_PerTurbo():  # keep consistent with perturbo / pyro
         model = perturbo.models.PERTURBO(self.mdata_train, likelihood=likelihood, n_factors=None)
         
         self.model = model
-        return(model)
+        return model
 
     def train_perturbo(  # mimic the train in pyro
         self,
@@ -283,7 +283,7 @@ class Fit_PerTurbo():  # keep consistent with perturbo / pyro
 
             df.to_csv(filepath, index=False)            # Save DataFrame to csv
         
-        return(dfs)
+        return dfs
 
     def plot_obs(
         self,
@@ -535,7 +535,7 @@ class Simulate_Data():
         print(f"when setting the read depth per cell as {read_depth}, simulated data has an average of {simulated_read_depth.mean()} reads per cell.")
         
         self.mdata = mdata
-        return(mdata)
+        return mdata
     
     @staticmethod
     def extract_to_h5mu(mdata,
@@ -718,7 +718,7 @@ class Simulate_Data():
         total_perturbation_effect = guide_efficacy @ element_effects.toarray()  # shape (nguides_total, ngenes)
         self.total_perturbation_effect = total_perturbation_effect
 
-        return(total_perturbation_effect)
+        return total_perturbation_effect
 
     def _get_random_indices(self):
         """Get random indices of genes to simulate from. An np.array, with length ngenes."""
@@ -728,7 +728,7 @@ class Simulate_Data():
         gene_ids = np.random.choice(range(total_genes), size = ngenes, replace = True)
         self.gene_ids = gene_ids
 
-        return(gene_ids)
+        return gene_ids 
         
     def _get_logits(self):
         """Get the raw logits matrix. A torch.tensor, with ncells rows, ngenes cols."""
@@ -823,7 +823,7 @@ class Simulate_Data():
         self.correction_term = correction_term
         self.log_pert_effect = log_pert_effect
 
-        return(correction_term)
+        return correction_term
     
     def _get_log_mean_disp_slope(self):
         samples_log_gene_mean = self.samples_log_gene_mean.ravel()  # reshape array to be 1-dim for fitting
@@ -843,7 +843,7 @@ class Simulate_Data():
         logits_corrected = logits + (1 / (slope + 1)) * np.log(correction_term) 
         self.logits_corrected = logits_corrected
 
-        return(logits_corrected)
+        return logits_corrected
 
     def _get_total_count_corrected(self):
         slope = self.log_mean_disp_slope
@@ -1016,7 +1016,7 @@ class Support_Functions():
             npairs_after = mdata_filtered["rna"].varm[gene_by_element_key].nnz
             print(f"{npairs_after} element-gene pairs pass the filtering among all {npairs_before} pairs.")
         
-        return(mdata_filtered)
+        return mdata_filtered
     
     @staticmethod
     def split_element_effects(
@@ -1029,7 +1029,7 @@ class Support_Functions():
         element_effects_positive_ctrl = element_effects[~element_effects['element'].str.contains('ntc')]
         element_effects_dict = {"negative_control": element_effects_negative_ctrl,
                                 "positive_control": element_effects_positive_ctrl}
-        return(element_effects_dict)
+        return element_effects_dict
 
     @staticmethod
     def get_alpha_empirical(
@@ -1059,7 +1059,7 @@ class Support_Functions():
         elif test_side == "single":
             alpha_empirical = p_val_list.quantile(alpha)
             
-        return(alpha_empirical)
+        return alpha_empirical
 
     @staticmethod
     def get_alpha_empirical_for_each_pair(
@@ -1107,7 +1107,7 @@ class Support_Functions():
         element_effects_split_modified = element_effects_split.copy()
         element_effects_split_modified["positive_control"] = df_pos
         
-        return(element_effects_split_modified)
+        return element_effects_split_modified
     
     @staticmethod
     def create_empty_list(method):
@@ -1181,7 +1181,7 @@ class Support_Functions():
         list_dict["Method"].extend([method] * npairs)
         list_dict["MTmethod"].extend([MTmethod] * npairs)
 
-        return(list_dict)
+        return list_dict
     
     @staticmethod
     def get_alpha_corrected(
@@ -1247,4 +1247,4 @@ class Support_Functions():
                                 .agg(Power=("significance", "mean"))
                                 .reset_index())
 
-        return(power_summary)
+        return power_summary
