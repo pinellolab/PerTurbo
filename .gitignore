@@ -39,3 +39,4 @@ docs/notebooks/*.h5ad
 /.vscode/
 /.hatch/
 
+src/perturbo/simulation/.ipynb_checkpoints/
