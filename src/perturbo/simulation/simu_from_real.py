@@ -1,41 +1,41 @@
-from typing import Optional, List
-
-import pandas as pd
-import numpy as np
-import scipy
-from scipy.sparse import csr_matrix, eye, coo_matrix, lil_matrix, vstack, hstack
-from scipy.sparse import random as sparse_random
 import math
-
-import mudata as md
-from mudata import MuData
-import perturbo
-from ..models._module import LogNormalNegativeBinomial
-
-import matplotlib.pyplot as plt
-import seaborn as sns
-
-import pyro.distributions as dist
-import scipy.stats as stats
-from scipy.stats import lognorm, gamma
-from scipy.optimize import curve_fit
-import statsmodels.api as sm
-from statsmodels.stats.multitest import multipletests  # for FDR correction
-
+import os
 import time
 import warnings
-import os
-#warnings.filterwarnings("ignore")
+from typing import List, Optional
 
+import matplotlib.pyplot as plt
+import mudata as md
+import numpy as np
+import pandas as pd
+
+# warnings.filterwarnings("ignore")
 import pyro
-import torch
+import pyro.distributions as dist
+import scipy
+import scipy.stats as stats
 import scvi
+import seaborn as sns
+import statsmodels.api as sm
+import torch
+from click import Option
+from mudata import MuData
+from pyparsing import Opt
+from scipy.optimize import curve_fit
+from scipy.sparse import coo_matrix, csr_matrix, eye, hstack, lil_matrix, vstack
+from scipy.sparse import random as sparse_random
+from scipy.stats import gamma, lognorm
+from statsmodels.stats.multitest import multipletests  # for FDR correction
+
+import perturbo
+
+from ..models._module import LogNormalNegativeBinomial
 
 
-class Fit_PerTurbo():  # keep consistent with perturbo / pyro
+class Fit_PerTurbo:  # keep consistent with perturbo / pyro
     def __init__(
-        self, 
-        mdata: Optional[MuData] = None, 
+        self,
+        mdata: Optional[MuData] = None,
         batch_key: Optional[str] = None,
         library_size_key: Optional[str] = None,
         size_factor_key: Optional[str] = None,
@@ -47,7 +47,7 @@ class Fit_PerTurbo():  # keep consistent with perturbo / pyro
         guide_by_element_key: Optional[str] = None,
         rna_element_uns_key: Optional[str] = None,
         guide_element_uns_key: Optional[str] = None,
-        modalities: Optional[dict[str, str]] = None
+        modalities: Optional[dict[str, str]] = None,
     ):
         """
         Fit an example MuData with PerTurbo
@@ -69,7 +69,7 @@ class Fit_PerTurbo():  # keep consistent with perturbo / pyro
         continuous_covariates_keys
             list of .obs keys within the RNA AnnData object containing other continuous covariates to be "regressed out"
         obs_continuous_covariates_keys
-            list of .obs keys within the RNA AnnData object that can be directly observed, corresponding to the continuous covariates        
+            list of .obs keys within the RNA AnnData object that can be directly observed, corresponding to the continuous covariates
         gene_by_element_key
             .varm key within the RNA AnnData object containing a mask of which genes can be affected by which genetic elements
         guide_by_element_key
@@ -103,68 +103,69 @@ class Fit_PerTurbo():  # keep consistent with perturbo / pyro
     def fit_obs(
         self,
     ):
-        """Output: params_for_simulation, a dataframe, saving lognormal parameters for each obs."""       
+        """Output: params_for_simulation, a dataframe, saving lognormal parameters for each obs."""
         params_for_simulation = pd.DataFrame()
         obs_param_keys = []
-        
+
         for obs_key in self.obs_continuous_covariates_keys:
-            obs_param_key = "params_" + obs_key.replace('.', '_')
+            obs_param_key = "params_" + obs_key.replace(".", "_")
             obs_values = self.mdata_train.mod[self.rna_layer].obs[obs_key]
             if obs_key == self.library_size_key:
-                obs_values = (obs_values) # / 1e6 
+                obs_values = obs_values  # / 1e6
                 obs_param = lognorm.fit(obs_values, floc=0)
             else:
                 obs_param = lognorm.fit(obs_values)
-            
+
             params_for_simulation[obs_param_key] = obs_param
             obs_param_keys = obs_param_keys + [obs_param_key]
-        
+
         self.obs_param_keys = obs_param_keys
         self.params_for_simulation = params_for_simulation
         return params_for_simulation
-            
+
     def get_n_steps(
         self,
         max_steps: Optional[int] = 400,
     ):
-        """Get number of training steps according to sample size. training steps decrease with increasing sample size. """
-        n_steps = min(max_steps, round(max_steps * (20000/self.mdata_train[self.rna_layer].X.shape[0])))  # if ncells > 20000 then n_steps decay
+        """Get number of training steps according to sample size. training steps decrease with increasing sample size."""
+        n_steps = min(
+            max_steps, round(max_steps * (20000 / self.mdata_train[self.rna_layer].X.shape[0]))
+        )  # if ncells > 20000 then n_steps decay
         n_steps = max(n_steps, 1)
-        
+
         self.n_steps = n_steps
         return n_steps
-    
+
     @staticmethod
     def get_n_steps_static(
         mdata,
-        rna_modality = "rna",
+        rna_modality="rna",
         max_steps: Optional[int] = 400,
     ):
-        """Get number of training steps according to sample size. training steps decrease with increasing sample size. """
-        n_steps = min(max_steps, round(max_steps * (20000/mdata[rna_modality].X.shape[0])))  # if ncells > 20000 then n_steps decay
+        """Get number of training steps according to sample size. training steps decrease with increasing sample size."""
+        n_steps = min(
+            max_steps, round(max_steps * (20000 / mdata[rna_modality].X.shape[0]))
+        )  # if ncells > 20000 then n_steps decay
         n_steps = max(n_steps, 1)
 
         return n_steps
-    
-    def get_model(
-        self,
-        likelihood: Optional[str] = None
-    ):
+
+    def get_model(self, likelihood: Optional[str] = None):
         """Get a model object (as in pyro) that could be trained."""
         # register data with perturbo
         perturbo.models.PERTURBO.setup_mudata(
             self.mdata_train,
-            batch_key = self.batch_key,
-            library_size_key = self.library_size_key,
-            continuous_covariates_keys = self.continuous_covariates_keys,
-            gene_by_element_key = self.gene_by_element_key, # <------------ gene * element pairs
-            guide_by_element_key = self.guide_by_element_key,
-            guide_element_uns_key = self.guide_element_uns_key ,  # <------------ list of elements tested here
-            rna_element_uns_key = self.rna_element_uns_key,    # <------------ what is this?
-            modalities = self.modalities,
+            batch_key=self.batch_key,
+            library_size_key=self.library_size_key,
+            continuous_covariates_keys=self.continuous_covariates_keys,
+            gene_by_element_key=self.gene_by_element_key,  # <------------ gene * element pairs
+            guide_by_element_key=self.guide_by_element_key,
+            guide_element_uns_key=self.guide_element_uns_key,  # <------------ list of elements tested here
+            rna_element_uns_key=self.rna_element_uns_key,  # <------------ what is this?
+            modalities=self.modalities,
         )
         model = perturbo.models.PERTURBO(self.mdata_train, likelihood=likelihood, n_factors=None)
-        
+
         self.model = model
         return model
 
@@ -173,6 +174,7 @@ class Fit_PerTurbo():  # keep consistent with perturbo / pyro
         n_steps: Optional[int] = None,
         lr: Optional[float] = None,
         batch_size: Optional[int] = None,
+        accelerator: Optional[str] = None,
     ):
         if n_steps is None:
             n_steps = self.get_n_steps()
@@ -189,43 +191,37 @@ class Fit_PerTurbo():  # keep consistent with perturbo / pyro
         if len((pyro.get_param_store().keys())) == 0:
             print("param_store is clean. prepared for training.")
 
-        print(f"Training data with {n_steps} steps, using {lr} learning rate, {batch_size} batch size, on {accelerator}.")
-
-        self.model.train(
-            max_epochs = n_steps, 
-            lr = lr,
-            batch_size = batch_size,
-            accelerator = accelerator
+        print(
+            f"Training data with {n_steps} steps, using {lr} learning rate, {batch_size} batch size, on {accelerator}."
         )
 
+        self.model.train(max_epochs=n_steps, lr=lr, batch_size=batch_size, accelerator=accelerator)
+
     def extract_obs_params(
-        self,
-        estimator_type: Optional[str] = None,
-        df_dir_base: Optional[str] = None,
-        mdata_name: Optional[str] = None
+        self, estimator_type: Optional[str] = None, df_dir_base: Optional[str] = None, mdata_name: Optional[str] = None
     ):
         df = self.params_for_simulation
 
         # create folder for saving the estimations
-        df_dir = df_dir_base + "_" + f"{mdata_name}" + "_" + f'{estimator_type}'
-        
-        # extract the estimation
-        filename = 'params_for_simulation.csv'  # Create a valid filename from the parameter name
-        filepath = os.path.join(df_dir, filename)   # Join the directory with the filename
+        df_dir = df_dir_base + "_" + f"{mdata_name}" + "_" + f"{estimator_type}"
 
-        df.to_csv(filepath, index=False)            # Save DataFrame to csv
-        
+        # extract the estimation
+        filename = "params_for_simulation.csv"  # Create a valid filename from the parameter name
+        filepath = os.path.join(df_dir, filename)  # Join the directory with the filename
+
+        df.to_csv(filepath, index=False)  # Save DataFrame to csv
+
     def extract_estimation(
         self,
-        model = None,
+        model=None,
         param_keys: Optional[List[str]] = None,
         estimator_type: Optional[str] = None,
         df_dir_base: Optional[str] = None,
-        mdata_name: Optional[str] = None
+        mdata_name: Optional[str] = None,
     ):
         """
         Extract the desired estimation output.
-        
+
         Parameters
         -----------
         model
@@ -233,9 +229,9 @@ class Fit_PerTurbo():  # keep consistent with perturbo / pyro
         param_keys
             A list of parameters to save. Can be selected from the param_store output.
         estimator_type
-            Whether we want MAP estimation or the whole posterior estimation. 
+            Whether we want MAP estimation or the whole posterior estimation.
             e.g. "map" / "posterior"
-        df_dir_base 
+        df_dir_base
             Path, to which we extract the estimated parameters, by requirement. Will add the dataset and estimation method to it.
         mdata_name
             Give the data for simulation a name, which will be used to identify estimated param df.
@@ -243,7 +239,7 @@ class Fit_PerTurbo():  # keep consistent with perturbo / pyro
         -----------
         dfs
             A list of dataframes, with param_keys be the keys. (and multiple .csv files in the initialized folder)
-        """        
+        """
         if model == None:
             model = self.model
         # Create a dictionary to store DataFrames for each parameter
@@ -251,38 +247,38 @@ class Fit_PerTurbo():  # keep consistent with perturbo / pyro
 
         if estimator_type == "map":
             for k, v in model.module.guide.median().items():
-                if k in param_keys:                # only extract the parameters we need
-                    arr = v.cpu().detach().numpy() # Convert tensor to numpy array
-                    dfs[k] = pd.DataFrame(arr)     # Convert numpy array to DataFrame
-            
+                if k in param_keys:  # only extract the parameters we need
+                    arr = v.cpu().detach().numpy()  # Convert tensor to numpy array
+                    dfs[k] = pd.DataFrame(arr)  # Convert numpy array to DataFrame
+
         elif estimator_type == "posterior":
             param_store = pyro.get_param_store()
             for k, v in param_store.items():
-                if k in param_keys:                # only extract the parameters we need
-                    arr = v.cpu().detach().numpy() # Convert tensor to numpy array
-                    dfs[k] = pd.DataFrame(arr)     # Convert numpy array to DataFrame
+                if k in param_keys:  # only extract the parameters we need
+                    arr = v.cpu().detach().numpy()  # Convert tensor to numpy array
+                    dfs[k] = pd.DataFrame(arr)  # Convert numpy array to DataFrame
         else:
             print("Please choose a correct estimator type from (map/posterior).")
-        
+
         # add two additional estimation dataframes
         dfs["element_effects_res"] = model.get_element_effects()
         dfs["params_for_simulation"] = self.params_for_simulation
-        
+
         self.dfs = dfs
-        
+
         # create folder for saving the estimations
-        df_dir = df_dir_base + "_" + f"{mdata_name}" + "_" + f'{estimator_type}'
-        
+        df_dir = df_dir_base + "_" + f"{mdata_name}" + "_" + f"{estimator_type}"
+
         # extract the estimation
         if not os.path.exists(df_dir):
             os.makedirs(df_dir)
-            
-        for name, df in dfs.items():
-            filename = name.replace('.', '_') + '.csv'  # Create a valid filename from the parameter name
-            filepath = os.path.join(df_dir, filename)   # Join the directory with the filename
 
-            df.to_csv(filepath, index=False)            # Save DataFrame to csv
-        
+        for name, df in dfs.items():
+            filename = name.replace(".", "_") + ".csv"  # Create a valid filename from the parameter name
+            filepath = os.path.join(df_dir, filename)  # Join the directory with the filename
+
+            df.to_csv(filepath, index=False)  # Save DataFrame to csv
+
         return dfs
 
     def plot_obs(
@@ -290,47 +286,49 @@ class Fit_PerTurbo():  # keep consistent with perturbo / pyro
     ):
         """plot histograms of observable var from .obs"""
         n_plots = len(self.obs_continuous_covariates_keys)
-        
+
         # Create n_plots number of subplots
-        fig, axes = plt.subplots(1, n_plots, figsize = (12, 5))
+        fig, axes = plt.subplots(1, n_plots, figsize=(12, 5))
 
         if n_plots == 1:
             axes = [axes]  # Convert single Axes object to a list for consistent indexing
-        
+
         i = 0
         for obs_key in self.obs_continuous_covariates_keys:
             data = self.mdata_train[self.rna_layer].obs[obs_key]  # Your data for the histogram
             if obs_key == self.library_size_key:
-                data = data # / 1e6
-            axes[i].hist(data, bins=50, color="grey", edgecolor="black", density=True)  # Notice density=True for normalization
-            
+                data = data  # / 1e6
+            axes[i].hist(
+                data, bins=50, color="grey", edgecolor="black", density=True
+            )  # Notice density=True for normalization
+
             # Retrieve fitted parameters
-            obs_param_key = "params_" + obs_key.replace('.', '_')
+            obs_param_key = "params_" + obs_key.replace(".", "_")
             shape, loc, scale = self.params_for_simulation[obs_param_key]
-            
+
             # Define a range for x values
             xmin, xmax = axes[i].get_xlim()  # Get the limits from the histogram
             x = np.linspace(xmin, xmax, 100)
-            
+
             # Calculate the PDF using the fitted parameters
             pdf = lognorm.pdf(x, shape, loc, scale)
-            
+
             # Plot the density curve on the same axes
-            axes[i].plot(x, pdf, 'r-', label='Fit', color='royalblue')
+            axes[i].plot(x, pdf, "r-", label="Fit", color="royalblue")
             axes[i].set_xlabel(f"{obs_key}")
             axes[i].set_ylabel("Density")
-            
+
             # Optional: Add a legend
             axes[i].legend()
-            
+
             i += 1
-            
+
         # Display the plot
         plt.tight_layout()
         plt.show()
 
 
-class Simulate_Data():
+class Simulate_Data:
     def __init__(
         self,
         df_dir_base: Optional[str] = "from_real_data",
@@ -344,14 +342,14 @@ class Simulate_Data():
         continuous_covariates_keys: Optional[List[str]] = None,
         obs_continuous_covariates_keys: Optional[List[str]] = None,
         guide_by_element_key: Optional[str] = None,
-        gene_by_element_key: Optional[str] = None
+        gene_by_element_key: Optional[str] = None,
     ):
         """
         Extract the desired estimation output.
-        
+
         Parameters
         -----------
-        df_dir_base 
+        df_dir_base
             Path, to which we extract the estimated parameters, by requirement. Will add the dataset and estimation method to it.
         mdata_name
             A given name of the dataset we are simulating from. Point to the directory where we save the estimated parameters
@@ -370,7 +368,7 @@ class Simulate_Data():
         continuous_covariates_keys
             list of .obs keys within the RNA AnnData object containing other continuous covariates to be "regressed out"
         obs_continuous_covariates_keys
-            list of .obs keys within the RNA AnnData object that can be directly observed, corresponding to the continuous covariates        
+            list of .obs keys within the RNA AnnData object that can be directly observed, corresponding to the continuous covariates
         gene_by_element_key
             .varm key within the RNA AnnData object containing a mask of which genes can be affected by which genetic elements
 
@@ -384,17 +382,19 @@ class Simulate_Data():
         if read_depth_key == None:
             self.read_depth_key = library_size_key
         else:
-            self.read_depth_key = read_depth_key         # in case it records total_umis, different from library_size (e.g. Gasperini_atscale)
+            self.read_depth_key = (
+                read_depth_key  # in case it records total_umis, different from library_size (e.g. Gasperini_atscale)
+            )
         if Size_Factor_key == None:
             self.Size_Factor_key = size_factor_key
         else:
             self.Size_Factor_key = Size_Factor_key
-        self.Size_Factor_key = Size_Factor_key       # Size_Factor computed from read_depth that is considered in cont_cov but should not be directly sampled (e.g. Gasperini_atscale)
+        self.Size_Factor_key = Size_Factor_key  # Size_Factor computed from read_depth that is considered in cont_cov but should not be directly sampled (e.g. Gasperini_atscale)
         self.continuous_covariates_keys = continuous_covariates_keys
         self.obs_continuous_covariates_keys = obs_continuous_covariates_keys
         self.guide_by_element_key = guide_by_element_key
         self.gene_by_element_key = gene_by_element_key
- 
+
         # run initial functions
         self._read_params()
         self._assign_values()
@@ -403,22 +403,22 @@ class Simulate_Data():
         """
         Read in the estimated parameters for later simulation.
         """
-        df_dir = self.df_dir_base + "_" + f"{self.mdata_name}" + "_" + f'{self.estimator_type}'
-        all_files = [f for f in os.listdir(df_dir) if f.endswith('.csv')]
+        df_dir = self.df_dir_base + "_" + f"{self.mdata_name}" + "_" + f"{self.estimator_type}"
+        all_files = [f for f in os.listdir(df_dir) if f.endswith(".csv")]
 
         dfs = {}
         for csv_file in all_files:
             df_name = os.path.splitext(csv_file)[0]  # Get filename without extension
             dfs[df_name] = pd.read_csv(os.path.join(df_dir, csv_file))
         df = dfs["params_for_simulation"]
-        
+
         self.dfs = dfs  # list of dataframes of all parameters
-        self.df = df    # parameters for obs
-    
+        self.df = df  # parameters for obs
+
     def _assign_values(self):
-        """"Assign values like total number genes from the estimated parameters, which have just been read in."""
+        """ "Assign values like total number genes from the estimated parameters, which have just been read in."""
         dfs = self.dfs
-        
+
         total_genes = dfs["log_gene_mean"].shape[0]
 
         self.total_genes = total_genes
@@ -428,17 +428,17 @@ class Simulate_Data():
         simulate_distribution: Optional[str] = "lnnb",
         ncells: Optional[int] = 200000,
         ngenes: Optional[int] = 100,
-        nguides_pos: Optional[int] = None,           # number of guides targeting elements that affect genes
-        nguides_per_element: Optional[int] = 4, # number of guides per element (that affects a gene)
-        nguides_ntc: Optional[int] = 100,           # number of control guides
-        ncells_per_guide: Optional[int] = 20,   # number of cells each positive guide is detected in
-        guide_efficacy_values: Optional[List[float]] = [1.0,1.0,1.0,1.0],
+        nguides_pos: Optional[int] = None,  # number of guides targeting elements that affect genes
+        nguides_per_element: Optional[int] = 4,  # number of guides per element (that affects a gene)
+        nguides_ntc: Optional[int] = 100,  # number of control guides
+        ncells_per_guide: Optional[int] = 20,  # number of cells each positive guide is detected in
+        guide_efficacy_values: Optional[List[float]] = [1.0, 1.0, 1.0, 1.0],
         guide_category: Optional[List[str]] = ["positive_control", "negative_control"],
         log2_fold_change: Optional[float] = 1.0,
         mean_reads_per_gene: Optional[float] = 1.0,
         read_depth: Optional[int] = None,
         chunk_size: Optional[int] = 10000,
-        ):
+    ):
         """Combine everthing we have together, generate synthetic MuData that contain enough information for training"""
 
         nelements_pos = ngenes
@@ -465,7 +465,7 @@ class Simulate_Data():
 
         nelements_ntc = nguides_ntc // nguides_per_element
         pert_rate = ncells_per_guide / ncells
-        lfc = np.log(2**(log2_fold_change))
+        lfc = np.log(2 ** (log2_fold_change))
 
         self.nelements_pos = nelements_pos
         self.nelements_ntc = nelements_ntc
@@ -486,9 +486,9 @@ class Simulate_Data():
         grna_modality.var_names = self.guide_names
         if self.guide_by_element_key is not None:
             grna_modality.varm[self.guide_by_element_key] = self.element_targeted
-            
+
             grna_modality.uns[self.guide_by_element_key] = self.element_targeted_df
-        grna_modality.uns['guide_efficacy'] = self.guide_efficacy_values
+        grna_modality.uns["guide_efficacy"] = self.guide_efficacy_values
         grna_modality.uns["elements"] = np.array(self.element_names)
 
         # rna modality
@@ -501,55 +501,52 @@ class Simulate_Data():
         self._get_log_mean_disp_slope()
         self._get_logits_perturb()
         self._get_total_count_corrected()
-        #self._get_dispersion_from_curve()
-        self._sample_rna()        
+        # self._get_dispersion_from_curve()
+        self._sample_rna()
 
-        rna_modality = md.AnnData(self.rna_sparse, 
-                                  obs = self.obs, 
-                                  uns={"fold_change": round(np.exp(lfc), 2)})
+        rna_modality = md.AnnData(self.rna_sparse, obs=self.obs, uns={"fold_change": round(np.exp(lfc), 2)})
         if self.read_depth_key is not None:
-            rna_modality.obs[self.read_depth_key] = rna_modality.X.sum(axis=1) # add the library size obs
+            rna_modality.obs[self.read_depth_key] = rna_modality.X.sum(axis=1)  # add the library size obs
             log_cpm = np.log(rna_modality.obs[self.read_depth_key] / 1e6)
         else:
             self.read_depth_key = self.library_size_key
 
         if self.Size_Factor_key is not None:
             rna_modality.obs[self.Size_Factor_key] = log_cpm - np.mean(log_cpm)
-        
-        rna_modality.var["gene_mean"] = (np.exp(self.logits_corrected) * self.total_count).mean(axis=0) 
+
+        rna_modality.var["gene_mean"] = (np.exp(self.logits_corrected) * self.total_count).mean(axis=0)
         rna_modality.var["gene_total_count"] = self.total_count.squeeze()
-        rna_modality.var["gene_mean_perturbed"] = (np.exp(self.logits_perturb) * self.total_count).mean(axis=0) 
+        rna_modality.var["gene_mean_perturbed"] = (np.exp(self.logits_perturb) * self.total_count).mean(axis=0)
 
         rna_modality.var_names = self.gene_names
         if self.gene_by_element_key is not None:
             rna_modality.varm[self.gene_by_element_key] = self.element_tested.transpose()
-        
+
             rna_modality.uns[self.gene_by_element_key] = self.element_tested_df
         rna_modality.uns["elements"] = np.array(self.element_names)
-        
+
         # Construct mudata
         mdata = md.MuData({"rna": rna_modality, "grna": grna_modality})
         print(mdata)
-        
+
         simulated_read_depth = mdata["rna"].obs[self.read_depth_key]
-        print(f"when setting the read depth per cell as {read_depth}, simulated data has an average of {simulated_read_depth.mean()} reads per cell.")
-        
+        print(
+            f"when setting the read depth per cell as {read_depth}, simulated data has an average of {simulated_read_depth.mean()} reads per cell."
+        )
+
         self.mdata = mdata
         return mdata
-    
-    @staticmethod
-    def extract_to_h5mu(mdata,
-                        mudata_path = "simulated_data/",
-                        mudata_name = "simulated_data.h5mu"):
 
+    @staticmethod
+    def extract_to_h5mu(mdata, mudata_path="simulated_data/", mudata_name="simulated_data.h5mu"):
         if not os.path.exists(mudata_path):
             os.makedirs(mudata_path)
 
         mdata.write(mudata_path + mudata_name)
         print("Done")
-    
+
     def _set_names(self):
-        """Set gene names, guide names, and element names. Distinguish between positive guides and non-targeting guides"""        
+        """Set gene names, guide names, and element names. Distinguish between positive guides and non-targeting guides"""
         # gene names
         self.gene_names = ["gene" + str(i) for i in range(0, self.ngenes)]
 
@@ -561,12 +558,14 @@ class Simulate_Data():
         if "negative_control" in self.guide_category:
             self.element_names_ntc = ["ntc" + str(i) for i in range(0, self.nelements_ntc)]
         self.element_names = self.element_names_pos + self.element_names_ntc
-            
+
         # guide names
-        self.guide_names_pos = [name + "_g" + str(k) for name in self.element_names_pos for k in range(0, self.nguides_per_element)]
+        self.guide_names_pos = [
+            name + "_g" + str(k) for name in self.element_names_pos for k in range(0, self.nguides_per_element)
+        ]
         self.guide_names_ntc = ["ntc_g" + str(j) for j in range(self.nguides_ntc)]
         self.guide_names = self.guide_names_pos + self.guide_names_ntc
-            
+
     def _sample_obs(self):
         """Generate for .obs for RNA modality. A dataframe, each column is a obs, with ncells rows."""
         df = self.df
@@ -577,15 +576,20 @@ class Simulate_Data():
         size_factor_key = self.size_factor_key
 
         obs = pd.DataFrame()
-        
+
         # batch number
         prep_batch = np.full(ncells, "batch_1")
         obs[batch_key] = prep_batch
-        
+
         # other obs
         for obs_key in obs_continuous_covariates_keys:
-            obs_param_key = "params_" + obs_key.replace('.', '_')  # get the key for params_for_simulation
-            obs_values = lognorm.rvs(df[obs_param_key][0], df[obs_param_key][1], df[obs_param_key][2], size = ncells,)
+            obs_param_key = "params_" + obs_key.replace(".", "_")  # get the key for params_for_simulation
+            obs_values = lognorm.rvs(
+                df[obs_param_key][0],
+                df[obs_param_key][1],
+                df[obs_param_key][2],
+                size=ncells,
+            )
             if obs_key == library_size_key:
                 obs_values = obs_values * 1e6
             obs[obs_key] = obs_values
@@ -593,10 +597,10 @@ class Simulate_Data():
         # compute "size_factor" from library_size (e.g. "umi_count")
         if library_size_key in obs_continuous_covariates_keys:
             log_cpm = np.log(obs[library_size_key].values / 1e6)
-            obs[size_factor_key] = (log_cpm - np.mean(log_cpm)).reshape(-1,1)
-        
+            obs[size_factor_key] = (log_cpm - np.mean(log_cpm)).reshape(-1, 1)
+
         self.obs = obs
-        
+
     def _sample_grna(self):
         """
         Generate grna.X: self.grna_data, a sparse matrix, with ncell rows and nguides columns
@@ -607,7 +611,7 @@ class Simulate_Data():
         nguides = self.nguides
         pert_rate = self.pert_rate
 
-        grna_data = sparse_random(ncells, nguides, density = pert_rate, data_rvs=lambda n: np.ones(n), format='csr')
+        grna_data = sparse_random(ncells, nguides, density=pert_rate, data_rvs=lambda n: np.ones(n), format="csr")
         self.grna_data = grna_data
 
     def _get_element_targeted(self):
@@ -628,9 +632,9 @@ class Simulate_Data():
 
         # Convert the dense matrix to a sparse matrix (CSR format)
         element_targeted = csr_matrix(element_targeted_dense)
-        
+
         self.element_targeted = element_targeted
-        
+
     def _get_element_targeted_uns(self):
         """Generate grna.uns["element_targeted"]. self.element_targeted_df, a dataframe, with 2 columns | grna | element |. save guide name and its targeting element."""
         element_names_pos = self.element_names_pos
@@ -638,9 +642,8 @@ class Simulate_Data():
         nguides_per_element = self.nguides_per_element
 
         element_names_pos_extend = [element for element in element_names_pos for _ in range(nguides_per_element)]
-        element_targeted_df = pd.DataFrame({"grna": guide_names_pos, 
-                                            "element": element_names_pos_extend})
-        
+        element_targeted_df = pd.DataFrame({"grna": guide_names_pos, "element": element_names_pos_extend})
+
         self.element_targeted_df = element_targeted_df
 
     def _get_element_tested(self):
@@ -659,8 +662,8 @@ class Simulate_Data():
         element_tested_pos = eye(ngenes, dtype="float32").tocsr()
 
         element_tested = element_tested_pos
-        
-        # add ntc elements (if there are any)            
+
+        # add ntc elements (if there are any)
         if "negative_control" in guide_category:
             element_tested_ntc_dense = np.ones((nelements_ntc, ngenes))
             element_tested_ntc = csr_matrix(element_tested_ntc_dense)
@@ -675,9 +678,7 @@ class Simulate_Data():
         element_names_pos = self.element_names_pos
         gene_names = self.gene_names
 
-        element_tested_df = pd.DataFrame({
-            "element": element_names_pos, 
-            "gene": gene_names})
+        element_tested_df = pd.DataFrame({"element": element_names_pos, "gene": gene_names})
         self.element_tested_df = element_tested_df
 
     def _get_total_perturbation_effect(self):
@@ -696,25 +697,31 @@ class Simulate_Data():
         element_tested = self.element_tested
 
         # for positive guides
-        guide_efficacy_long_pos_mean = guide_efficacy_values * nelements_pos  # list of len nguides_pos, saving mean efficacy of each positive guide
-        guide_efficacy_long_pos = np.random.binomial(n=1, p=guide_efficacy_long_pos_mean).tolist()  # list of len nguides_pos, saving efficacy generated from the means.
+        guide_efficacy_long_pos_mean = (
+            guide_efficacy_values * nelements_pos
+        )  # list of len nguides_pos, saving mean efficacy of each positive guide
+        guide_efficacy_long_pos = np.random.binomial(
+            n=1, p=guide_efficacy_long_pos_mean
+        ).tolist()  # list of len nguides_pos, saving efficacy generated from the means.
 
         guide_efficacy_long = guide_efficacy_long_pos
 
         # if there are negative control guides
         if "negative_control" in guide_category:
-            guide_efficacy_long_ntc = [0] * nguides_ntc  # list of nguides_ntc 0s. negative control guides having no efficacy, will not effect logit.
+            guide_efficacy_long_ntc = (
+                [0] * nguides_ntc
+            )  # list of nguides_ntc 0s. negative control guides having no efficacy, will not effect logit.
 
             guide_efficacy_long = guide_efficacy_long_pos + guide_efficacy_long_ntc
 
         # expand from (nguides, 1) list to (nguides, nelements) matrix
-        guide_efficacy_values = torch.tensor(guide_efficacy_long).reshape(-1,1).expand(-1, nelements) 
+        guide_efficacy_values = torch.tensor(guide_efficacy_long).reshape(-1, 1).expand(-1, nelements)
         guide_efficacy = guide_efficacy_values * (element_targeted).toarray()  # shape (nguides, nelements)
-        
+
         # element_effects
         element_effects = lfc * element_tested  # shape (nelements, ngenes)
-        
-        # total_perturbation_effect: apply guide efficacy to 
+
+        # total_perturbation_effect: apply guide efficacy to
         total_perturbation_effect = guide_efficacy @ element_effects.toarray()  # shape (nguides_total, ngenes)
         self.total_perturbation_effect = total_perturbation_effect
 
@@ -725,11 +732,11 @@ class Simulate_Data():
         total_genes = self.total_genes
         ngenes = self.ngenes
 
-        gene_ids = np.random.choice(range(total_genes), size = ngenes, replace = True)
+        gene_ids = np.random.choice(range(total_genes), size=ngenes, replace=True)
         self.gene_ids = gene_ids
 
-        return gene_ids 
-        
+        return gene_ids
+
     def _get_logits(self):
         """Get the raw logits matrix. A torch.tensor, with ncells rows, ngenes cols."""
         size_factor_key = self.size_factor_key
@@ -740,42 +747,50 @@ class Simulate_Data():
         simulate_distribution = self.simulate_distribution
 
         # put size_factor in the last position of continuous covariates
-        #if size_factor_key not in continuous_covariates_keys:
+        # if size_factor_key not in continuous_covariates_keys:
         #    continuous_covariates_keys = continuous_covariates_keys + [size_factor_key]
-        
+
         # Get covariate effects
         cov_effect_sizes = {}
         for cov_key in continuous_covariates_keys:
-            if cov_key == "Size_Factor":  # skip this, since this is related to the total_umis, and will later modeled by correction_term
+            if (
+                cov_key == "Size_Factor"
+            ):  # skip this, since this is related to the total_umis, and will later modeled by correction_term
                 continue
             idx = continuous_covariates_keys.index(cov_key)
             cov_effect = dfs["cont_covariate_effect"].iloc[idx, gene_ids].values
             cov_effect_size = obs[cov_key].values.reshape(-1, 1) @ cov_effect.reshape(1, -1)  # torch, ncells * ngenes
-            
+
             cov_effect_sizes[cov_key] = cov_effect_size
-            
+
         # samples_log_gene_mean (directly choose from the original mean with the given index)
-        samples_log_gene_mean = dfs["log_gene_mean"].loc[gene_ids,].values.reshape(1,-1)
+        samples_log_gene_mean = dfs["log_gene_mean"].loc[gene_ids,].values.reshape(1, -1)
 
         # samples_log_gene_dispersion (directly choose from the original mean with the given index)
-        samples_log_gene_dispersion = dfs["log_gene_dispersion"].loc[gene_ids,].values.reshape(1,-1)       
+        samples_log_gene_dispersion = dfs["log_gene_dispersion"].loc[gene_ids,].values.reshape(1, -1)
 
         # mutiplicative noise
-        samples_multiplicative_noise = dfs["multiplicative_noise"].loc[gene_ids,].values.reshape(1,-1)
+        samples_multiplicative_noise = dfs["multiplicative_noise"].loc[gene_ids,].values.reshape(1, -1)
 
         # logit
         if simulate_distribution == "nb":
-            logits = torch.from_numpy(samples_log_gene_mean +  # base mean
-            #                          obs[size_factor_key].values.reshape(-1,1) +    # size factor
-                                      sum(cov_effect_sizes.values()) -  # covariate effect sizes
-                                      samples_log_gene_dispersion)  # torch.tensor, length = ngenes  # torch.tensor, length = ngenes
+            logits = torch.from_numpy(
+                samples_log_gene_mean  # base mean
+                +
+                #                          obs[size_factor_key].values.reshape(-1,1) +    # size factor
+                sum(cov_effect_sizes.values())  # covariate effect sizes
+                - samples_log_gene_dispersion
+            )  # torch.tensor, length = ngenes  # torch.tensor, length = ngenes
         elif simulate_distribution == "lnnb":
-            logits = torch.from_numpy(samples_log_gene_mean +  # base mean
-            #                          obs[size_factor_key].values.reshape(-1,1) +    # size factor
-                                      sum(cov_effect_sizes.values()) -  # covariate effect sizes
-                                      samples_log_gene_dispersion -
-                                      samples_multiplicative_noise**2 / 2)  # torch.tensor, length = ngenes
-        
+            logits = torch.from_numpy(
+                samples_log_gene_mean  # base mean
+                +
+                #                          obs[size_factor_key].values.reshape(-1,1) +    # size factor
+                sum(cov_effect_sizes.values())  # covariate effect sizes
+                - samples_log_gene_dispersion
+                - samples_multiplicative_noise**2 / 2
+            )  # torch.tensor, length = ngenes
+
         self.samples_log_gene_mean = samples_log_gene_mean
         self.samples_log_gene_dispersion = samples_log_gene_dispersion
         self.samples_multiplicative_noise = samples_multiplicative_noise
@@ -813,18 +828,22 @@ class Simulate_Data():
         if simulate_distribution == "nb":
             orig_means = (np.exp(logits) * total_count).detach().cpu().numpy()  # array, shape = (ncells, ngenes)
         elif simulate_distribution == "lnnb":
-            orig_means = (np.exp(logits + multiplicative_noise**2 / 2) * total_count).detach().cpu().numpy()  # array, shape = (ncells, ngenes)
+            orig_means = (
+                (np.exp(logits + multiplicative_noise**2 / 2) * total_count).detach().cpu().numpy()
+            )  # array, shape = (ncells, ngenes)
         orig_means_pert = orig_means * np.exp(log_pert_effect)
 
         correction_term = (read_depth) / (orig_means_pert.sum(axis=1))  # array, length = ncells
-        correction_term = correction_term.reshape(-1,1)  # this correction term already account for Size_Factor in simulation (derived from total UMIs)
+        correction_term = correction_term.reshape(
+            -1, 1
+        )  # this correction term already account for Size_Factor in simulation (derived from total UMIs)
 
         self.orig_means = orig_means
         self.correction_term = correction_term
         self.log_pert_effect = log_pert_effect
 
         return correction_term
-    
+
     def _get_log_mean_disp_slope(self):
         samples_log_gene_mean = self.samples_log_gene_mean.ravel()  # reshape array to be 1-dim for fitting
         samples_log_gene_dispersion = self.samples_log_gene_dispersion.ravel()  # reshape array to be 1-dim for fitting
@@ -840,7 +859,7 @@ class Simulate_Data():
         logits = self.logits
         slope = self.log_mean_disp_slope
 
-        logits_corrected = logits + (1 / (slope + 1)) * np.log(correction_term) 
+        logits_corrected = logits + (1 / (slope + 1)) * np.log(correction_term)
         self.logits_corrected = logits_corrected
 
         return logits_corrected
@@ -876,47 +895,49 @@ class Simulate_Data():
         chunks = []
         i = 1
         print(f"The data will be simulated with {math.ceil(ncells / chunk_size)} chunks.")
-        
+
         if simulate_distribution == "nb":
             print("simulate from NB")
             for start_row in range(0, ncells, chunk_size):
-                #print(f"Simulate chunk {i}.")
+                # print(f"Simulate chunk {i}.")
                 end_row = min(start_row + chunk_size, ncells)
                 logits_perturb_chunk = logits_perturb[start_row:end_row, :]
                 total_count_chunk = total_count_corrected[start_row:end_row, :]
-                simulate_chunk = dist.NegativeBinomial(logits=logits_perturb_chunk, 
-                                                       total_count=total_count_chunk)
-                
+                simulate_chunk = dist.NegativeBinomial(logits=logits_perturb_chunk, total_count=total_count_chunk)
+
                 data_simu_chunk = csr_matrix(simulate_chunk.sample())
                 chunks.append(data_simu_chunk)
 
                 i = i + 1
-                
+
         elif simulate_distribution == "lnnb":
             print("simulate from LNNB")
             for start_row in range(0, ncells, chunk_size):
-                #print(f"Simulate chunk {i}.")
+                # print(f"Simulate chunk {i}.")
                 end_row = min(start_row + chunk_size, ncells)
                 logits_perturb_chunk = logits_perturb[start_row:end_row, :]
                 total_count_chunk = total_count_corrected[start_row:end_row, :]
-                simulate_chunk = LogNormalNegativeBinomial(logits=logits_perturb_chunk, 
-                                                           total_count=total_count_chunk,
-                                                           multiplicative_noise_scale=multiplicative_noise)
+                simulate_chunk = LogNormalNegativeBinomial(
+                    logits=logits_perturb_chunk,
+                    total_count=total_count_chunk,
+                    multiplicative_noise_scale=multiplicative_noise,
+                )
 
                 data_simu_chunk = csr_matrix(simulate_chunk.sample())
                 chunks.append(data_simu_chunk)
 
                 i = i + 1
-        
+
         rna_sparse = vstack(chunks)
         self.rna_sparse = rna_sparse
-        
+
         end_time = time.time()
-        print(f"Simulating the expression count matrix of {ncells} cells over {ngenes} genes takes {end_time - start_time} secs.")
+        print(
+            f"Simulating the expression count matrix of {ncells} cells over {ngenes} genes takes {end_time - start_time} secs."
+        )
 
 
-
-class Support_Functions():
+class Support_Functions:
     def __init__(
         self,
         mdata: Optional[MuData] = None,
@@ -924,7 +945,7 @@ class Support_Functions():
         nguides_per_element: Optional[int] = None,
         read_depth: Optional[float] = None,
         lfc: Optional[float] = None,
-        ngenes: Optional[int] = None
+        ngenes: Optional[int] = None,
     ):
         """
         Parameters
@@ -949,9 +970,9 @@ class Support_Functions():
         guide_by_element_key: Optional[str] = "element_targeted",
         nguides_per_element: Optional[int] = 2,
         n_nonzero_trt_thresh: Optional[int] = 7,
-        n_nonzero_cntrl_thresh: Optional[int] = 7
+        n_nonzero_cntrl_thresh: Optional[int] = 7,
     ):
-        """ 
+        """
         Filter element-gene pairs based on the number of non-zero expressions of perturbed and unperturbed cells. simply change the value to 0 in element_tested if the pair does not pass the filtering.
 
         Parameters
@@ -972,27 +993,26 @@ class Support_Functions():
         if guide_by_element_key is None:
             print("Please indicate the correct guide_by_element_key.")
             return
-        
-        rna = mdata['rna'].X.toarray()
-        grna = mdata['grna'].X.toarray()
-        element = mdata['grna'].X @ mdata['grna'].varm[guide_by_element_key].toarray()
-        
+
+        rna = mdata["rna"].X.toarray()
+        grna = mdata["grna"].X.toarray()
+        element = mdata["grna"].X @ mdata["grna"].varm[guide_by_element_key].toarray()
+
         if gene_by_element_key is not None:
-            element_tested_array = mdata['rna'].varm[gene_by_element_key].toarray()
+            element_tested_array = mdata["rna"].varm[gene_by_element_key].toarray()
             element_tested_filtered = mdata["rna"].varm[gene_by_element_key].copy()
-        
+
         for col_element in range(element.shape[1]):
-            
-            # change the idx of element to gene            
+            # change the idx of element to gene
             cols = np.nonzero(element_tested_array[:, col_element] > 0)[0]
-            
+
             element_mask_1 = (element[:, col_element] >= 1).flatten()
             element_mask_0 = (element[:, col_element] == 0).flatten()
-            
+
             for col in cols:
                 # Extract the column from rna and convert to dense format
                 rna_col = rna[:, col].flatten()
-                #print(rna_col.shape)
+                # print(rna_col.shape)
 
                 # Condition 1: Number of non-zero values in 'rna' where 'element' has entry 1 should be >= n_nonzero_trt_thresh
                 condition_trt = np.sum(rna_col[element_mask_1] > 0) >= n_nonzero_trt_thresh
@@ -1010,33 +1030,29 @@ class Support_Functions():
 
         if gene_by_element_key is not None:
             mdata_filtered.mod["rna"].varm[gene_by_element_key] = element_tested_filtered
-            
+
             # compare number of pairs before and after sampling
             npairs_before = mdata["rna"].varm[gene_by_element_key].nnz
             npairs_after = mdata_filtered["rna"].varm[gene_by_element_key].nnz
             print(f"{npairs_after} element-gene pairs pass the filtering among all {npairs_before} pairs.")
-        
+
         return mdata_filtered
-    
+
     @staticmethod
-    def split_element_effects(
-        element_effects
-    ):
-        '''
+    def split_element_effects(element_effects):
+        """
         Split the element_effect_res dataframe into two positive control group and negative control group according to gene name.
-        '''
-        element_effects_negative_ctrl = element_effects[element_effects['element'].str.contains('ntc')]
-        element_effects_positive_ctrl = element_effects[~element_effects['element'].str.contains('ntc')]
-        element_effects_dict = {"negative_control": element_effects_negative_ctrl,
-                                "positive_control": element_effects_positive_ctrl}
+        """
+        element_effects_negative_ctrl = element_effects[element_effects["element"].str.contains("ntc")]
+        element_effects_positive_ctrl = element_effects[~element_effects["element"].str.contains("ntc")]
+        element_effects_dict = {
+            "negative_control": element_effects_negative_ctrl,
+            "positive_control": element_effects_positive_ctrl,
+        }
         return element_effects_dict
 
     @staticmethod
-    def get_alpha_empirical(
-        alpha: Optional[float] = 0.05,
-        test_side: Optional[str] = "both",
-        p_val_list = None
-    ):
+    def get_alpha_empirical(alpha: Optional[float] = 0.05, test_side: Optional[str] = "both", p_val_list=None):
         """
         Get the empirical alpha from the empirical p-values of the control pairs.
 
@@ -1055,21 +1071,19 @@ class Support_Functions():
             A value between 0-1
         """
         if test_side == "both":
-            alpha_empirical = p_val_list.quantile(alpha/2)
+            alpha_empirical = p_val_list.quantile(alpha / 2)
         elif test_side == "single":
             alpha_empirical = p_val_list.quantile(alpha)
-            
+
         return alpha_empirical
 
     @staticmethod
     def get_alpha_empirical_for_each_pair(
-        alpha: Optional[float] = 0.05,
-        test_side: Optional[str] = "both",
-        element_effects_split = None
+        alpha: Optional[float] = 0.05, test_side: Optional[str] = "both", element_effects_split=None
     ):
         """
         Get the empirical alpha from the empirical p-values of the control pairs.
-        
+
         Parameters
         -----------
         alpha
@@ -1087,31 +1101,29 @@ class Support_Functions():
         df_neg = element_effects_split["negative_control"].copy()
         df_pos = element_effects_split["positive_control"].copy()
         unique_genes = df_pos["gene"].unique()
-        
+
         alpha_empirical_list = [0] * len(unique_genes)
         for gene in unique_genes:
-            
             sub_df = df_neg[df_neg["gene"] == gene]
-            p_val_list = sub_df["q_value"]       
-            
+            p_val_list = sub_df["q_value"]
+
             if test_side == "both":
-                alpha_empirical = p_val_list.quantile(alpha/2)
+                alpha_empirical = p_val_list.quantile(alpha / 2)
             elif test_side == "single":
                 alpha_empirical = p_val_list.quantile(alpha)
-            
+
             gene_id = np.where(unique_genes == gene)[0][0]
             alpha_empirical_list[gene_id] = alpha_empirical
 
         df_pos["alpha_empirical"] = alpha_empirical_list
-        
+
         element_effects_split_modified = element_effects_split.copy()
         element_effects_split_modified["positive_control"] = df_pos
-        
+
         return element_effects_split_modified
-    
+
     @staticmethod
     def create_empty_list(method):
-
         list_dict = {
             "Gene_id": [],
             "Element_id": [],
@@ -1122,39 +1134,39 @@ class Support_Functions():
             "MeanReads": [],
             "LFC_hat": [],
             "P_value": [],
-            "alpha_cor": [], 
-            "Efficacy": [], 
-            "Method": [], 
-            "MTmethod": []
+            "alpha_cor": [],
+            "Efficacy": [],
+            "Method": [],
+            "MTmethod": [],
         }
         if method == "wilcoxon":
             del list_dict["LFC_hat"]
 
         return list_dict
-        
+
     @staticmethod
     def update_detailed_output(
-        list_dict = None,      # a dictionary of list that we will extend onto
-        element_effects = None, # an output table of the model, saving loc/z-value/p-vlaue of each tested element-gene pair
-        method = "perturbo",   # glm/SECPTRE/wilcoxo, when here is wilcoxon, then do not include LFC_hat_list
-        nguides_ntc = 200,
-        nguides_per_element = 4,
-        ngenes = 100,
-        gene_mean = None,      # a pd.Series of gene mean values, len = ngenes
-        gene_disp = None,      # a pd.Series of gene total_count values, len = ngenes
-        ncells_per_guide = 100,
-        lfc = 1,
-        mean_reads_per_gene = 5,
-        alpha_base = 0.05,     # write another function to create this
-        guide_efficacy_values = [1, 2/3, 1/3, 0],
-        MTmethod = "none",     # "none"/"FDR"/"FWER"
+        list_dict=None,  # a dictionary of list that we will extend onto
+        element_effects=None,  # an output table of the model, saving loc/z-value/p-vlaue of each tested element-gene pair
+        method="perturbo",  # glm/SECPTRE/wilcoxo, when here is wilcoxon, then do not include LFC_hat_list
+        nguides_ntc=200,
+        nguides_per_element=4,
+        ngenes=100,
+        gene_mean=None,  # a pd.Series of gene mean values, len = ngenes
+        gene_disp=None,  # a pd.Series of gene total_count values, len = ngenes
+        ncells_per_guide=100,
+        lfc=1,
+        mean_reads_per_gene=5,
+        alpha_base=0.05,  # write another function to create this
+        guide_efficacy_values=[1, 2 / 3, 1 / 3, 0],
+        MTmethod="none",  # "none"/"FDR"/"FWER"
     ):
         list_dict["Gene_id"].extend(element_effects["gene"])
         list_dict["Element_id"].extend(element_effects["element"])
         gene_id = element_effects["gene"]
-        #print(f"gene_id has length {len(gene_id)}")
+        # print(f"gene_id has length {len(gene_id)}")
 
-        #nelements_ntc = nguides_ntc // nguides_per_element
+        # nelements_ntc = nguides_ntc // nguides_per_element
         list_dict["Gene_Mean"].extend(gene_mean[gene_id])
         list_dict["Gene_Disp"].extend(gene_disp[gene_id])
 
@@ -1165,38 +1177,35 @@ class Support_Functions():
         list_dict["MeanReads"].extend([mean_reads_per_gene] * npairs)
 
         if method != "wilcoxon":
-            LFC_hats =  [x * np.log2(np.exp(1)) if x != None else None for x in element_effects["loc"]]
+            LFC_hats = [x * np.log2(np.exp(1)) if x != None else None for x in element_effects["loc"]]
             list_dict["LFC_hat"].extend(LFC_hats)
 
         list_dict["P_value"].extend(element_effects["q_value"])
 
         alpha_cor = Support_Functions.get_alpha_corrected(
-            alpha_base=alpha_base, 
-            MTmethod=MTmethod,
-            element_effects=element_effects,
-            ngenes=ngenes
+            alpha_base=alpha_base, MTmethod=MTmethod, element_effects=element_effects, ngenes=ngenes
         )
         list_dict["alpha_cor"].extend([alpha_cor] * npairs)
-        list_dict["Efficacy"].extend([str([round(x,2) for x in guide_efficacy_values])] * npairs)
+        list_dict["Efficacy"].extend([str([round(x, 2) for x in guide_efficacy_values])] * npairs)
         list_dict["Method"].extend([method] * npairs)
         list_dict["MTmethod"].extend([MTmethod] * npairs)
 
         return list_dict
-    
+
     @staticmethod
     def get_alpha_corrected(
-        alpha_base = 0.05,
-        MTmethod = "none",  # "none"/"FDR"/"FWER"
-        element_effects = None,
-        ngenes = 100
+        alpha_base=0.05,
+        MTmethod="none",  # "none"/"FDR"/"FWER"
+        element_effects=None,
+        ngenes=100,
     ):
         if MTmethod == "none":
             alpha_cor = alpha_base
         elif MTmethod == "FDR":
-            #pvals = element_effects.loc[0:ngenes, "q_value"]  # a list of p_values
+            # pvals = element_effects.loc[0:ngenes, "q_value"]  # a list of p_values
             pvals = element_effects[element_effects["element"].str.contains("gene")]["q_value"]
             pvals_no_an = pvals[~np.isnan(pvals)]
-            rejected, pvals_corrected, _, _ = multipletests(pvals_no_an, alpha=alpha_base, method='fdr_bh')
+            rejected, pvals_corrected, _, _ = multipletests(pvals_no_an, alpha=alpha_base, method="fdr_bh")
             alpha_cor = max(pvals_corrected[rejected]) if any(rejected) else alpha_base
         elif MTmethod == "FWER":
             alpha_cor = alpha_base / ngenes
@@ -1205,12 +1214,13 @@ class Support_Functions():
 
     @staticmethod
     def get_power_sum(
-        power_detail,        # a dataframes of power details
-        test_type = "fixed"  # "fixed"/"empirical"
+        power_detail,  # a dataframes of power details
+        group_columns,
+        test_type="fixed",  # "fixed"/"empirical"
     ):
         positive_pairs = power_detail[power_detail["Element_id"].str.contains("gene")]
         negative_pairs = power_detail[power_detail["Element_id"].str.contains("ntc")]
-        
+
         if test_type == "fixed":
             positive_pairs["significance"] = positive_pairs["P_value"] <= positive_pairs["alpha_cor"]
 
@@ -1221,30 +1231,34 @@ class Support_Functions():
             for _, pos_group in positive_pairs.groupby(group_columns):
                 # Get the same group from negative_pairs
                 neg_group = negative_pairs[
-                    (negative_pairs["NCellsPerGRNA"] == pos_group["NCellsPerGRNA"].iloc[0]) &
-                    (negative_pairs["LogFoldChange"] == pos_group["LogFoldChange"].iloc[0]) &
-                    (negative_pairs["MeanReads"] == pos_group["MeanReads"].iloc[0]) &
-                    (negative_pairs["Efficacy"] == pos_group["Efficacy"].iloc[0]) &
-                    (negative_pairs["Method"] == pos_group["Method"].iloc[0]) &
-                    (negative_pairs["MTmethod"] == pos_group["MTmethod"].iloc[0]) &
-                    (negative_pairs["alpha_cor"] == pos_group["alpha_cor"].iloc[0])
+                    (negative_pairs["NCellsPerGRNA"] == pos_group["NCellsPerGRNA"].iloc[0])
+                    & (negative_pairs["LogFoldChange"] == pos_group["LogFoldChange"].iloc[0])
+                    & (negative_pairs["MeanReads"] == pos_group["MeanReads"].iloc[0])
+                    & (negative_pairs["Efficacy"] == pos_group["Efficacy"].iloc[0])
+                    & (negative_pairs["Method"] == pos_group["Method"].iloc[0])
+                    & (negative_pairs["MTmethod"] == pos_group["MTmethod"].iloc[0])
+                    & (negative_pairs["alpha_cor"] == pos_group["alpha_cor"].iloc[0])
                 ]
-                
+
                 if not neg_group.empty:
                     # Step 2: Compute the k-quantile for the negative_pairs
                     k = pos_group["alpha_cor"].iloc[0]  # Since alpha_cor is unique within the group
                     alpha_emp = neg_group["P_value"].quantile(k)
-                    
+
                     # Step 3: Compare P_value with alpha_emp in positive_pairs and save the result
                     pos_group["significance"] = pos_group["P_value"] <= alpha_emp
-                    
+
                     # Append the result to the list
                     results.append(pos_group)
 
                 positive_pairs = pd.concat(results)
 
-        power_summary = (positive_pairs.groupby(["NCellsPerGRNA", "LogFoldChange", "MeanReads", "Efficacy", "Method", "MTmethod", "alpha_cor"])
-                                .agg(Power=("significance", "mean"))
-                                .reset_index())
+        power_summary = (
+            positive_pairs.groupby(
+                ["NCellsPerGRNA", "LogFoldChange", "MeanReads", "Efficacy", "Method", "MTmethod", "alpha_cor"]
+            )
+            .agg(Power=("significance", "mean"))
+            .reset_index()
+        )
 
         return power_summary
