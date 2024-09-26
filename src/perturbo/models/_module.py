@@ -90,7 +90,6 @@ class PerTurboPyroModule(PyroBaseModuleClass):
         self.n_genes = summary_stats.n_vars
         self.n_perturbations = summary_stats.n_perturbations
         self.n_cont_covariates = 1  # include (inferred) size factor as covariate always
-        self.n_element_effects = self.element_by_gene_idx.shape[1] if self.local_effects else 1
 
         self.discrete_sites = []
         if efficiency_mode == "mixture":
@@ -148,6 +147,7 @@ class PerTurboPyroModule(PyroBaseModuleClass):
             self.register_buffer("element_by_gene", gene_by_element.T)
             self.register_buffer("element_by_gene_idx", gene_by_element.T.to_sparse_coo().indices())
             # self.register_buffer("guide_by_gene_idx", (guide_by_element @ gene_by_element.T).to_sparse_coo().indices())
+        self.n_element_effects = self.element_by_gene_idx.shape[1] if self.local_effects else 1
 
         # global hyperparams
         self.register_buffer("zero", torch.tensor(0.0))
