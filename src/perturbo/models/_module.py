@@ -34,7 +34,7 @@ class PerTurboPyroModule(PyroBaseModuleClass):
         n_pert_factors=None,
         efficiency_mode: Literal["mixture", "scaled"] = "scaled",
         dispersion_effects=False,
-        use_interactions=False,
+        use_interactions=True,
         merge_guides_mode: Literal["partial", "shared"] = "partial",
         prior_param_dict: Optional[Mapping[str, torch.Tensor]] = None,
         **module_kwargs,
@@ -132,6 +132,7 @@ class PerTurboPyroModule(PyroBaseModuleClass):
 
         self.local_effects = gene_by_element is not None
         if self.local_effects:
+            self.register_buffer("element_by_gene", gene_by_element.T)
             if gene_by_element.shape[1] != self.n_elements:
                 raise ValueError("Number of inferred elements does not match gene_by_element matrix shape")
 
@@ -163,11 +164,8 @@ class PerTurboPyroModule(PyroBaseModuleClass):
         self.register_buffer("logit_efficacy_alpha", torch.tensor(5.0))
         self.register_buffer("logit_efficacy_beta", torch.tensor(1.0))
         self.register_buffer("has_guide_prior", torch.tensor(0.9))
-        self.register_buffer(
-            "spike_slab_prior_scales",
-            torch.tensor([1 - self.element_effects_prior_scale, self.element_effects_prior_scale]),
-        )
-        self.register_buffer("spike_slab_prior_probs", torch.tensor([0.001, 0.999]))
+        self.register_buffer("spike_slab_prior_scales", torch.tensor([1.0, 0.1]))
+        self.register_buffer("spike_slab_prior_probs", torch.tensor([0.01, 0.99]))
         self.register_buffer("cell_factor_prior_scale", torch.tensor(1.0))
         self.register_buffer("cell_loading_prior_scale", torch.tensor(0.1))
         self.register_buffer("pert_factor_prior_scale", torch.tensor(1.0))
@@ -284,7 +282,7 @@ class PerTurboPyroModule(PyroBaseModuleClass):
 
         # Sample dense or factorized perturbation effects
         if self.n_pert_factors is None:
-            element_effects = element_local_effects
+            element_factor_effects = 0
         else:
             with pert_factor_plate, element_plate:
                 pert_factors = pyro.sample(
@@ -305,7 +303,6 @@ class PerTurboPyroModule(PyroBaseModuleClass):
                     dist.Laplace(0.0, self.pert_loading_prior_scale),
                 )
             element_factor_effects = torch.einsum("fei,fjg->eg", pert_factors, pert_loadings)
-            element_effects = element_factor_effects + element_local_effects
 
         # Sample cell-specific factors (linear unobserved confounders) if using
         if self.n_factors is not None:
@@ -321,16 +318,22 @@ class PerTurboPyroModule(PyroBaseModuleClass):
                 )
             cell_factor_effects = torch.einsum("fci,fjg->cg", cell_factors, cell_loadings)
 
-            if self.use_interactions:
+            if self.use_interactions and self.n_pert_factors is not None:
                 with cell_factor_plate, element_plate:
                     pert_cell_factors = pyro.sample(
                         "pert_cell_factors",
                         dist.Laplace(0.0, self.cell_factor_prior_scale),
                     )
-                element_effects = torch.einsum("fei,fjg->eg", pert_cell_factors, cell_loadings) + element_effects
-
+                element_factor_effects = (
+                    torch.einsum("fei,fjg->eg", pert_cell_factors, cell_loadings) + element_factor_effects
+                )
         else:
             cell_factor_effects = 0
+
+        if self.local_effects:
+            element_effects = (1 - self.element_by_gene) * element_factor_effects + element_local_effects
+        else:
+            element_effects = element_factor_effects + element_local_effects
 
         # Account for cell-specific latent "perturbation status" variable(s)
         with cell_plate:
