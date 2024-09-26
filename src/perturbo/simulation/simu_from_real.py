@@ -1,3 +1,4 @@
+import math
 import os
 import time
 import warnings
@@ -17,11 +18,14 @@ import scvi
 import seaborn as sns
 import statsmodels.api as sm
 import torch
+from click import Option
 from mudata import MuData
+from pyparsing import Opt
 from scipy.optimize import curve_fit
 from scipy.sparse import coo_matrix, csr_matrix, eye, hstack, lil_matrix, vstack
 from scipy.sparse import random as sparse_random
 from scipy.stats import gamma, lognorm
+from statsmodels.stats.multitest import multipletests  # for FDR correction
 
 import perturbo
 
@@ -65,7 +69,8 @@ class Fit_PerTurbo:  # keep consistent with perturbo / pyro
         continuous_covariates_keys
             list of .obs keys within the RNA AnnData object containing other continuous covariates to be "regressed out"
         obs_continuous_covariates_keys
-            list of .obs keys within the RNA AnnData object that can be directly observed, corresponding to the continuous covariates        gene_by_element_key
+            list of .obs keys within the RNA AnnData object that can be directly observed, corresponding to the continuous covariates
+        gene_by_element_key
             .varm key within the RNA AnnData object containing a mask of which genes can be affected by which genetic elements
         guide_by_element_key
             .varm key within the perturbation AnnData object containing which perturbations target which genetic elements
@@ -134,11 +139,12 @@ class Fit_PerTurbo:  # keep consistent with perturbo / pyro
     @staticmethod
     def get_n_steps_static(
         mdata,
+        rna_modality="rna",
         max_steps: Optional[int] = 400,
     ):
         """Get number of training steps according to sample size. training steps decrease with increasing sample size."""
         n_steps = min(
-            max_steps, round(max_steps * (20000 / mdata[self.rna_layer].X.shape[0]))
+            max_steps, round(max_steps * (20000 / mdata[rna_modality].X.shape[0]))
         )  # if ncells > 20000 then n_steps decay
         n_steps = max(n_steps, 1)
 
@@ -284,6 +290,9 @@ class Fit_PerTurbo:  # keep consistent with perturbo / pyro
         # Create n_plots number of subplots
         fig, axes = plt.subplots(1, n_plots, figsize=(12, 5))
 
+        if n_plots == 1:
+            axes = [axes]  # Convert single Axes object to a list for consistent indexing
+
         i = 0
         for obs_key in self.obs_continuous_covariates_keys:
             data = self.mdata_train[self.rna_layer].obs[obs_key]  # Your data for the histogram
@@ -367,10 +376,20 @@ class Simulate_Data:
         self.df_dir_base = df_dir_base
         self.mdata_name = mdata_name
         self.estimator_type = estimator_type
+        self.batch_key = batch_key
         self.library_size_key = library_size_key
         self.size_factor_key = size_factor_key
-        self.read_depth_key = read_depth_key
-        self.Size_Factor_key = Size_Factor_key
+        if read_depth_key == None:
+            self.read_depth_key = library_size_key
+        else:
+            self.read_depth_key = (
+                read_depth_key  # in case it records total_umis, different from library_size (e.g. Gasperini_atscale)
+            )
+        if Size_Factor_key == None:
+            self.Size_Factor_key = size_factor_key
+        else:
+            self.Size_Factor_key = Size_Factor_key
+        self.Size_Factor_key = Size_Factor_key  # Size_Factor computed from read_depth that is considered in cont_cov but should not be directly sampled (e.g. Gasperini_atscale)
         self.continuous_covariates_keys = continuous_covariates_keys
         self.obs_continuous_covariates_keys = obs_continuous_covariates_keys
         self.guide_by_element_key = guide_by_element_key
@@ -465,9 +484,10 @@ class Simulate_Data:
 
         grna_modality = md.AnnData(self.grna_data)
         grna_modality.var_names = self.guide_names
-        grna_modality.varm[self.guide_by_element_key] = self.element_targeted
+        if self.guide_by_element_key is not None:
+            grna_modality.varm[self.guide_by_element_key] = self.element_targeted
 
-        grna_modality.uns[self.guide_by_element_key] = self.element_targeted_df
+            grna_modality.uns[self.guide_by_element_key] = self.element_targeted_df
         grna_modality.uns["guide_efficacy"] = self.guide_efficacy_values
         grna_modality.uns["elements"] = np.array(self.element_names)
 
@@ -488,6 +508,9 @@ class Simulate_Data:
         if self.read_depth_key is not None:
             rna_modality.obs[self.read_depth_key] = rna_modality.X.sum(axis=1)  # add the library size obs
             log_cpm = np.log(rna_modality.obs[self.read_depth_key] / 1e6)
+        else:
+            self.read_depth_key = self.library_size_key
+
         if self.Size_Factor_key is not None:
             rna_modality.obs[self.Size_Factor_key] = log_cpm - np.mean(log_cpm)
 
@@ -496,13 +519,15 @@ class Simulate_Data:
         rna_modality.var["gene_mean_perturbed"] = (np.exp(self.logits_perturb) * self.total_count).mean(axis=0)
 
         rna_modality.var_names = self.gene_names
-        rna_modality.varm[self.gene_by_element_key] = self.element_tested.transpose()
+        if self.gene_by_element_key is not None:
+            rna_modality.varm[self.gene_by_element_key] = self.element_tested.transpose()
 
-        rna_modality.uns[self.gene_by_element_key] = self.element_tested_df
+            rna_modality.uns[self.gene_by_element_key] = self.element_tested_df
         rna_modality.uns["elements"] = np.array(self.element_names)
 
         # Construct mudata
         mdata = md.MuData({"rna": rna_modality, "grna": grna_modality})
+        print(mdata)
 
         simulated_read_depth = mdata["rna"].obs[self.read_depth_key]
         print(
@@ -643,7 +668,6 @@ class Simulate_Data:
             element_tested_ntc_dense = np.ones((nelements_ntc, ngenes))
             element_tested_ntc = csr_matrix(element_tested_ntc_dense)
             self.element_tested_ntc = element_tested_ntc
-
             element_tested = vstack([element_tested_pos, element_tested_ntc])
 
         self.element_tested = element_tested
@@ -723,8 +747,8 @@ class Simulate_Data:
         simulate_distribution = self.simulate_distribution
 
         # put size_factor in the last position of continuous covariates
-        if size_factor_key not in continuous_covariates_keys:
-            continuous_covariates_keys = continuous_covariates_keys + [size_factor_key]
+        # if size_factor_key not in continuous_covariates_keys:
+        #    continuous_covariates_keys = continuous_covariates_keys + [size_factor_key]
 
         # Get covariate effects
         cov_effect_sizes = {}
@@ -752,15 +776,17 @@ class Simulate_Data:
         if simulate_distribution == "nb":
             logits = torch.from_numpy(
                 samples_log_gene_mean  # base mean
-                + obs[size_factor_key].values.reshape(-1, 1)  # size factor
-                + sum(cov_effect_sizes.values())  # covariate effect sizes
+                +
+                #                          obs[size_factor_key].values.reshape(-1,1) +    # size factor
+                sum(cov_effect_sizes.values())  # covariate effect sizes
                 - samples_log_gene_dispersion
             )  # torch.tensor, length = ngenes  # torch.tensor, length = ngenes
         elif simulate_distribution == "lnnb":
             logits = torch.from_numpy(
                 samples_log_gene_mean  # base mean
-                + obs[size_factor_key].values.reshape(-1, 1)  # size factor
-                + sum(cov_effect_sizes.values())  # covariate effect sizes
+                +
+                #                          obs[size_factor_key].values.reshape(-1,1) +    # size factor
+                sum(cov_effect_sizes.values())  # covariate effect sizes
                 - samples_log_gene_dispersion
                 - samples_multiplicative_noise**2 / 2
             )  # torch.tensor, length = ngenes
@@ -793,12 +819,10 @@ class Simulate_Data:
         ngenes = self.ngenes
         grna_data = self.grna_data
         simulate_distribution = self.simulate_distribution
-
         total_perturbation_effect = self._get_total_perturbation_effect()
         logits = self.logits
         total_count = self.total_count
         multiplicative_noise = self.multiplicative_noise
-
         log_pert_effect = grna_data @ total_perturbation_effect  # the perturbation matrix added to log_mean
 
         if simulate_distribution == "nb":
@@ -870,12 +894,12 @@ class Simulate_Data:
         start_time = time.time()
         chunks = []
         i = 1
-        print(f"The data will be simulated with {round(ncells / chunk_size)} chunks.")
+        print(f"The data will be simulated with {math.ceil(ncells / chunk_size)} chunks.")
 
         if simulate_distribution == "nb":
             print("simulate from NB")
             for start_row in range(0, ncells, chunk_size):
-                print(f"Simulate chunk {i}.")
+                # print(f"Simulate chunk {i}.")
                 end_row = min(start_row + chunk_size, ncells)
                 logits_perturb_chunk = logits_perturb[start_row:end_row, :]
                 total_count_chunk = total_count_corrected[start_row:end_row, :]
@@ -889,7 +913,7 @@ class Simulate_Data:
         elif simulate_distribution == "lnnb":
             print("simulate from LNNB")
             for start_row in range(0, ncells, chunk_size):
-                print(f"Simulate chunk {i}.")
+                # print(f"Simulate chunk {i}.")
                 end_row = min(start_row + chunk_size, ncells)
                 logits_perturb_chunk = logits_perturb[start_row:end_row, :]
                 total_count_chunk = total_count_corrected[start_row:end_row, :]
@@ -966,12 +990,17 @@ class Support_Functions:
         mdata_filtered
             a MuData object, whose main matrix of the "grna" have filtered columns, and 'element_test' in "rna" have filtered columns
         """
+        if guide_by_element_key is None:
+            print("Please indicate the correct guide_by_element_key.")
+            return
+
         rna = mdata["rna"].X.toarray()
         grna = mdata["grna"].X.toarray()
         element = mdata["grna"].X @ mdata["grna"].varm[guide_by_element_key].toarray()
 
-        element_tested_array = mdata["rna"].varm[gene_by_element_key].toarray()
-        element_tested_filtered = mdata["rna"].varm[gene_by_element_key].copy()
+        if gene_by_element_key is not None:
+            element_tested_array = mdata["rna"].varm[gene_by_element_key].toarray()
+            element_tested_filtered = mdata["rna"].varm[gene_by_element_key].copy()
 
         for col_element in range(element.shape[1]):
             # change the idx of element to gene
@@ -998,12 +1027,14 @@ class Support_Functions:
         # Create filtered rna & grna modality
         mdata_filtered = mdata.copy()
         element_tested_filtered.eliminate_zeros()
-        mdata_filtered.mod["rna"].varm[gene_by_element_key] = element_tested_filtered
 
-        # compare number of pairs before and after sampling
-        npairs_before = mdata["rna"].varm[gene_by_element_key].nnz
-        npairs_after = mdata_filtered["rna"].varm[gene_by_element_key].nnz
-        print(f"{npairs_after} element-gene pairs pass the filtering among all {npairs_before} pairs.")
+        if gene_by_element_key is not None:
+            mdata_filtered.mod["rna"].varm[gene_by_element_key] = element_tested_filtered
+
+            # compare number of pairs before and after sampling
+            npairs_before = mdata["rna"].varm[gene_by_element_key].nnz
+            npairs_after = mdata_filtered["rna"].varm[gene_by_element_key].nnz
+            print(f"{npairs_after} element-gene pairs pass the filtering among all {npairs_before} pairs.")
 
         return mdata_filtered
 
@@ -1090,3 +1121,144 @@ class Support_Functions:
         element_effects_split_modified["positive_control"] = df_pos
 
         return element_effects_split_modified
+
+    @staticmethod
+    def create_empty_list(method):
+        list_dict = {
+            "Gene_id": [],
+            "Element_id": [],
+            "Gene_Mean": [],
+            "Gene_Disp": [],
+            "NCellsPerGRNA": [],
+            "LogFoldChange": [],
+            "MeanReads": [],
+            "LFC_hat": [],
+            "P_value": [],
+            "alpha_cor": [],
+            "Efficacy": [],
+            "Method": [],
+            "MTmethod": [],
+        }
+        if method == "wilcoxon":
+            del list_dict["LFC_hat"]
+
+        return list_dict
+
+    @staticmethod
+    def update_detailed_output(
+        list_dict=None,  # a dictionary of list that we will extend onto
+        element_effects=None,  # an output table of the model, saving loc/z-value/p-vlaue of each tested element-gene pair
+        method="perturbo",  # glm/SECPTRE/wilcoxo, when here is wilcoxon, then do not include LFC_hat_list
+        nguides_ntc=200,
+        nguides_per_element=4,
+        ngenes=100,
+        gene_mean=None,  # a pd.Series of gene mean values, len = ngenes
+        gene_disp=None,  # a pd.Series of gene total_count values, len = ngenes
+        ncells_per_guide=100,
+        lfc=1,
+        mean_reads_per_gene=5,
+        alpha_base=0.05,  # write another function to create this
+        guide_efficacy_values=[1, 2 / 3, 1 / 3, 0],
+        MTmethod="none",  # "none"/"FDR"/"FWER"
+    ):
+        list_dict["Gene_id"].extend(element_effects["gene"])
+        list_dict["Element_id"].extend(element_effects["element"])
+        gene_id = element_effects["gene"]
+        # print(f"gene_id has length {len(gene_id)}")
+
+        # nelements_ntc = nguides_ntc // nguides_per_element
+        list_dict["Gene_Mean"].extend(gene_mean[gene_id])
+        list_dict["Gene_Disp"].extend(gene_disp[gene_id])
+
+        # add some fixed parameters to the table
+        npairs = len(element_effects["gene"])  # number of pairs passed filtering
+        list_dict["NCellsPerGRNA"].extend([ncells_per_guide] * npairs)
+        list_dict["LogFoldChange"].extend([lfc] * npairs)
+        list_dict["MeanReads"].extend([mean_reads_per_gene] * npairs)
+
+        if method != "wilcoxon":
+            LFC_hats = [x * np.log2(np.exp(1)) if x != None else None for x in element_effects["loc"]]
+            list_dict["LFC_hat"].extend(LFC_hats)
+
+        list_dict["P_value"].extend(element_effects["q_value"])
+
+        alpha_cor = Support_Functions.get_alpha_corrected(
+            alpha_base=alpha_base, MTmethod=MTmethod, element_effects=element_effects, ngenes=ngenes
+        )
+        list_dict["alpha_cor"].extend([alpha_cor] * npairs)
+        list_dict["Efficacy"].extend([str([round(x, 2) for x in guide_efficacy_values])] * npairs)
+        list_dict["Method"].extend([method] * npairs)
+        list_dict["MTmethod"].extend([MTmethod] * npairs)
+
+        return list_dict
+
+    @staticmethod
+    def get_alpha_corrected(
+        alpha_base=0.05,
+        MTmethod="none",  # "none"/"FDR"/"FWER"
+        element_effects=None,
+        ngenes=100,
+    ):
+        if MTmethod == "none":
+            alpha_cor = alpha_base
+        elif MTmethod == "FDR":
+            # pvals = element_effects.loc[0:ngenes, "q_value"]  # a list of p_values
+            pvals = element_effects[element_effects["element"].str.contains("gene")]["q_value"]
+            pvals_no_an = pvals[~np.isnan(pvals)]
+            rejected, pvals_corrected, _, _ = multipletests(pvals_no_an, alpha=alpha_base, method="fdr_bh")
+            alpha_cor = max(pvals_corrected[rejected]) if any(rejected) else alpha_base
+        elif MTmethod == "FWER":
+            alpha_cor = alpha_base / ngenes
+
+        return alpha_cor
+
+    @staticmethod
+    def get_power_sum(
+        power_detail,  # a dataframes of power details
+        group_columns,
+        test_type="fixed",  # "fixed"/"empirical"
+    ):
+        positive_pairs = power_detail[power_detail["Element_id"].str.contains("gene")]
+        negative_pairs = power_detail[power_detail["Element_id"].str.contains("ntc")]
+
+        if test_type == "fixed":
+            positive_pairs["significance"] = positive_pairs["P_value"] <= positive_pairs["alpha_cor"]
+
+        elif test_type == "empirical":
+            results = []
+
+            # Loop through each unique combination of values in the specified columns
+            for _, pos_group in positive_pairs.groupby(group_columns):
+                # Get the same group from negative_pairs
+                neg_group = negative_pairs[
+                    (negative_pairs["NCellsPerGRNA"] == pos_group["NCellsPerGRNA"].iloc[0])
+                    & (negative_pairs["LogFoldChange"] == pos_group["LogFoldChange"].iloc[0])
+                    & (negative_pairs["MeanReads"] == pos_group["MeanReads"].iloc[0])
+                    & (negative_pairs["Efficacy"] == pos_group["Efficacy"].iloc[0])
+                    & (negative_pairs["Method"] == pos_group["Method"].iloc[0])
+                    & (negative_pairs["MTmethod"] == pos_group["MTmethod"].iloc[0])
+                    & (negative_pairs["alpha_cor"] == pos_group["alpha_cor"].iloc[0])
+                ]
+
+                if not neg_group.empty:
+                    # Step 2: Compute the k-quantile for the negative_pairs
+                    k = pos_group["alpha_cor"].iloc[0]  # Since alpha_cor is unique within the group
+                    alpha_emp = neg_group["P_value"].quantile(k)
+
+                    # Step 3: Compare P_value with alpha_emp in positive_pairs and save the result
+                    pos_group["significance"] = pos_group["P_value"] <= alpha_emp
+
+                    # Append the result to the list
+                    results.append(pos_group)
+
+                positive_pairs = pd.concat(results)
+
+        power_summary = (
+            positive_pairs.groupby(
+                ["NCellsPerGRNA", "LogFoldChange", "MeanReads", "Efficacy", "Method", "MTmethod", "alpha_cor"]
+            )
+            .agg(Power=("significance", "mean"))
+            .reset_index()
+        )
+
+        return power_summary
