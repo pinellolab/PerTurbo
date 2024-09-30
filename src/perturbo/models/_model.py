@@ -1,5 +1,5 @@
 import logging
-from typing import Optional, Union
+from typing import List, Optional, Union
 
 import numpy as np
 import pandas as pd
@@ -26,6 +26,7 @@ from ._constants import REGISTRY_KEYS
 from ._module import PerTurboPyroModule
 
 logger = logging.getLogger(__name__)
+MAX_PERTURBATION_LAYERS = 8
 
 
 class PERTURBO(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
@@ -97,6 +98,7 @@ class PERTURBO(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
         library_size_key: Optional[str] = None,
         size_factor_key: Optional[str] = None,
         continuous_covariates_keys: Optional[str] = None,
+        perturbation_layers: Optional[List[str]] = None,
         **kwargs,
     ):
         setup_method_args = cls._get_setup_method_args(**locals())
@@ -107,6 +109,13 @@ class PERTURBO(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
             fields.NumericalObsField(REGISTRY_KEYS.SIZE_FACTOR_KEY, size_factor_key, required=False),
             fields.NumericalJointObsField(REGISTRY_KEYS.CONT_COVS_KEY, continuous_covariates_keys),
         ]
+        if perturbation_layers is not None:
+            assert len(perturbation_layers) <= MAX_PERTURBATION_LAYERS
+            for i, layer in enumerate(perturbation_layers):
+                anndata_fields.append(
+                    fields.LayerField(REGISTRY_KEYS.PERTURBATION_KEY + "_" + str(i), layer, is_count_data=True)
+                )
+
         # add library size if not present
         if library_size_key is None:
             library_size_key = "_library_size"
