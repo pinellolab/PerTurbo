@@ -30,11 +30,11 @@ class PerTurboPyroModule(PyroBaseModuleClass):
         gene_by_element: torch.Tensor | None = None,
         likelihood: Literal["nb", "lnnb"] = "nb",
         effect_prior_dist: Literal["cauchy", "normal_mixture", "normal", "laplace"] = "normal",
-        n_factors=None,
-        n_pert_factors=None,
-        use_interactions=True,
+        n_factors: int | None = None,
+        n_pert_factors: int | None = None,
+        use_interactions: bool = True,
         efficiency_mode: Literal["mixture", "scaled"] = "scaled",
-        dispersion_effects=False,
+        dispersion_effects: bool = False,
         merge_guides_mode: Literal["partial", "shared"] = "partial",
         prior_param_dict: Mapping[str, torch.Tensor] | None = None,
         **module_kwargs,
@@ -140,7 +140,6 @@ class PerTurboPyroModule(PyroBaseModuleClass):
 
         # guide_by_element encoding
         self.register_buffer("guide_by_element", guide_by_element)
-        # self.register_buffer("guide_by_element", guide_by_element.to_sparse_coo())
 
         if self.local_effects:
             assert gene_by_element.shape[1] == self.n_elements
@@ -151,6 +150,7 @@ class PerTurboPyroModule(PyroBaseModuleClass):
 
         # global hyperparams
         self.register_buffer("zero", torch.tensor(0.0))
+        self.register_buffer("one", torch.tensor(1.0))
 
         # per-gene hyperparams
         if gene_summary_stats is not None:
@@ -283,7 +283,7 @@ class PerTurboPyroModule(PyroBaseModuleClass):
 
         # Pool guide information based on user-specified strategy
         if self.merge_guides_mode == "shared":
-            guide_efficacy_values = torch.ones((self.n_perturbations, 1))
+            guide_efficacy_values = self.one.expand((self.n_perturbations, 1))
         else:
             with guide_plate:
                 guide_efficacy_values = pyro.sample(
