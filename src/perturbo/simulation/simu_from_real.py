@@ -150,7 +150,12 @@ class Fit_PerTurbo:  # keep consistent with perturbo / pyro
 
         return n_steps
 
-    def get_model(self, likelihood: Optional[str] = None):
+    def get_model(
+        self, 
+        likelihood: Optional[str] = None, 
+        effect_prior_dist="cauchy",   # "cauchy" | "normal_mixture" | "normal"
+        efficiency_mode="scaled"      # "scaled" | "mixture"
+    ):
         """Get a model object (as in pyro) that could be trained."""
         # register data with perturbo
         perturbo.models.PERTURBO.setup_mudata(
@@ -164,7 +169,7 @@ class Fit_PerTurbo:  # keep consistent with perturbo / pyro
             rna_element_uns_key=self.rna_element_uns_key,  # <------------ what is this?
             modalities=self.modalities,
         )
-        model = perturbo.models.PERTURBO(self.mdata_train, likelihood=likelihood, n_factors=None)
+        model = perturbo.models.PERTURBO(self.mdata_train, likelihood=likelihood, effect_prior_dist=effect_prior_dist, efficiency_mode=efficiency_mode, n_factors=None)
 
         self.model = model
         return model
@@ -379,12 +384,11 @@ class Simulate_Data:
         self.batch_key = batch_key
         self.library_size_key = library_size_key
         self.size_factor_key = size_factor_key
-        if read_depth_key == None:
+        if read_depth_key is None:
             self.read_depth_key = library_size_key
         else:
-            self.read_depth_key = (
-                read_depth_key  # in case it records total_umis, different from library_size (e.g. Gasperini_atscale)
-            )
+            self.read_depth_key = read_depth_key  # in case it records total_umis, different from library_size (e.g. Gasperini_atscale)
+
         if Size_Factor_key == None:
             self.Size_Factor_key = size_factor_key
         else:
@@ -420,14 +424,18 @@ class Simulate_Data:
         dfs = self.dfs
 
         total_genes = dfs["log_gene_mean"].shape[0]
+        if self.batch_key is not None:
+            total_batches = dfs["batch_effect"].shape[0]
 
         self.total_genes = total_genes
+        self.total_batches = total_batches
 
     def sample_mudata(
         self,
         simulate_distribution: Optional[str] = "lnnb",
         ncells: Optional[int] = 200000,
         ngenes: Optional[int] = 100,
+        nbatches: Optional[int] = 1,      # number of experimental batches
         nguides_pos: Optional[int] = None,  # number of guides targeting elements that affect genes
         nguides_per_element: Optional[int] = 4,  # number of guides per element (that affects a gene)
         nguides_ntc: Optional[int] = 100,  # number of control guides
@@ -452,6 +460,7 @@ class Simulate_Data:
         self.simulate_distribution = simulate_distribution
         self.ncells = ncells
         self.ngenes = ngenes
+        self.nbatches = nbatches
         self.nguides_pos = nguides_pos
         self.nguides_per_element = nguides_per_element
         self.nguides_ntc = nguides_ntc
@@ -505,6 +514,7 @@ class Simulate_Data:
         self._sample_rna()
 
         rna_modality = md.AnnData(self.rna_sparse, obs=self.obs, uns={"fold_change": round(np.exp(lfc), 2)})
+
         if self.read_depth_key is not None:
             rna_modality.obs[self.read_depth_key] = rna_modality.X.sum(axis=1)  # add the library size obs
             log_cpm = np.log(rna_modality.obs[self.read_depth_key] / 1e6)
@@ -566,6 +576,28 @@ class Simulate_Data:
         self.guide_names_ntc = ["ntc_g" + str(j) for j in range(self.nguides_ntc)]
         self.guide_names = self.guide_names_pos + self.guide_names_ntc
 
+    def _create_batch_list(self):
+
+        ncells = self.ncells
+        nbatches = self.nbatches
+        total_batches = self.total_batches
+
+        # Step 1: Create a list with ncells/n occurrences of each "batch_i"
+        batch_ids = np.random.choice(range(total_batches), size=nbatches, replace=True)  # randomly selected index of batches from existing batch numbers
+        batch_list = []
+        for i in batch_ids:
+            batch_list.extend([f"batch_{i}"] * (ncells // nbatches))
+        
+        # Step 2: Handle any remaining cells (in case ncells is not perfectly divisible by n)
+        remaining = ncells % nbatches
+        for i in range(remaining):
+            batch_list.append(f"batch_{i}")
+        
+        # Step 3: Shuffle the list to randomize the order
+        np.random.shuffle(batch_list)
+        
+        return batch_list
+
     def _sample_obs(self):
         """Generate for .obs for RNA modality. A dataframe, each column is a obs, with ncells rows."""
         df = self.df
@@ -578,7 +610,7 @@ class Simulate_Data:
         obs = pd.DataFrame()
 
         # batch number
-        prep_batch = np.full(ncells, "batch_1")
+        prep_batch = self._create_batch_list()
         obs[batch_key] = prep_batch
 
         # other obs
@@ -737,9 +769,37 @@ class Simulate_Data:
 
         return gene_ids
 
+    def _get_batch_effect(self):  
+        '''Out put should have shape (ncells, ngenes)'''
+
+        obs = self.obs
+        dfs = self.dfs
+        gene_ids = self._get_random_indices()
+        batch_key = self.batch_key
+        total_batches = self.total_batches
+        nbatches = self.nbatches
+        ncells = self.ncells
+
+        # get random batch ids for selecting corresponding batch effects from real_world data
+        #batch_ids = np.random.choice(range(total_batches), size=nbatches, replace=True)
+
+        # One-hot encode batch number
+        one_hot_matrix = np.zeros((ncells, total_batches), dtype=int)
+        batch_mapping = {f"batch_{i}": i for i in range(total_batches)}
+        batch_list = obs[batch_key]
+
+        for i, batch in enumerate(obs[batch_key]):
+            col_idx = batch_mapping[batch]
+            one_hot_matrix[i, col_idx] = 1
+
+        batch_effect_sizes = one_hot_matrix.reshape(-1, total_batches) @ dfs["batch_effect"].iloc[:, gene_ids].values.reshape(total_batches, -1)
+
+        return batch_effect_sizes
+
     def _get_logits(self):
         """Get the raw logits matrix. A torch.tensor, with ncells rows, ngenes cols."""
         size_factor_key = self.size_factor_key
+        batch_key = self.batch_key
         continuous_covariates_keys = self.continuous_covariates_keys
         dfs = self.dfs
         gene_ids = self._get_random_indices()
@@ -762,6 +822,10 @@ class Simulate_Data:
             cov_effect_size = obs[cov_key].values.reshape(-1, 1) @ cov_effect.reshape(1, -1)  # torch, ncells * ngenes
 
             cov_effect_sizes[cov_key] = cov_effect_size
+
+        if batch_key is not None:
+            batch_effect_sizes = self._get_batch_effect()
+            cov_effect_sizes[batch_key] = batch_effect_sizes
 
         # samples_log_gene_mean (directly choose from the original mean with the given index)
         samples_log_gene_mean = dfs["log_gene_mean"].loc[gene_ids,].values.reshape(1, -1)
@@ -993,7 +1057,7 @@ class Support_Functions:
         if guide_by_element_key is None:
             print("Please indicate the correct guide_by_element_key.")
             return
-
+        
         rna = mdata["rna"].X.toarray()
         grna = mdata["grna"].X.toarray()
         element = mdata["grna"].X @ mdata["grna"].varm[guide_by_element_key].toarray()
