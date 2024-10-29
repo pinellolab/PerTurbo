@@ -14,6 +14,8 @@ class _REGISTRY_KEYS_NT(NamedTuple):
     PERTURBATION_KEY: str = "perturbations"
     OBSERVED_LIB_SIZE: str = "observed_lib_size"
     GENE_SUMMARY_STATS: str = "gene_summary_stats"
+    GENE_MEAN_KEY: str = "gene_mean"
+    LFC_KEY: str = "log_fold_change"
 
 
 REGISTRY_KEYS = _REGISTRY_KEYS_NT()

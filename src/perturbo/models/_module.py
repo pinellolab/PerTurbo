@@ -7,7 +7,7 @@ import torch
 from pandas import DataFrame
 from pyro import poutine
 from pyro.infer import config_enumerate
-from pyro.infer.autoguide import AutoDelta, AutoGuideList, AutoNormal, init_to_median
+from pyro.infer.autoguide import AutoDelta, AutoGuideList, AutoNormal, init_to_median, init_to_value
 from scvi.module.base import PyroBaseModuleClass
 
 from ._constants import REGISTRY_KEYS
@@ -25,7 +25,8 @@ class PerTurboPyroModule(PyroBaseModuleClass):
     def __init__(
         self,
         summary_stats,
-        gene_summary_stats: DataFrame | None = None,
+        gene_mean: torch.Tensor | None = None,
+        beta_hat: torch.Tensor | None = None,
         guide_by_element: torch.Tensor | None = None,
         gene_by_element: torch.Tensor | None = None,
         likelihood: Literal["nb", "lnnb"] = "nb",
@@ -108,30 +109,44 @@ class PerTurboPyroModule(PyroBaseModuleClass):
         #     self.n_cat_covariates = summary_stats.n_extra_categorical_covs
         #     self.n_cat_list = n_cats_per_cov
         # else:
-        #     self.n_cat_covariates = 0
+        #     self.n_cat_covariates =
         #     self.n_cat_list = []
         self.n_batches = summary_stats.n_batch
 
-        delta_sites = ["cell_factors", "cell_loadings"]
+        # delta_sites = ["cell_factors", "cell_loadings"]
         delta_sites = []
         self._guide = AutoGuideList(self.model, create_plates=self.create_plates)
+        log_mean = torch.log(torch.tensor(gene_mean) + 1e-4).squeeze()
+        n_guides_per_element = torch.maximum(torch.tensor(1.0), guide_by_element.mean(axis=0, keepdim=True))
+        element_beta_hat = (torch.tensor(beta_hat).T @ (guide_by_element / n_guides_per_element)).T
+        assert not torch.any(torch.isnan(element_beta_hat))
+        # TODO: FIX THIS UGLY MESS
+        init_values = {
+            "element_effects": element_beta_hat,
+            "log_gene_mean": log_mean,
+            "log_gene_dispersion": log_mean,
+        }
+        if self.local_effects:
+            init_values.pop("element_effects")
+        # raise Exception(init_values["log_gene_mean"].shape)
+
         self._guide.append(
             AutoNormal(
                 poutine.block(self.model, hide=["element_effects"] + delta_sites + self.discrete_sites),
-                init_loc_fn=lambda x: init_to_median(x, num_samples=100),
+                init_loc_fn=init_to_value(values=init_values, fallback=init_to_median(num_samples=100)),
                 init_scale=0.1,
             )
         )
         self._guide.append(
             AutoDelta(
                 poutine.block(self.model, expose=delta_sites),
-                init_loc_fn=lambda x: init_to_median(x, num_samples=100),
+                init_loc_fn=init_to_median(num_samples=100),
             )
         )
         self._guide.append(
             AutoNormal(
                 poutine.block(self.model, expose="element_effects"),
-                init_loc_fn=lambda x: init_to_median(x, num_samples=100),
+                init_loc_fn=init_to_value(values=init_values, fallback=init_to_median(num_samples=100)),
                 init_scale=0.05,
             )
         )
@@ -153,14 +168,14 @@ class PerTurboPyroModule(PyroBaseModuleClass):
         self.register_buffer("one", torch.tensor(1.0))
 
         # per-gene hyperparams
-        if gene_summary_stats is not None:
-            e_x = gene_summary_stats["_gene_mean"].values
-            epsilon = 1e-6
-            self.register_buffer("gene_mean_prior_loc", torch.tensor(e_x + epsilon).log())
-            self.register_buffer("gene_disp_prior_loc", torch.tensor(1.0))
-        else:
-            self.register_buffer("gene_mean_prior_loc", torch.tensor(0.0))
-            self.register_buffer("gene_disp_prior_loc", torch.tensor(0.0))
+        # if gene_mean is not None:
+        #     # e_x = gene_summary_stats["_gene_mean"].values
+        #     epsilon = 1e-6
+        #     self.register_buffer("gene_mean_prior_loc", torch.tensor(gene_mean + epsilon).log())
+        #     self.register_buffer("gene_disp_prior_loc", torch.tensor(1.0))
+        # else:
+        self.register_buffer("gene_mean_prior_loc", torch.tensor(0.0))
+        self.register_buffer("gene_disp_prior_loc", torch.tensor(0.0))
 
         self.register_buffer("gene_mean_prior_scale", torch.tensor(3.0))
         self.register_buffer("gene_disp_prior_scale", torch.tensor(3.0))
@@ -284,14 +299,24 @@ class PerTurboPyroModule(PyroBaseModuleClass):
         # Pool guide information based on user-specified strategy
         if self.merge_guides_mode == "shared":
             guide_efficacy_values = self.one.expand((self.n_perturbations, 1))
+            guide_efficacy_by_element = self.guide_by_element
+        # elif self.merge_guides_mode == "partial":
+        #     with guide_plate:
+        #         guide_efficacy_values = pyro.sample(
+        #             "guide_efficacy",
+        #             dist.Beta(self.logit_efficacy_alpha, self.logit_efficacy_beta),
+        #         )
+        #     guide_efficacy_by_element = guide_efficacy_values.expand(-1, self.n_elements) * self.guide_by_element
         else:
-            with guide_plate:
-                guide_efficacy_values = pyro.sample(
-                    "guide_efficacy",
-                    dist.Beta(self.logit_efficacy_alpha, self.logit_efficacy_beta),
-                )
+            guide_efficacy_by_element
+            guide_efficacy_by_element = pyro.sample(
+                "guide_efficacy",
+                dist.Dirichlet(self.guide_by_element + 1e-6).to_event(1),
+            )
+            guide_efficacy_values = guide_efficacy_by_element.mean(dim=-1, keepdim=True)
+            # guide_efficacy_values = torch.exp(logit_efficiency) / torch.max(logit_efficiency, dim=-2))
+
             # fix weird broadcasting error
-        guide_efficacy_by_element = guide_efficacy_values.expand(-1, self.n_elements) * self.guide_by_element
 
         # alternative: estimate efficacy for each guide--gene *cis* pair
         # with guide_effects_plate:

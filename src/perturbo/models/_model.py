@@ -53,7 +53,8 @@ class PERTURBO(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
             self.data_and_attrs.update({REGISTRY_KEYS.CAT_COVS_KEY: np.float32})
             n_cats_per_cov = self.adata_manager.get_state_registry(REGISTRY_KEYS.CAT_COVS_KEY).n_cats_per_key
 
-        gene_summary_stats = self.adata_manager.get_from_registry(REGISTRY_KEYS.GENE_SUMMARY_STATS)
+        gene_mean = self.adata_manager.get_from_registry(REGISTRY_KEYS.GENE_MEAN_KEY)
+        log_fold_change = self.adata_manager.get_from_registry(REGISTRY_KEYS.LFC_KEY)
 
         guide_by_element = None
         if REGISTRY_KEYS.GUIDE_BY_ELEMENT_KEY in self.adata_manager.data_registry:
@@ -65,7 +66,9 @@ class PERTURBO(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
 
         self.module = PerTurboPyroModule(
             self.summary_stats,
-            gene_summary_stats=gene_summary_stats,
+            gene_mean=gene_mean,
+            beta_hat=log_fold_change,
+            # gene_summary_stats=gene_summary_stats,
             guide_by_element=guide_by_element,
             gene_by_element=gene_by_element,
             n_cats_per_cov=n_cats_per_cov,
@@ -238,17 +241,46 @@ class PERTURBO(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
             mod_key=modalities.rna_layer,
         )
 
+        def numpy_sum(x, axis=0):
+            s = x.sum(axis=axis)
+            if isinstance(s, np.matrix):
+                ret = s.A1
+            else:
+                ret = s.ravel()
+            assert len(ret.shape) == 1
+            return ret
+
         # add info for method of moments estimation of gene params
         rna_adata = mdata[modalities.rna_layer]
-        mean_counts = np.mean(rna_adata.X, axis=0)
-        if isinstance(mean_counts, np.matrix):  # occurs when summing sparse array
-            mean_counts = mean_counts.A1
-        rna_adata.var["_gene_mean"] = mean_counts
+        guide_adata = mdata[modalities.perturbation_layer]
+        n_cells_w_guide = np.maximum(1.0, numpy_sum(guide_adata.X))[:, np.newaxis]
+        # raise Exception(n_cells_w_guide.shape)
+
+        mean_counts = numpy_sum(rna_adata.X)
+
+        epsilon = 1
+        total_expr_by_guide = guide_adata.X.T @ rna_adata.X
+        if issparse(total_expr_by_guide):
+            total_expr_by_guide = total_expr_by_guide.todense()
+        log_avg_expr_by_guide = np.log(total_expr_by_guide / n_cells_w_guide + epsilon)
+        log_avg_expr_per_gene = np.log(numpy_sum(rna_adata.X) / rna_adata.n_obs + epsilon)
+        beta_hat = log_avg_expr_by_guide - log_avg_expr_per_gene
+
+        gene_mean_key = "_gene_mean"
+        lfc_key = "_lfc"
+        rna_adata.var[gene_mean_key] = mean_counts
+        guide_adata.varm[lfc_key] = beta_hat
         # rna_adata.var["_gene_variance"] = np.var(rna_adata.X, axis=0).squeeze()
-        gene_field = fields.MuDataNumericalJointVarField(
-            REGISTRY_KEYS.GENE_SUMMARY_STATS,
-            ["_gene_mean"],
+        gene_field = fields.MuDataNumericalVarField(
+            REGISTRY_KEYS.GENE_MEAN_KEY,
+            gene_mean_key,
             mod_key=modalities.rna_layer,
+        )
+
+        lfc_field = fields.MuDataVarmField(
+            REGISTRY_KEYS.LFC_KEY,
+            lfc_key,
+            mod_key=modalities.perturbation_layer,
         )
 
         batch_field = fields.MuDataCategoricalObsField(
@@ -267,6 +299,7 @@ class PERTURBO(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
             index_field,
             batch_field,
             gene_field,
+            lfc_field,
             fields.MuDataLayerField(
                 REGISTRY_KEYS.PERTURBATION_KEY,
                 perturbation_layer,
