@@ -60,15 +60,6 @@ def assemble_likelihood_and_compute_kl(data, args, beta, targeting_efficiencies,
 
     # since we are being variational about the cell-level binary latent variables that encode guide presence/absence, we need to
     # include a KL divergence term that effectively regularizes cell_guide_presence_prob towards the model-side targeting_efficiencies.
-
-    # we append a value of log(0.5) so that indices that are equal to args.num_guides get mapped to this dummy value.
-    log_targeting_efficiencies = torch.cat([targeting_efficiencies.log(), torch.tensor([log_half])])
-    log_targeting_efficiencies = log_targeting_efficiencies[data['cell_gene_to_guide']]
-    assert log_targeting_efficiencies.shape == (args.num_cells, args.num_genes, args.max_targeting_cell)
-    log1p_targeting_efficiencies = torch.cat([torch.log1p(-targeting_efficiencies), torch.tensor([log_half])])
-    log1p_targeting_efficiencies = log1p_targeting_efficiencies[data['cell_gene_to_guide']]
-
-    # compute the kl regularizer
     p = tdist.Bernoulli(probs=cell_guide_presence_prob)
     q = tdist.Bernoulli(probs=targeting_efficiencies.expand(cell_guide_presence_prob.shape))
     kl = torch.distributions.kl.kl_divergence(q, p)
@@ -162,13 +153,13 @@ def main(args):
     for k in range(args.num_epochs):
         loss = svi.step(data, args)
 
-        if k % 50 == 0 or k == args.num_epochs - 1:
+        if k % 250 == 0 or k == args.num_epochs - 1:
             print("[epoch %04d] training elbo: %.6g" % (k, -loss))
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="parse args")
-    parser.add_argument("--num-epochs", default=10, type=int)
+    parser.add_argument("--num-epochs", default=15000, type=int)
     parser.add_argument("--num-genes", default=6, type=int)
     parser.add_argument("--num-guides", default=4, type=int)
     parser.add_argument("--num-cells", default=8, type=int)
