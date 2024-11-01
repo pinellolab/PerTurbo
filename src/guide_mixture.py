@@ -1,6 +1,5 @@
 import argparse
 import math
-import numpy as np
 
 import torch
 import torch.distributions as tdist
@@ -26,20 +25,19 @@ def compute_combinatorial_matrix(args):
     return combinatorial_matrix
 
 
-def assemble_likelihood(data, args, beta, targeting_efficiencies, nu):
-    # we append a zero so that indices that are equal to -1 get mapped to log(0.5).
-    # note that the specific value appended is irrelevant, basically since p + (1 - p) = 1
-    # (at least if we ignore floating point errors).
-    log_targeting_efficiencies = torch.cat([targeting_efficiencies.log(), torch.tensor([math.log(0.5)])])
-    log_targeting_efficiencies = log_targeting_efficiencies[data['cell_gene_to_guide']]
-    assert log_targeting_efficiencies.shape == (args.num_cells, args.num_genes, args.max_targeting_cell)
-    # do the same thing for 1-prob
-    log1p_targeting_efficiencies = torch.cat([torch.log1p(-targeting_efficiencies), torch.tensor([math.log(0.5)])])
-    log1p_targeting_efficiencies = log1p_targeting_efficiencies[data['cell_gene_to_guide']]
+def assemble_likelihood_and_compute_kl(data, args, beta, targeting_efficiencies, cell_guide_presence_prob, nu):
+    index = data['cell_gene_to_guide'].view(args.num_cells, -1)
+    log_half = math.log(0.5)
+    # we append a value of log(0.5) so that indices that are equal to args.num_guides get mapped to this dummy value.
+    log_cell_guide_presence_prob = torch.cat([cell_guide_presence_prob.log(), log_half * torch.ones(args.num_cells, 1)], dim=-1)
+    log_cell_guide_presence_prob = log_cell_guide_presence_prob.gather(-1, index).view(args.num_cells, args.num_genes, args.max_targeting_cell)
+    log1p_cell_guide_presence_prob = torch.cat([torch.log1p(-cell_guide_presence_prob), log_half * torch.ones(args.num_cells, 1)], dim=-1)
+    log1p_cell_guide_presence_prob = log1p_cell_guide_presence_prob.gather(-1, index).view(args.num_cells, args.num_genes, args.max_targeting_cell)
 
     # matrix multiplication in log probability space is multiplication in probability space.
     # basically we're computing terms of the form log(p(1-q)rs(1-t)) where pqrst are all probabilities.
-    mix_log_probs = log_targeting_efficiencies @ data['combinatorial_matrix'] + log1p_targeting_efficiencies @ data['flip_combinatorial_matrix']
+    # the probabilities cell_guide_presence_prob are the variational parameters that represent *inferred* cell-level quantities.
+    mix_log_probs = log_cell_guide_presence_prob @ data['combinatorial_matrix'] + log1p_cell_guide_presence_prob @ data['flip_combinatorial_matrix']
     assert mix_log_probs.shape == (args.num_cells, args.num_genes, 2 ** args.max_targeting_cell)
 
     # we append to beta so that indices that are equal to -1 get mapped to zero, since missing guides have no effect.
@@ -60,23 +58,52 @@ def assemble_likelihood(data, args, beta, targeting_efficiencies, nu):
     lkl = dist.MixtureSameFamily(mix_cat, mix_comp)
     assert lkl.batch_shape == (args.num_cells, args.num_genes)
 
-    return lkl
+    # since we are being variational about the cell-level binary latent variables that encode guide presence/absence, we need to
+    # include a KL divergence term that effectively regularizes cell_guide_presence_prob towards the model-side targeting_efficiencies.
+
+    # we append a value of log(0.5) so that indices that are equal to args.num_guides get mapped to this dummy value.
+    log_targeting_efficiencies = torch.cat([targeting_efficiencies.log(), torch.tensor([log_half])])
+    log_targeting_efficiencies = log_targeting_efficiencies[data['cell_gene_to_guide']]
+    assert log_targeting_efficiencies.shape == (args.num_cells, args.num_genes, args.max_targeting_cell)
+    log1p_targeting_efficiencies = torch.cat([torch.log1p(-targeting_efficiencies), torch.tensor([log_half])])
+    log1p_targeting_efficiencies = log1p_targeting_efficiencies[data['cell_gene_to_guide']]
+
+    # compute the kl regularizer
+    p = tdist.Bernoulli(probs=cell_guide_presence_prob)
+    q = tdist.Bernoulli(probs=targeting_efficiencies.expand(cell_guide_presence_prob.shape))
+    kl = torch.distributions.kl.kl_divergence(q, p)
+    assert kl.shape == (args.num_cells, args.num_guides)
+
+    # we need to mask out terms that correspond to guides that do not "maybe appear" in a given cell, i.e.
+    # those for which the relevant entry of cell_guide_presence_prob is a phantom.
+    kl = data['cell_guide_mask'] * kl
+
+    return lkl, kl
 
 
 def model(data, args):
     # controls variance of NegativeBinomial distributions
     nu = pyro.param("nu", torch.ones(1), constraint=constraints.positive)
-    # this could also be made a random variable
     targeting_efficiencies = pyro.param("targeting_efficiencies", 0.5 * torch.ones(args.num_guides),
                                         constraint=constraints.unit_interval)
     with pyro.plate("total_guide_gene_interactions", data['total_guide_gene_interactions']):
         beta = pyro.sample("beta", dist.Normal(0.0, 0.1))
 
-    lkl = assemble_likelihood(data, args, beta, targeting_efficiencies, nu)
+    # this is technically a variational parameter but we include it in the model because we're
+    # effectively doing variational inference over discrete latent variables by hand.
+    # (the guide handles variational inference over continuous latent variables.)
+    # not all of these will be used in practice but we encode as a dense matrix for simplicity.
+    cell_guide_presence_prob = pyro.param("cell_guide_presence_prob", 0.5 * torch.ones(args.num_cells, args.num_guides),
+                                          constraint=constraints.unit_interval)
+
+    lkl, kl = assemble_likelihood_and_compute_kl(data, args, beta, targeting_efficiencies, cell_guide_presence_prob, nu)
 
     with pyro.plate("cells", args.num_cells, dim=-2):
         with pyro.plate("genes", args.num_genes, dim=-1):
             pyro.sample("obs", lkl, obs=data['Y'])
+        with pyro.plate("guides", args.num_guides, dim=-1):
+            # include kl regularizer, which appears with a minus sign in the elbo
+            pyro.factor("kl", -kl)
 
 
 def main(args):
@@ -87,19 +114,19 @@ def main(args):
     Y = torch.randint(500, (args.num_cells, args.num_genes))
 
     # for each cell c, each row of cell_gene_to_guide[c] is a set of indices, each of which points to a unique guide.
-    # the special value of -1 is used to encode missing guides.
+    # the special value of args.num_guides is used to encode missing guides.
     cell_gene_to_guide = torch.randint(args.num_guides, (args.num_cells, args.num_genes, args.max_targeting_cell))
     for cell in range(args.num_cells):
         gene_to_guide = cell_gene_to_guide[cell]
         for row, indices in enumerate(gene_to_guide):
             num_duplicates = len(indices) - len(torch.unique(indices))
-            # replace duplicate indices with -1, which corresponds to "not a valid index".
+            # replace duplicate indices with args.num_guides, which corresponds to "not a valid index".
             # in other words this is a way of creating a dataset where some genes in some cells are targeted by
             # fewer than max_targeting_cell guides. we need this represented in our dataset so we can test
             # the necessary masking machinery.
             if num_duplicates > 0:
-                cell_gene_to_guide[cell, row] = torch.cat([torch.unique(indices), -torch.ones(num_duplicates)])
-    assert (cell_gene_to_guide == -1).sum() > 0
+                cell_gene_to_guide[cell, row] = torch.cat([torch.unique(indices), args.num_guides * torch.ones(num_duplicates)])
+    assert (cell_gene_to_guide == args.num_guides).sum() > 0
 
     # we will represent beta as a flat vector to avoid instantiating unused random variables.
     # so we need to create data structures to support the relevant indexing. that data structure is cell_gene_to_beta.
@@ -111,12 +138,19 @@ def main(args):
     # for each cell c, each row of cell_gene_to_beta[c] is a set of indices, each of which points to a unique guide-gene interaction.
     cell_gene_to_beta = torch.randint(total_guide_gene_interactions, (args.num_cells, args.num_genes, args.max_targeting_cell))
     # randomly make some of the indices -1, which encodes missing guides.
+    # this is the one place where we retain "-1" as the missing index indicator.
     cell_gene_to_beta[torch.rand(cell_gene_to_beta.shape) < 0.1] = -1
+
+    # this controls which cells maybe have--e.g. have at least one NGS read supporting presence--each of the args.num_guides-many guides.
+    # one represents "maybe present" and zero represents "definitely not present." the "maybe" is why we need to do inference
+    # over discrete latent variables. obviously in practice this data structure needs to be consistent with cell_gene_to_guide.
+    cell_guide_mask = torch.rand(args.num_cells, args.num_guides) < 0.5
 
     data = {
         'Y': Y,
         'cell_gene_to_guide': cell_gene_to_guide,
         'cell_gene_to_beta': cell_gene_to_beta,
+        'cell_guide_mask': cell_guide_mask,
         'total_guide_gene_interactions': total_guide_gene_interactions,
         'combinatorial_matrix': compute_combinatorial_matrix(args),
         'flip_combinatorial_matrix': 1 - compute_combinatorial_matrix(args),
