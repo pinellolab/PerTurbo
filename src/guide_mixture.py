@@ -25,9 +25,14 @@ def compute_combinatorial_matrix(args):
     return combinatorial_matrix
 
 
-def assemble_likelihood_and_compute_kl(data, args, beta, targeting_efficiencies, cell_guide_presence_prob, nu):
+def assemble_likelihood_and_compute_kl(
+    data, args, beta, targeting_efficiencies, cell_guide_presence_prob, nu, beta_0, size_factor
+):
     index = data['cell_gene_to_guide'].view(args.num_cells, -1)
     log_half = math.log(0.5)
+    nu = nu[:, None]
+    beta_0 = beta_0[:, None]
+    size_factor = size_factor[:, None]
     # we append a value of log(0.5) so that indices that are equal to args.num_guides get mapped to this dummy value.
     log_cell_guide_presence_prob = torch.cat([cell_guide_presence_prob.log(), log_half * torch.ones(args.num_cells, 1)], dim=-1)
     log_cell_guide_presence_prob = log_cell_guide_presence_prob.gather(-1, index).view(args.num_cells, args.num_genes, args.max_targeting_cell)
@@ -45,7 +50,7 @@ def assemble_likelihood_and_compute_kl(data, args, beta, targeting_efficiencies,
     assert beta.shape == (args.num_cells, args.num_genes, args.max_targeting_cell)
     beta_sum = beta @ data['combinatorial_matrix']
     assert beta_sum.shape == (args.num_cells, args.num_genes, 2 ** args.max_targeting_cell)
-    nb_logits = beta_sum - nu.log()
+    nb_logits = beta_0 + beta_sum + size_factor - nu.log()
 
     # this distribution encodes the probabilities of each mixture component.
     mix_cat = tdist.Categorical(logits=mix_log_probs)
@@ -74,9 +79,11 @@ def assemble_likelihood_and_compute_kl(data, args, beta, targeting_efficiencies,
 
 def model(data, args):
     # controls variance of NegativeBinomial distributions
-    nu = pyro.param("nu", torch.ones(1), constraint=constraints.positive)
-    targeting_efficiencies = pyro.param("targeting_efficiencies", 0.5 * torch.ones(args.num_guides),
-                                        constraint=constraints.unit_interval)
+    nu = pyro.param("nu", torch.ones(args.num_genes), constraint=constraints.positive)
+    beta_0 = pyro.param("beta_0", torch.zeros(args.num_genes))
+    targeting_efficiencies = pyro.param(
+        "targeting_efficiencies", 0.9 * torch.ones(args.num_guides), constraint=constraints.unit_interval
+    )
     with pyro.plate("total_guide_gene_interactions", data['total_guide_gene_interactions']):
         beta = pyro.sample("beta", dist.Normal(0.0, 0.1))
 
@@ -86,8 +93,10 @@ def model(data, args):
     # not all of these will be used in practice but we encode as a dense matrix for simplicity.
     cell_guide_presence_prob = pyro.param("cell_guide_presence_prob", 0.5 * torch.ones(args.num_cells, args.num_guides),
                                           constraint=constraints.unit_interval)
-
-    lkl, kl = assemble_likelihood_and_compute_kl(data, args, beta, targeting_efficiencies, cell_guide_presence_prob, nu)
+    size_factor = data.get("size_factor", torch.zeros((args.num_cells, 1)))
+    lkl, kl = assemble_likelihood_and_compute_kl(
+        data, args, beta, targeting_efficiencies, cell_guide_presence_prob, nu, beta_0, size_factor
+    )
 
     with pyro.plate("cells", args.num_cells, dim=-2):
         with pyro.plate("genes", args.num_genes, dim=-1):
