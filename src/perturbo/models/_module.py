@@ -32,9 +32,10 @@ class PerTurboPyroModule(PyroBaseModuleClass):
         effect_prior_dist: Literal["cauchy", "normal_mixture", "normal", "laplace"] = "normal",
         n_factors: int | None = None,
         n_pert_factors: int | None = None,
-        use_interactions: bool = True,
+        use_interactions: bool = False,
         efficiency_mode: Literal["mixture", "scaled"] = "scaled",
         dispersion_effects: bool = False,
+        use_crispr_factor: bool = False,
         merge_guides_mode: Literal["partial", "shared"] = "partial",
         prior_param_dict: Mapping[str, torch.Tensor] | None = None,
         **module_kwargs,
@@ -84,6 +85,7 @@ class PerTurboPyroModule(PyroBaseModuleClass):
         self.use_interactions = use_interactions
         self.efficiency_mode = efficiency_mode
         self.local_effects = gene_by_element is not None
+        self.use_crispr_factor = use_crispr_factor
 
         # copy data summary stats
         self.n_cells = summary_stats.n_cells
@@ -112,20 +114,18 @@ class PerTurboPyroModule(PyroBaseModuleClass):
         #     self.n_cat_list = []
         self.n_batches = summary_stats.n_batch
 
-        delta_sites = ["cell_factors", "cell_loadings"]
-        delta_sites = []
+        self.delta_sites = []
+        # self.delta_sites = ["cell_loadings"]
+        # self.delta_sites = ["cell_factors", "cell_loadings"]
+        if efficiency_mode == "ps":
+            self.delta_sites.append("perturbed")
+
         self._guide = AutoGuideList(self.model, create_plates=self.create_plates)
         self._guide.append(
             AutoNormal(
-                poutine.block(self.model, hide=["element_effects"] + delta_sites + self.discrete_sites),
+                poutine.block(self.model, hide=["element_effects"] + self.delta_sites + self.discrete_sites),
                 init_loc_fn=lambda x: init_to_median(x, num_samples=100),
                 init_scale=0.1,
-            )
-        )
-        self._guide.append(
-            AutoDelta(
-                poutine.block(self.model, expose=delta_sites),
-                init_loc_fn=lambda x: init_to_median(x, num_samples=100),
             )
         )
         self._guide.append(
@@ -135,6 +135,13 @@ class PerTurboPyroModule(PyroBaseModuleClass):
                 init_scale=0.05,
             )
         )
+        if self.delta_sites:
+            self._guide.append(
+                AutoDelta(
+                    poutine.block(self.model, expose=self.delta_sites),
+                    init_loc_fn=lambda x: init_to_median(x, num_samples=100),
+                )
+            )
 
         ## register hyperparameters as buffers so they get automatically moved to GPU by scvi-tools
 
@@ -190,7 +197,7 @@ class PerTurboPyroModule(PyroBaseModuleClass):
         # (contrastive) factor model hyperparams
         self.register_buffer("cell_factor_prior_scale", torch.tensor(1.0))
         self.register_buffer("cell_loading_prior_scale", torch.tensor(0.1))
-        self.register_buffer("pert_factor_prior_scale", torch.tensor(1.0))
+        self.register_buffer("pert_factor_prior_scale", torch.tensor(0.1))
         self.register_buffer("pert_loading_prior_scale", torch.tensor(0.1))
 
         # for LogNormalNegativeBinomial likelihood hyperparams
@@ -199,7 +206,8 @@ class PerTurboPyroModule(PyroBaseModuleClass):
         # override with user-provided values from prior_param_dict
         if prior_param_dict is not None:
             for k, v in prior_param_dict.items():
-                assert isinstance(v, torch.Tensor) and k in self.named_buffers
+                buffer_keys = [k for k, v in self.named_buffers()]
+                assert isinstance(v, torch.Tensor) and k in buffer_keys
                 assert v.shape == self.get_buffer(k).shape
                 self.register_buffer(k, v)
 
@@ -342,7 +350,10 @@ class PerTurboPyroModule(PyroBaseModuleClass):
             cell_factor_effects = 0
 
         if self.local_effects:
+            # override factor effects
             element_effects = (1 - self.element_by_gene) * element_factor_effects + element_local_effects
+            # # experimental: do not override
+            # element_effects = element_factor_effects + element_local_effects
         else:
             element_effects = element_factor_effects + element_local_effects
 
@@ -354,6 +365,9 @@ class PerTurboPyroModule(PyroBaseModuleClass):
                 pert_prob = guides_observed @ guide_efficacy_values
                 perturbed = pyro.sample("perturbed", dist.Bernoulli(pert_prob))
                 cell_element_efficacy = perturbed * guides_observed @ self.guide_by_element
+                # only targeting guides can have a CRISPR effect
+            else:
+                raise Exception("efficiency_mode must be either 'scaled' or 'mixture'")
 
         with gene_plate:
             # Sample parameters of baseline gene expression distribution
@@ -402,6 +416,12 @@ class PerTurboPyroModule(PyroBaseModuleClass):
             # Add perturbation effects to gene expression parameters
             # raise Exception(cell_guide_efficacy.shape, self.guide_by_element.shape, element_effects.shape)
             mean_perturbation_effect = cell_element_efficacy @ element_effects
+
+            # if desired, add mean "perturbation effect" from perturbation modality
+            if self.use_crispr_factor:
+                crispr_loading = pyro.sample("crispr_loading", dist.Laplace(self.zero, self.one))
+                crispr_effect = torch.log2(cell_element_efficacy.sum(dim=-1, keepdim=True) + 1) * crispr_loading
+                mean_perturbation_effect += crispr_effect
 
             nb_log_mean = nb_log_mean_ctrl + mean_perturbation_effect
             # nb_log_mean = nb_log_mean_ctrl + (cell_guide_efficacy @ self.guide_by_element @ element_effects)

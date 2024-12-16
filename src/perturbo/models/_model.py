@@ -489,7 +489,7 @@ class PERTURBO(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
 
     def sample_posterior(
         self,
-        num_samples: int = 1000,
+        num_samples: int = 1,
         return_sites: Optional[list] = None,
         accelerator: str = "auto",
         device: Union[int, str] = "auto",
