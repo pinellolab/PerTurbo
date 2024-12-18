@@ -1,4 +1,6 @@
+from collections import defaultdict
 from collections.abc import Mapping
+from types import SimpleNamespace
 from typing import Literal
 
 import pyro
@@ -213,6 +215,8 @@ class PerTurboPyroModule(PyroBaseModuleClass):
 
     @staticmethod
     def _get_fn_args_from_batch(tensor_dict):
+        print(tensor_dict.keys())
+
         fit_size_factor_covariate = False
 
         if fit_size_factor_covariate:
@@ -230,7 +234,81 @@ class PerTurboPyroModule(PyroBaseModuleClass):
         # return indices and then the rest of the tensors
         return (tensor_dict[REGISTRY_KEYS.INDICES_KEY].squeeze(),), tensor_dict
 
+    def infer_data_dims(self, idx, **tensor_dict):
+        """Infer model dimensions based on model args/kwargs and make sure they match as needed"""
+
+        dims = defaultdict(lambda: 1)  # give any unspecified dims a value of 1
+        if not tensor_dict:
+            # raise Exception(idx, tensor_dict)
+            return dims
+
+        def check_and_validate_dict(k, v, d):
+            if k not in d:
+                d[k] = v
+            else:
+                assert d[k] == v
+
+        # check cell index
+        if idx is not None:
+            n_cells = idx.shape[0]
+            check_and_validate_dict("n_cells", n_cells, dims)
+
+        # check counts matrix
+        X = tensor_dict.get(REGISTRY_KEYS.X_KEY)
+        if X is not None:
+            n_cells, n_genes = X.shape
+            check_and_validate_dict("n_cells", n_cells, dims)
+            check_and_validate_dict("n_genes", n_genes, dims)
+
+        # check batch labels
+        batch = tensor_dict[REGISTRY_KEYS.BATCH_KEY]
+        if batch is not None:
+            n_cells, n_batches = batch.shape
+            check_and_validate_dict("n_cells", n_cells, dims)
+            check_and_validate_dict("n_batches", n_batches, dims)
+
+        # check size factors
+        size_factor = tensor_dict[REGISTRY_KEYS.SIZE_FACTOR_KEY]
+        if size_factor is not None:
+            size_factor, _ = size_factor.shape
+            check_and_validate_dict("n_cells", n_cells, dims)
+
+        # check guides matrix (required)
+        guides = tensor_dict[REGISTRY_KEYS.PERTURBATION_KEY]
+        n_cells, n_guides = guides.shape
+        check_and_validate_dict("n_cells", n_cells, dims)
+        check_and_validate_dict("n_guides", n_guides, dims)
+
+        # check continuous covariates matrix
+        covariates = tensor_dict[REGISTRY_KEYS.CONT_COVS_KEY]
+        n_cells, n_cont_covariates = covariates.shape
+        assert n_cont_covariates == self.n_cont_covariates, "n_cont_covariates must not change"
+
+        # check guide by element matrix
+        # guide_by_element = tensor_dict[REGISTRY_KEYS.GUIDE_BY_ELEMENT_KEY]
+        # n_guides, n_elements = guide_by_element.shape
+        # check_and_validate_dict("n_guides", n_guides, dims)
+        # check_and_validate_dict("n_elements", n_elements, dims)
+
+        # check guide by element matrix
+        # gene_by_element = tensor_dict[REGISTRY_KEYS.GENE_BY_ELEMENT_KEY]
+        # n_genes, n_elements = gene_by_element.shape
+        # check_and_validate_dict("n_genes", n_genes, dims)
+        # check_and_validate_dict("n_elements", n_elements, dims)
+
+        # set all other dims based on model args
+        dims["n_cont_covariates"] = self.n_cont_covariates
+        dims["n_factors"] = self.n_factors
+        dims["n_pert_factors"] = self.n_pert_factors
+
+        if self.local_effects:
+            dims["n_element_effects"] = self.element_by_gene_idx.shape[1]
+
+        print(dims)
+        return dims
+
     def create_plates(self, idx, **tensor_dict):
+        dims = self.infer_data_dims(idx, **tensor_dict)
         return (
             pyro.plate("Cells", self.n_cells, dim=-2, subsample=idx),
             pyro.plate("Guides", self.n_perturbations, dim=-2),
@@ -239,9 +317,20 @@ class PerTurboPyroModule(PyroBaseModuleClass):
             pyro.plate("Genes", self.n_genes, dim=-1),
             pyro.plate("Covariates", self.n_cont_covariates, dim=-2),
             pyro.plate("Elements_sparse", self.n_element_effects, dim=-1),
-            pyro.plate("Guides_sparse", self.n_perturbations, dim=-1),
             pyro.plate("Cell_factors", self.n_factors, dim=-3),
             pyro.plate("Pert_factors", self.n_pert_factors, dim=-3),
+        )
+
+        return (
+            pyro.plate("Cells", dims["n_cells"], dim=-2, subsample=idx),
+            pyro.plate("Guides", dims["n_perturbations"], dim=-2),
+            pyro.plate("Elements", dims["n_elements"], dim=-2),
+            pyro.plate("Batches", dims["n_batches"], dim=-2),
+            pyro.plate("Genes", dims["n_genes"], dim=-1),
+            pyro.plate("Covariates", dims["n_cont_covariates"], dim=-2),
+            pyro.plate("Elements_sparse", dims["n_element_effects"], dim=-1),
+            pyro.plate("Cell_factors", dims["n_factors"], dim=-3),
+            pyro.plate("Pert_factors", dims["n_pert_factors"], dim=-3),
         )
 
     @config_enumerate
@@ -255,10 +344,10 @@ class PerTurboPyroModule(PyroBaseModuleClass):
             gene_plate,
             cont_covariate_plate,
             element_effects_plate,  # sparse mode
-            guide_effects_plate,  # sparse mode
             cell_factor_plate,
             pert_factor_plate,
         ) = self.create_plates(idx)
+        dims = self.infer_data_dims(idx, **tensor_dict)
         batch = tensor_dict[REGISTRY_KEYS.BATCH_KEY]
         size_factor = tensor_dict[REGISTRY_KEYS.SIZE_FACTOR_KEY]
         guides_observed = tensor_dict[REGISTRY_KEYS.PERTURBATION_KEY]
@@ -301,18 +390,6 @@ class PerTurboPyroModule(PyroBaseModuleClass):
             # fix weird broadcasting error
         guide_efficacy_by_element = guide_efficacy_values.expand(-1, self.n_elements) * self.guide_by_element
 
-        # alternative: estimate efficacy for each guide--gene *cis* pair
-        # with guide_effects_plate:
-        #     guide_efficacy_values = pyro.sample(
-        #         "guide_efficacy",
-        #         dist.Beta(self.logit_efficacy_alpha, self.logit_efficacy_beta),
-        #     )
-        # guide_efficacy = torch.sparse_coo_tensor(
-        #     self.guide_by_element_idx,
-        #     guide_efficacy_values,
-        #     size=(self.n_perturbations, self.n_elements),
-        # )
-
         # Sample dense or factorized perturbation effects
         if self.n_pert_factors is None:
             element_factor_effects = 0
@@ -352,8 +429,6 @@ class PerTurboPyroModule(PyroBaseModuleClass):
         if self.local_effects:
             # override factor effects
             element_effects = (1 - self.element_by_gene) * element_factor_effects + element_local_effects
-            # # experimental: do not override
-            # element_effects = element_factor_effects + element_local_effects
         else:
             element_effects = element_factor_effects + element_local_effects
 

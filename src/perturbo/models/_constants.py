@@ -4,8 +4,8 @@ from typing import NamedTuple
 class _REGISTRY_KEYS_NT(NamedTuple):
     X_KEY: str = "X"
     BATCH_KEY: str = "batch"
-    LABELS_KEY: str = "labels"
-    CAT_COVS_KEY: str = "extra_categorical_covs"
+    # LABELS_KEY: str = "labels"
+    # CAT_COVS_KEY: str = "extra_categorical_covs"
     CONT_COVS_KEY: str = "extra_continuous_covs"
     GENE_BY_ELEMENT_KEY: str = "tested_elements"
     GUIDE_BY_ELEMENT_KEY: str = "targeted_elements"
