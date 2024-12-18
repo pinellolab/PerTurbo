@@ -22,6 +22,9 @@ docs/notebooks/checkpoints
 
 # Notebook temp files
 docs/notebooks/*.h5ad
+docs/notebooks/*.h5mu
+docs/notebooks/*.pt
+
 
 # Tests and coverage
 /.pytest_cache/
