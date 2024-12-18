@@ -140,8 +140,32 @@ def test_model_mdata(
     assert isinstance(fx, pd.DataFrame)
     assert len(model.history["elbo_train"]) == 10
     assert isinstance(model.history["elbo_train"], pd.DataFrame)
+
+    # test model save/load
     model.save(tmp_path / "model", save_anndata=True)
     model = perturbo.PERTURBO.load(tmp_path / "model")
+
+    # test simulator
+    n_grna_new = 16
+    n_elements_new = 4
+    n_cells_new = 11
+    n_genes = mdata[rna_key].n_vars
+    guide_by_element_new = np.random.binomial(1, 0.8, size=(n_grna_new, n_elements_new)).astype(np.float32)
+    element_by_gene_lfc = np.random.normal(0, 1, size=(n_elements_new, n_genes))
+    # generate fake guide status (low MOI)
+    grna_counts_new = np.zeros((n_cells_new, n_grna_new), dtype=np.float32)
+    for i in range(n_cells_new):
+        grna_counts_new[i, np.random.choice(n_grna_new)] = 1
+
+    x_new = model.sample_alternative_model(
+        num_samples=n_cells_new,
+        guide_obs=grna_counts_new,
+        guide_by_element=guide_by_element_new,
+        element_by_gene_lfc=element_by_gene_lfc,
+    )
+
+    assert x_new.shape == (n_cells_new, n_genes)
+
     # model.train(max_epochs=1, lr=0.1)
     # p_loc, p_scale = model.moduleget_perturbation_effects()
 
