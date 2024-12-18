@@ -1,5 +1,4 @@
 import logging
-from typing import Optional, Union
 
 import numpy as np
 import pandas as pd
@@ -99,11 +98,6 @@ class PERTURBO(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
     def setup_anndata(
         cls,
         adata: AnnData,
-        batch_key: Optional[str] = None,
-        perturbation_key: Optional[str] = None,
-        library_size_key: Optional[str] = None,
-        size_factor_key: Optional[str] = None,
-        continuous_covariates_keys: Optional[str] = None,
         **kwargs,
     ):
         raise NotImplementedError("MuData input required, use setup_mudata.")
@@ -165,19 +159,19 @@ class PERTURBO(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
     def setup_mudata(
         cls,
         mdata: MuData,
-        rna_layer: Optional[str] = None,
-        perturbation_layer: Optional[str] = None,
-        batch_key: Optional[str] = None,
-        gene_by_element_key: Optional[str] = None,
-        rna_element_uns_key: Optional[str] = None,
-        guide_element_uns_key: Optional[str] = None,
-        guide_by_element_key: Optional[str] = None,
-        library_size_key: Optional[str] = None,
-        size_factor_key: Optional[str] = None,
-        gene_mean_key: Optional[str] = None,
-        continuous_covariates_keys: Optional[str] = None,
-        categorical_covariates_keys: Optional[str] = None,
-        modalities: Optional[dict[str, str]] = None,
+        rna_layer: str | None = None,
+        perturbation_layer: str | None = None,
+        batch_key: str | None = None,
+        gene_by_element_key: str | None = None,
+        rna_element_uns_key: str | None = None,
+        guide_element_uns_key: str | None = None,
+        guide_by_element_key: str | None = None,
+        library_size_key: str | None = None,
+        size_factor_key: str | None = None,
+        gene_mean_key: str | None = None,
+        continuous_covariates_keys: str | None = None,
+        categorical_covariates_keys: str | None = None,
+        modalities: dict[str, str] | None = None,
         **kwargs,
     ):
         """Registers data from a MuData object with the model.
@@ -338,18 +332,18 @@ class PERTURBO(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
     @devices_dsp.dedent
     def train(
         self,
-        max_epochs: Optional[int] = None,
+        max_epochs: int | None = None,
         accelerator: str = "cpu",
-        device: Union[int, str] = "auto",
+        device: int | str = "auto",
         train_size: float = 1.0,
-        validation_size: Optional[float] = None,
+        validation_size: float | None = None,
         shuffle_set_split: bool = False,
         batch_size: int = 128,
         early_stopping: bool = False,
-        lr: Optional[float] = None,
+        lr: float | None = None,
         training_plan: PyroTrainingPlan = PyroTrainingPlan,
-        plan_kwargs: Optional[dict] = None,
-        data_splitter_kwargs: Optional[dict] = None,
+        plan_kwargs: dict | None = None,
+        data_splitter_kwargs: dict | None = None,
         **trainer_kwargs,
     ):
         """
@@ -490,7 +484,7 @@ class PERTURBO(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
 
         return element_effects.sort_values("z_value")
 
-    def _get_data_subset(self, indices: Optional[list] = None):
+    def _get_data_subset(self, indices: list | None = None):
         loader = AnnDataLoader(
             adata_manager=self.adata_manager,
             indices=indices,
@@ -521,6 +515,8 @@ class PERTURBO(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
         # get data args for a subset of cells
         indices = np.random.randint(self.module.n_cells, size=num_samples)
         (idx,), kwargs = self._get_data_subset(indices)
+
+        # new indices should just be 1 to n_samples for subsampling purposes
         args = (torch.arange(num_samples).to(device=device),)
         assert args[0].shape == idx.shape
 
@@ -534,7 +530,7 @@ class PERTURBO(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
         if guide_by_element is not None:
             guide_by_element = torch.Tensor(guide_by_element)
 
-        # get MAP values from guide then override with any user-provided values
+        # get MAP values for latents from guide then override with any user-provided values
         latent_vars = {k: v for k, v in self.module.guide.median().items() if k not in guide_sites_to_discard}
         for var in cell_latents:
             if var in latent_vars:
@@ -547,10 +543,13 @@ class PERTURBO(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
         if param_values is not None:
             latent_vars.update(param_values)
 
-        # need to pad posterior samples with leading dimension (1 sample from posterior)
+        # need to pad posterior samples with leading dimension (since we are sampling once from posterior)
         posterior_samples = {k: v.unsqueeze(0) for k, v in latent_vars.items()}
 
         n_guides, n_elements = guide_by_element.shape
+        if module_init_kwargs is None:
+            module_init_kwargs = {}
+
         # create new module to sample from
         module_new = PerTurboPyroModule(
             n_cells=num_samples,
@@ -568,6 +567,7 @@ class PERTURBO(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
             use_interactions=self.module.use_interactions,
             efficiency_mode=self.module.efficiency_mode,
             use_crispr_factor=self.module.use_crispr_factor,
+            **module_init_kwargs,
         )
         module_new.to(device)
 
