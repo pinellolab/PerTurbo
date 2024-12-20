@@ -25,6 +25,10 @@ dependencies = [
     "mudata>=0.3.1",
     "pandas>=1.5.3",
     "scipy>=1.11.4",
+    "matplotlib",
+    "numpy",
+    "seaborn",
+    "statsmodels",
     # for debug logging (referenced from the issue template)
     "session-info",
 ]
