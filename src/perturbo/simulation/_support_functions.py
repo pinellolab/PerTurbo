@@ -1,29 +1,22 @@
-import math
-import os
-import warnings
-from typing import List, Optional
-
 import numpy as np
 import pandas as pd
-
 from mudata import MuData
-
 from statsmodels.stats.multitest import multipletests  # for FDR correction
 
 
 class Support_Functions:
     def __init__(
         self,
-        mdata: Optional[MuData] = None,
-        ncells_per_guide: Optional[int] = None,
-        nguides_per_element: Optional[int] = None,
-        read_depth: Optional[float] = None,
-        lfc: Optional[float] = None,
-        ngenes: Optional[int] = None,
+        mdata: MuData | None = None,
+        ncells_per_guide: int | None = None,
+        nguides_per_element: int | None = None,
+        read_depth: float | None = None,
+        lfc: float | None = None,
+        ngenes: int | None = None,
     ):
         """
         Parameters
-        -----------
+        ----------
         mdata
             A MuData object with 2 modalities, "grna" and "rna", saving perturbation data and gene expr data, of the same shape.
             The "rna" modality has a varm called 'element_tested', whose # rows = rna.shape[1], # cols = grna.shape[1]
@@ -39,12 +32,12 @@ class Support_Functions:
 
     @staticmethod
     def mudata_filtering(
-        mdata: Optional[MuData] = None,
-        gene_by_element_key: Optional[str] = "element_tested",
-        guide_by_element_key: Optional[str] = "element_targeted",
-        nguides_per_element: Optional[int] = 2,
-        n_nonzero_trt_thresh: Optional[int] = 7,
-        n_nonzero_cntrl_thresh: Optional[int] = 7,
+        mdata: MuData | None = None,
+        gene_by_element_key: str | None = "element_tested",
+        guide_by_element_key: str | None = "element_targeted",
+        nguides_per_element: int | None = 2,
+        n_nonzero_trt_thresh: int | None = 7,
+        n_nonzero_cntrl_thresh: int | None = 7,
     ):
         """
         Filter element-gene pairs based on the number of non-zero expressions of perturbed and unperturbed cells. simply change the value to 0 in element_tested if the pair does not pass the filtering.
@@ -114,9 +107,7 @@ class Support_Functions:
 
     @staticmethod
     def split_element_effects(element_effects):
-        """
-        Split the element_effect_res dataframe into two positive control group and negative control group according to gene name.
-        """
+        """Split the element_effect_res dataframe into two positive control group and negative control group according to gene name."""
         element_effects_negative_ctrl = element_effects[element_effects["element"].str.contains("ntc")]
         element_effects_positive_ctrl = element_effects[~element_effects["element"].str.contains("ntc")]
         element_effects_dict = {
@@ -129,7 +120,7 @@ class Support_Functions:
     def get_n_steps_static(
         mdata,
         rna_modality="rna",
-        max_steps: Optional[int] = 400,
+        max_steps: int | None = 400,
     ):
         """Get number of training steps according to sample size. training steps decrease with increasing sample size."""
         n_steps = min(
@@ -140,12 +131,12 @@ class Support_Functions:
         return n_steps
 
     @staticmethod
-    def get_alpha_empirical(alpha: Optional[float] = 0.05, test_side: Optional[str] = "both", p_val_list=None):
+    def get_alpha_empirical(alpha: float | None = 0.05, test_side: str | None = "both", p_val_list=None):
         """
         Get the empirical alpha from the empirical p-values of the control pairs.
 
         Parameters
-        -----------
+        ----------
         alpha
             A value between 0-1 (usually 0.1 or 0.05). (1 - alpha) is the significance level we want to achieve.
         test_side
@@ -167,13 +158,13 @@ class Support_Functions:
 
     @staticmethod
     def get_alpha_empirical_for_each_pair(
-        alpha: Optional[float] = 0.05, test_side: Optional[str] = "both", element_effects_split=None
+        alpha: float | None = 0.05, test_side: str | None = "both", element_effects_split=None
     ):
         """
         Get the empirical alpha from the empirical p-values of the control pairs.
 
         Parameters
-        -----------
+        ----------
         alpha
             A value between 0-1 (usually 0.1 or 0.05). (1 - alpha) is the significance level we want to achieve.
         test_side
