@@ -130,14 +130,8 @@ def test_model_mdata(
     assert model.summary_stats.n_perturbations == len(mdata[perturb_key].var)
 
     model.train(max_epochs=10, lr=0.1, batch_size=20)
-    samples = model.sample_posterior(num_samples=1, return_observed=True)
-
-    assert samples["obs"].shape[-2:] == (
-        model.summary_stats.n_cells,
-        model.summary_stats.n_vars,
-    )
-    fx = model.get_element_effects()
-    assert isinstance(fx, pd.DataFrame)
+    element_effects = model.get_element_effects()
+    assert isinstance(element_effects, pd.DataFrame)
     assert len(model.history["elbo_train"]) == 10
     assert isinstance(model.history["elbo_train"], pd.DataFrame)
 
@@ -160,13 +154,13 @@ def test_model_mdata(
     for i in range(n_cells_new):
         grna_counts_new[i, np.random.choice(n_grna_new)] = 1
 
-    x_new = model.sample_alternative_model(
-        num_samples=n_cells_new,
-        gene_indices=new_genes_idx,
+    x_new = perturbo.simulation.simulate_data_from_trained_model(
+        model,
         guide_obs=grna_counts_new,
-        guide_efficacy=guide_efficacy,
         guide_by_element=guide_by_element_new,
         element_by_gene_lfc=element_by_gene_lfc,
+        guide_efficacy=guide_efficacy,
+        gene_indices=new_genes_idx,
     )
 
     assert x_new.shape == (n_cells_new, n_genes_new)

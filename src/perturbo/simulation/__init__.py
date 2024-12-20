@@ -1,1 +1,2 @@
 from .simu_from_real import Fit_PerTurbo, Simulate_Data, Support_Functions
+from .simulate_from_model import simulate_data_from_trained_model

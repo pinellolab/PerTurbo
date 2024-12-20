@@ -485,143 +485,29 @@ class PERTURBO(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
 
         return element_effects.sort_values("z_value")
 
-    def _get_data_subset(self, indices: list | None = None):
-        loader = AnnDataLoader(
-            adata_manager=self.adata_manager,
-            indices=indices,
-            batch_size=len(indices) if indices is not None else len(self.adata),
-            data_and_attributes=self.data_and_attrs,
-        )
-        return self.module._get_fn_args_from_batch(next(iter(loader)))
+    # def sample_posterior(
+    #     self,
+    #     num_samples: int = 1,
+    #     return_sites: list | None = None,
+    #     accelerator: str = "auto",
+    #     device: int | str = "auto",
+    #     return_observed: bool = False,
+    # ):
+    #     _, _, device = parse_device_args(
+    #         accelerator=accelerator, devices=device, return_device="torch", validate_single_device=True
+    #     )
 
-    def sample_alternative_model(
-        self,
-        num_samples: int = 1,
-        guide_obs=None,
-        guide_by_element=None,
-        element_by_gene_lfc=None,
-        module_kwargs: dict | None = None,
-        module_init_kwargs: dict | None = None,
-        guide_efficacy=None,
-        gene_indices=None,
-        # gene_ids = , # TODO: allow subsampling based on gene ids instead of indices
-        param_values: dict | None = None,
-        accelerator: str = "auto",
-        device: int | str = "auto",
-    ):
-        # part 1: get parameters for simulations from module and user
-        _, _, device = parse_device_args(
-            accelerator=accelerator, devices=device, return_device="torch", validate_single_device=True
-        )
+    #     args, kwargs = self._get_data_subset()
+    #     args = [a.to(device) for a in args]
+    #     kwargs = {k: v.to(device) for k, v in kwargs.items()}
+    #     kwargs[REGISTRY_KEYS.X_KEY] = None
+    #     self.to_device(device)
 
-        guide_sites_to_discard = ["element_effects", "guide_efficacy"]
-        cell_latents = ["cell_factors"]
-
-        # get data args for a subset of cells
-        indices = np.random.randint(self.module.n_cells, size=num_samples)
-        (idx,), kwargs = self._get_data_subset(indices)
-
-        # new indices should just be 1 to n_samples for subsampling purposes
-        args = (torch.arange(num_samples).to(device=device),)
-        assert args[0].shape == idx.shape
-
-        # load model kwargs from data subset (e.g. covariates, size factors)
-        kwargs = {k: v.to(device) for k, v in kwargs.items()}
-        kwargs[REGISTRY_KEYS.PERTURBATION_KEY] = torch.tensor(guide_obs).to(device)
-        kwargs[REGISTRY_KEYS.X_KEY] = None
-
-        if module_init_kwargs is None:
-            module_init_kwargs = {}
-
-        if module_kwargs is not None:
-            kwargs.update(module_kwargs)
-
-        if guide_by_element is not None:
-            n_guides, n_elements = guide_by_element.shape
-            guide_by_element = torch.tensor(guide_by_element, dtype=torch.float32)
-
-        if gene_indices is not None:
-            gene_indices = torch.tensor(gene_indices, dtype=torch.long).to(device)
-            n_genes_new = gene_indices.shape[0]
-        else:
-            n_genes_new = self.module.n_genes
-
-        # get MAP values for latents from guide then override with any user-provided values
-        latent_vars = {
-            k: v.to(device) for k, v in self.module.guide.median().items() if k not in guide_sites_to_discard
-        }
-
-        for param_name, param_value in latent_vars.items():
-            if param_name in cell_latents:
-                latent_vars[param_name] = param_value[..., idx, :]
-            elif param_value.shape[-1] == self.module.n_genes and gene_indices is not None:
-                # subset gene indices for gene-specific latents
-                latent_vars[param_name] = param_value[..., gene_indices]
-
-        if element_by_gene_lfc is not None:
-            element_by_gene_lfc = torch.tensor(element_by_gene_lfc, dtype=torch.float32).to(device)
-            latent_vars["element_effects"] = element_by_gene_lfc
-
-        if guide_efficacy is not None:
-            guide_efficacy = torch.tensor(guide_efficacy, dtype=torch.float32).unsqueeze(-1).to(device)
-            assert guide_efficacy.shape == (n_guides, 1)
-            latent_vars["guide_efficacy"] = guide_efficacy
-
-        if param_values is not None:
-            latent_vars.update(param_values)
-
-        # TODO save parameters
-
-        # part 2: create new module to sample from, and sample from it
-
-        # create new module to sample from
-        module_new = PerTurboPyroModule(
-            n_cells=num_samples,
-            n_genes=n_genes_new,
-            n_elements=n_elements,
-            n_perturbations=n_guides,
-            guide_by_element=guide_by_element,
-            n_batches=self.module.n_batches,
-            n_cont_covariates=self.module.n_cont_covariates - 1,  # size factor auto included
-            n_factors=self.module.n_factors,
-            dispersion_effects=self.module.dispersion_effects,
-            likelihood=self.module.likelihood,
-            merge_guides_mode=self.module.merge_guides_mode,
-            effect_prior_dist=self.module.effect_prior_dist,
-            use_interactions=self.module.use_interactions,
-            efficiency_mode=self.module.efficiency_mode,
-            use_crispr_factor=self.module.use_crispr_factor,
-            **module_init_kwargs,
-        )
-        module_new.to(device)
-
-        conditioned_model = condition(module_new, data=latent_vars)
-        sampled_counts = conditioned_model(*args, **kwargs).squeeze().detach().cpu().numpy()
-        return sampled_counts
-
-    def sample_posterior(
-        self,
-        num_samples: int = 1,
-        return_sites: list | None = None,
-        accelerator: str = "auto",
-        device: int | str = "auto",
-        return_observed: bool = False,
-    ):
-        _, _, device = parse_device_args(
-            accelerator=accelerator, devices=device, return_device="torch", validate_single_device=True
-        )
-
-        args, kwargs = self._get_data_subset()
-        args = [a.to(device) for a in args]
-        kwargs = {k: v.to(device) for k, v in kwargs.items()}
-        kwargs[REGISTRY_KEYS.X_KEY] = None
-        self.to_device(device)
-
-        samples = self._get_posterior_samples(
-            args,
-            kwargs=kwargs,
-            num_samples=num_samples,
-            return_sites=return_sites,
-            return_observed=return_observed,
-        )
-        return samples
+    #     samples = self._get_posterior_samples(
+    #         args,
+    #         kwargs=kwargs,
+    #         num_samples=num_samples,
+    #         return_sites=return_sites,
+    #         return_observed=return_observed,
+    #     )
+    #     return samples
