@@ -16,21 +16,3 @@ def test_mudata_filtering(mdata):
     )
     assert result is not None
     # Add more assertions based on expected behavior
-
-
-# def test_mudata_filtering_nguides_per_element(mdata):
-#     result = mudata_filtering(mdata=mdata, nguides_per_element=3)
-#     assert result is not None
-#     # Add more assertions based on expected behavior
-
-
-# def test_mudata_filtering_n_nonzero_trt_thresh(mdata):
-#     result = mudata_filtering(mdata=mdata, n_nonzero_trt_thresh=10)
-#     assert result is not None
-#     # Add more assertions based on expected behavior
-
-
-# def test_mudata_filtering_n_nonzero_cntrl_thresh(mdata):
-#     result = mudata_filtering(mdata=mdata, n_nonzero_cntrl_thresh=10)
-#     assert result is not None
-#     # Add more assertions based on expected behavior
