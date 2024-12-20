@@ -67,7 +67,7 @@ class Support_Functions:
         if guide_by_element_key is None:
             print("Please indicate the correct guide_by_element_key.")
             return
-        
+
         rna = mdata["rna"].X.toarray()
         grna = mdata["grna"].X.toarray()
         element = mdata["grna"].X @ mdata["grna"].varm[guide_by_element_key].toarray()
@@ -226,9 +226,9 @@ class Support_Functions:
             "Efficacy": [],
             "Method": [],
             "MTmethod": [],
-            #"Likelihood": [],
-            #"Effect_Prior": [],
-            #"Merge_Guides": []
+            # "Likelihood": [],
+            # "Effect_Prior": [],
+            # "Merge_Guides": []
         }
         if method == "wilcoxon":
             del list_dict["LFC_hat"]
@@ -240,7 +240,7 @@ class Support_Functions:
         list_dict=None,  # a dictionary of list that we will extend onto
         element_effects=None,  # an output table of the model, saving loc/z-value/p-vlaue of each tested element-gene pair
         method="perturbo",  # glm/SECPTRE/wilcoxo, when here is wilcoxon, then do not include LFC_hat_list
-        #nguides_per_element=4,
+        # nguides_per_element=4,
         ngenes=100,
         gene_mean=None,  # a pd.Series of gene mean values, len = ngenes
         gene_disp=None,  # a pd.Series of gene total_count values, len = ngenes
@@ -250,9 +250,9 @@ class Support_Functions:
         alpha_base=0.1,  # write another function to create this
         guide_efficacy_values=[1, 2 / 3, 1 / 3, 0],
         MTmethod="none",  # "none"/"FDR"/"FWER"
-        #likelihood="lnnb",
-        #effect_prior_dist="normal",
-        #merge_guides_mode="partial"
+        # likelihood="lnnb",
+        # effect_prior_dist="normal",
+        # merge_guides_mode="partial"
     ):
         list_dict["Gene_id"].extend(element_effects["gene"])
         list_dict["Element_id"].extend(element_effects["element"])
@@ -284,27 +284,33 @@ class Support_Functions:
         list_dict["Efficacy"].extend([str([round(x, 2) for x in guide_efficacy_values])] * npairs)
         list_dict["Method"].extend([method] * npairs)
         list_dict["MTmethod"].extend([MTmethod] * npairs)
-        #list_dict["Likelihood"].extend([likelihood] * npairs)
-        #list_dict["Effect_Prior"].extend([effect_prior_dist] * npairs)
-        #list_dict["Merge_Guides"].extend([merge_guides_mode] * npairs)
+        # list_dict["Likelihood"].extend([likelihood] * npairs)
+        # list_dict["Effect_Prior"].extend([effect_prior_dist] * npairs)
+        # list_dict["Merge_Guides"].extend([merge_guides_mode] * npairs)
 
         return list_dict
 
     @staticmethod
     def get_alpha_corrected(
         alpha_base=0.05,
-        MTmethod="none",  # "none"/"FDR"/"FWER"
+        MTmethod="none",  # "none"/"FDR"/"FWER"/"FDR_old"
         element_effects=None,
+        p_value_col="q_value",
         ngenes=100,
     ):
         if MTmethod == "none":
             alpha_cor = alpha_base
-        elif MTmethod == "FDR":
+        elif MTmethod == "FDR_old":
             # pvals = element_effects.loc[0:ngenes, "q_value"]  # a list of p_values
-            pvals = element_effects[element_effects["element"].str.contains("gene")]["q_value"]
+            pvals = element_effects[element_effects["element"].str.contains("gene")][p_value_col]
             pvals_no_an = pvals[~np.isnan(pvals)]
             rejected, pvals_corrected, _, _ = multipletests(pvals_no_an, alpha=alpha_base, method="fdr_bh")
-            alpha_cor = max(pvals_corrected[rejected]) if any(rejected) else alpha_base
+            alpha_cor = max(pvals_no_an[rejected]) if any(rejected) else alpha_base
+        elif MTmethod == "FDR":
+            pvals = element_effects[element_effects["element"].str.contains("gene")][p_value_col]
+            assert not pvals.isna().any(), f"NaN values found in p-value column: '{p_value_col}'"
+            rejected, pvals_corrected, _, alpha_bh = multipletests(pvals, alpha=alpha_base, method="fdr_bh")
+            alpha_cor = pvals[rejected].max() if rejected.any() else alpha_bh
         elif MTmethod == "FWER":
             alpha_cor = alpha_base / ngenes
 
@@ -351,12 +357,6 @@ class Support_Functions:
 
                 positive_pairs = pd.concat(results)
 
-        power_summary = (
-            positive_pairs.groupby(
-                group_columns
-            )
-            .agg(Power=("significance", "mean"))
-            .reset_index()
-        )
+        power_summary = positive_pairs.groupby(group_columns).agg(Power=("significance", "mean")).reset_index()
 
         return power_summary
