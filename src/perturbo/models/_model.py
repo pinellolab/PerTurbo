@@ -6,13 +6,11 @@ import torch
 from mudata import AnnData, MuData
 from pandas import DataFrame
 from pyro.infer import TraceEnum_ELBO
-from pyro.poutine import condition
 from scipy.sparse import issparse
 from scipy.stats import chi2
 from scvi._types import AnnOrMuData
 from scvi.data import AnnDataManager, fields
-from scvi.dataloaders import AnnDataLoader, DeviceBackedDataSplitter
-from scvi.model._utils import parse_device_args
+from scvi.dataloaders import DeviceBackedDataSplitter
 from scvi.model.base import (
     BaseModelClass,
     PyroSampleMixin,

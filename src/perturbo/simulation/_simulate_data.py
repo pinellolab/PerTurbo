@@ -93,7 +93,7 @@ class Simulate_Data:
         self.df = df  # parameters for obs
 
     def _assign_values(self):
-        """ "Assign values like total number genes from the estimated parameters, which have just been read in."""
+        """Assign values like total number genes from the estimated parameters, which have just been read in."""
         dfs = self.dfs
 
         total_genes = dfs["log_gene_mean"].shape[0]
@@ -325,6 +325,7 @@ class Simulate_Data:
     def _sample_grna(self):
         """
         Generate grna.X: self.grna_data, a sparse matrix, with ncell rows and nguides columns
+
         The number of positive guides in each cell follows number of guides per cell computed from a pre-defined number of cells per guide,
         the number of ntc guides in each cell should also follow the previous computed number of guides per cell, to mimic the real functional guides.
         """
@@ -364,7 +365,9 @@ class Simulate_Data:
             if ntc_element_target_method == "random":
                 # randomly assign ntc guides to ntc elements
                 for j in range(nelements_ntc):
-                    affecting_rows = np.random.choice(nguides_ntc, nguides_per_element, replace=False)  # in each column assign 4 values to 1
+                    affecting_rows = np.random.choice(
+                        nguides_ntc, nguides_per_element, replace=False
+                    )  # in each column assign 4 values to 1
                     element_targeted_ntc_dense[affecting_rows, j] = 1
 
             elif ntc_element_target_method == "fixed":
@@ -400,6 +403,7 @@ class Simulate_Data:
     def _get_element_tested(self):
         """
         Generate rna.varm["element_tested"]. self.element_tested, a sparse matrix indicating potentially related elements and genes, with nelement rows, ngenes cols.
+
         In "positive_control" case, it is an identity matrix, one element is only targeting one gene.
         In "negative_control" case, it is a matrix full of 1. Studying as much negative pairs as possible creates a more realistic negative control distribution.
         """
@@ -437,6 +441,7 @@ class Simulate_Data:
     def _get_total_perturbation_effect(self):
         """
         Get matrix of the effect of each guide on each gene according to guide_efficacy and element_effects.
+
         Output: self.total_perturbation_effect. An np.array, with nguides rows and ngenes cols
         """
         lfc = self.lfc
@@ -446,7 +451,7 @@ class Simulate_Data:
         nelements = self.nelements
         nelements_pos = self.nelements_pos
         if "negative_control" in guide_category:
-            nelements_ntc = self.nelements_ntc
+            # nelements_ntc = self.nelements_ntc
             nguides_ntc = self.nguides_ntc
         element_targeted = self.element_targeted
         element_tested = self.element_tested
@@ -502,7 +507,7 @@ class Simulate_Data:
         gene_ids = self._get_random_indices()
         batch_key = self.batch_key
         total_batches = self.total_batches
-        nbatches = self.nbatches
+        # nbatches = self.nbatches
         ncells = self.ncells
 
         # get random batch ids for selecting corresponding batch effects from real_world data
@@ -511,7 +516,7 @@ class Simulate_Data:
         # One-hot encode batch number
         one_hot_matrix = np.zeros((ncells, total_batches), dtype=int)
         batch_mapping = {f"batch_{i}": i for i in range(total_batches)}
-        batch_list = obs[batch_key]
+        # batch_list = obs[batch_key]
 
         for i, batch in enumerate(obs[batch_key]):
             col_idx = batch_mapping[batch]
@@ -525,7 +530,7 @@ class Simulate_Data:
 
     def _get_logits(self):
         """Get the raw logits matrix. A torch.tensor, with ncells rows, ngenes cols."""
-        size_factor_key = self.size_factor_key
+        # size_factor_key = self.size_factor_key
         batch_key = self.batch_key
         continuous_covariates_keys = self.continuous_covariates_keys
         dfs = self.dfs
@@ -609,8 +614,8 @@ class Simulate_Data:
     def _get_correction_term(self):
         """A cell specific shift value of gene mean. A np.array, length ncells."""
         library_size_mean = self.library_size_mean
-        ngenes = self.ngenes
-        ncells = self.ncells
+        # ngenes = self.ngenes
+        # ncells = self.ncells
         grna_data = self.grna_data
         simulate_distribution = self.simulate_distribution
         total_perturbation_effect = self._get_total_perturbation_effect()
@@ -651,7 +656,7 @@ class Simulate_Data:
     def _get_logits_corrected(self):
         """Get the logits after correction. A torch.tensor, with ncell rows, ngene columns"""
         correction_term = self._get_correction_term()
-        ncells = self.ncells
+        # ncells = self.ncells
         logits = self.logits
         slope = self.log_mean_disp_slope
 
@@ -707,7 +712,7 @@ class Simulate_Data:
     def _get_logits_perturb(self):
         """Get the logits after perturbation. A torch.tensor, with ncell rows, ngene columns"""
         logits_corrected = self._get_logits_corrected()
-        total_count_corrected = self._get_total_count_corrected()
+        # total_count_corrected = self._get_total_count_corrected()
         # logits_spread = self._add_size_factor_in_logit(logits_corrected, total_count_corrected)
 
         log_pert_effect = self.log_pert_effect
