@@ -77,9 +77,9 @@ def test_model_mdata(
     # test simulator
     n_grna_new = 16
     n_elements_new = 4
-    n_cells_new = 11
+    n_cells_new = mdata[rna_key].n_obs * 2  # greater than original
     n_genes = mdata[rna_key].n_vars
-    n_genes_new = 6
+    n_genes_new = n_genes // 2  # less than original
     new_genes_idx = np.random.choice(n_genes, size=n_genes_new, replace=False)
     guide_by_element_new = np.random.binomial(1, 0.8, size=(n_grna_new, n_elements_new)).astype(np.float32)
     element_by_gene_lfc = np.random.normal(0, 1, size=(n_elements_new, n_genes_new)).astype(np.float32)
@@ -89,7 +89,7 @@ def test_model_mdata(
     for i in range(n_cells_new):
         grna_counts_new[i, np.random.choice(n_grna_new)] = 1
 
-    x_new = perturbo.simulation.simulate_data_from_trained_model(
+    mdata_new = perturbo.simulation.simulate_data_from_trained_model(
         model,
         guide_obs=grna_counts_new,
         guide_by_element=guide_by_element_new,
@@ -98,7 +98,8 @@ def test_model_mdata(
         gene_indices=new_genes_idx,
     )
 
-    assert x_new.shape == (n_cells_new, n_genes_new)
+    assert mdata_new[rna_key].shape == (n_cells_new, n_genes_new)
+    assert mdata_new[perturb_key].shape == (n_cells_new, n_grna_new)
 
     # model.train(max_epochs=1, lr=0.1)
     # p_loc, p_scale = model.moduleget_perturbation_effects()

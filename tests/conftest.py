@@ -22,7 +22,7 @@ def adata():
     total_rna = pd.DataFrame(
         {
             "lib_size": np.random.lognormal(10, 1, size=(n_cells)),
-            "batch_id": np.random.choice(["batch_1", "batch_2"], size=(n_cells)),
+            "batch_id": np.random.choice(["batch_1", "batch_2", "batch_3"], size=(n_cells)),
         }
     )
     rna_counts = np.random.negative_binomial(100, 0.9, size=(n_cells, n_genes)).astype(np.float32)

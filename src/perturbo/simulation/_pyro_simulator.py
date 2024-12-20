@@ -1,5 +1,7 @@
 import numpy as np
+import pandas as pd
 import torch
+from mudata import AnnData, MuData
 from numpy.typing import ArrayLike
 from pyro.poutine import condition
 from scvi.dataloaders import AnnDataLoader
@@ -15,6 +17,7 @@ def simulate_data_from_trained_model(
     guide_by_element: ArrayLike,
     element_by_gene_lfc: ArrayLike,
     guide_efficacy: ArrayLike,
+    read_depth_adjust_factor: float = 1.0,
     module_kwargs: dict | None = None,
     module_init_kwargs: dict | None = None,
     gene_indices: ArrayLike = None,
@@ -94,7 +97,7 @@ def simulate_data_from_trained_model(
     guide_by_element = torch.tensor(guide_by_element, dtype=torch.float32)
 
     if gene_indices is not None:
-        gene_indices = torch.tensor(gene_indices, dtype=torch.long).to(device)
+        gene_indices_tensor = torch.tensor(gene_indices, dtype=torch.long).to(device)
         n_genes_new = gene_indices.shape[0]
     else:
         n_genes_new = model.module.n_genes
@@ -102,12 +105,13 @@ def simulate_data_from_trained_model(
     # get MAP values for latents from guide then override with any user-provided values
     latent_vars = {k: v.to(device) for k, v in model.module.guide.median().items() if k not in guide_sites_to_discard}
 
+    latent_vars["log_gene_mean"] *= np.log(read_depth_adjust_factor)
     for param_name, param_value in latent_vars.items():
         if param_name in cell_latents:
             latent_vars[param_name] = param_value[..., idx, :]
         elif param_value.shape[-1] == model.module.n_genes and gene_indices is not None:
             # subset gene indices for gene-specific latents
-            latent_vars[param_name] = param_value[..., gene_indices]
+            latent_vars[param_name] = param_value[..., gene_indices_tensor]
 
     if element_by_gene_lfc is not None:
         element_by_gene_lfc = torch.tensor(element_by_gene_lfc, dtype=torch.float32).to(device)
@@ -119,10 +123,6 @@ def simulate_data_from_trained_model(
 
     if param_values is not None:
         latent_vars.update(param_values)
-
-    # TODO save parameters
-
-    # part 2: create new module to sample from, and sample from it
 
     # create new module to sample from
     module_new = PerTurboPyroModule(
@@ -145,9 +145,39 @@ def simulate_data_from_trained_model(
     )
     module_new.to(device)
 
+    # sample counts matrix from conditioned model
     conditioned_model = condition(module_new, data=latent_vars)
     sampled_counts = conditioned_model(*args, **kwargs).squeeze().detach().cpu().numpy()
-    return sampled_counts
+
+    # Create an AnnData object to return
+    obs_cols = [REGISTRY_KEYS.SIZE_FACTOR_KEY, REGISTRY_KEYS.BATCH_KEY]
+
+    data_registry = model.adata_manager.data_registry
+    rna_key = data_registry[REGISTRY_KEYS.X_KEY].mod_key
+    grna_key = data_registry[REGISTRY_KEYS.PERTURBATION_KEY].mod_key
+    guide_by_element_key = (
+        data_registry[REGISTRY_KEYS.GUIDE_BY_ELEMENT_KEY].attr_key
+        if REGISTRY_KEYS.GUIDE_BY_ELEMENT_KEY in data_registry
+        else "targeted_elements"
+    )
+    gene_by_element_key = "lfc"
+
+    rna_adata = AnnData(
+        X=sampled_counts,
+        obs=model.adata[rna_key].obs.iloc[idx.squeeze().detach().cpu().numpy(), :].reset_index(),
+        var=model.adata[rna_key].var.iloc[gene_indices, :],
+        varm={gene_by_element_key: element_by_gene_lfc.T.detach().cpu().numpy()},
+    )
+
+    grna_adata = AnnData(
+        X=guide_obs,
+        varm={
+            guide_by_element_key: guide_by_element.detach().cpu().numpy(),
+        },
+    )
+
+    mdata_new = MuData({rna_key: rna_adata, grna_key: grna_adata})
+    return mdata_new
 
 
 def _get_data_subset(model: PERTURBO, indices: list | None = None):
