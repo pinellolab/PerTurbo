@@ -1,13 +1,16 @@
 import numpy as np
 import pandas as pd
 from mudata import MuData
+from scipy.sparse import csr_matrix, issparse
 from statsmodels.stats.multitest import multipletests  # for FDR correction
 
 
 def mudata_filtering(
-    mdata: MuData | None = None,
+    mdata: MuData,
     gene_by_element_key: str | None = "element_tested",
     guide_by_element_key: str | None = "element_targeted",
+    rna_modality="rna",
+    grna_modality="grna",
     nguides_per_element: int | None = 2,
     n_nonzero_trt_thresh: int | None = 7,
     n_nonzero_cntrl_thresh: int | None = 7,
@@ -34,17 +37,26 @@ def mudata_filtering(
         print("Please indicate the correct guide_by_element_key.")
         return
 
-    rna = mdata["rna"].X.toarray()
-    # grna = mdata["grna"].X.toarray()
-    element = mdata["grna"].X @ mdata["grna"].varm[guide_by_element_key].toarray()
+    rna = mdata[rna_modality].X.toarray()
+    # grna = mdata[grna_modality].X.toarray()
+    guide_by_element = mdata[grna_modality].varm[guide_by_element_key]
+    if isinstance(guide_by_element, pd.DataFrame):
+        guide_by_element = guide_by_element.values
+    if issparse(guide_by_element):
+        guide_by_element = guide_by_element.toarray()
+
+    element = mdata[grna_modality].X @ guide_by_element
 
     if gene_by_element_key is not None:
-        element_tested_array = mdata["rna"].varm[gene_by_element_key].toarray()
-        element_tested_filtered = mdata["rna"].varm[gene_by_element_key].copy()
+        element_tested = mdata[rna_modality].varm[gene_by_element_key]
+        if isinstance(element_tested, pd.DataFrame):
+            element_tested = element_tested.values
+        if issparse(element_tested):
+            element_tested = element_tested.toarray()
 
     for col_element in range(element.shape[1]):
         # change the idx of element to gene
-        cols = np.nonzero(element_tested_array[:, col_element] > 0)[0]
+        cols = np.nonzero(element_tested[:, col_element] > 0)[0]
 
         element_mask_1 = (element[:, col_element] >= 1).flatten()
         element_mask_0 = (element[:, col_element] == 0).flatten()
@@ -62,18 +74,17 @@ def mudata_filtering(
 
             # If one of the conditions do not hold, then we remove this pair from element_tested
             if not condition_trt or not condition_cntrl:
-                element_tested_filtered[col, col_element] = 0
+                element_tested[col, col_element] = 0
 
     # Create filtered rna & grna modality
     mdata_filtered = mdata.copy()
-    element_tested_filtered.eliminate_zeros()
 
     if gene_by_element_key is not None:
-        mdata_filtered.mod["rna"].varm[gene_by_element_key] = element_tested_filtered
+        mdata_filtered.mod[rna_modality].varm[gene_by_element_key] = csr_matrix(element_tested)
 
         # compare number of pairs before and after sampling
-        npairs_before = mdata["rna"].varm[gene_by_element_key].nnz
-        npairs_after = mdata_filtered["rna"].varm[gene_by_element_key].nnz
+        npairs_before = (mdata[rna_modality].varm[gene_by_element_key] != 0).sum()
+        npairs_after = mdata_filtered[rna_modality].varm[gene_by_element_key].nnz
         print(f"{npairs_after} element-gene pairs pass the filtering among all {npairs_before} pairs.")
 
     return mdata_filtered
