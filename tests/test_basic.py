@@ -150,8 +150,10 @@ def test_model_mdata(
     n_elements_new = 4
     n_cells_new = 11
     n_genes = mdata[rna_key].n_vars
+    n_genes_new = 6
+    new_genes_idx = np.random.choice(n_genes, size=n_genes_new, replace=False)
     guide_by_element_new = np.random.binomial(1, 0.8, size=(n_grna_new, n_elements_new)).astype(np.float32)
-    element_by_gene_lfc = np.random.normal(0, 1, size=(n_elements_new, n_genes))
+    element_by_gene_lfc = np.random.normal(0, 1, size=(n_elements_new, n_genes_new)).astype(np.float32)
     # generate fake guide status (low MOI)
     grna_counts_new = np.zeros((n_cells_new, n_grna_new), dtype=np.float32)
     for i in range(n_cells_new):
@@ -159,12 +161,13 @@ def test_model_mdata(
 
     x_new = model.sample_alternative_model(
         num_samples=n_cells_new,
+        gene_indices=new_genes_idx,
         guide_obs=grna_counts_new,
         guide_by_element=guide_by_element_new,
         element_by_gene_lfc=element_by_gene_lfc,
     )
 
-    assert x_new.shape == (n_cells_new, n_genes)
+    assert x_new.shape == (n_cells_new, n_genes_new)
 
     # model.train(max_epochs=1, lr=0.1)
     # p_loc, p_scale = model.moduleget_perturbation_effects()

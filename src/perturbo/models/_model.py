@@ -501,10 +501,14 @@ class PERTURBO(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
         element_by_gene_lfc=None,
         module_kwargs: dict | None = None,
         module_init_kwargs: dict | None = None,
+        # guide_efficacy =,
+        gene_indices=None,
+        # gene_ids = , # TODO: allow subsampling based on gene ids instead of indices
         param_values: dict | None = None,
         accelerator: str = "auto",
         device: int | str = "auto",
     ):
+        # part 1: get parameters for simulations from module and user
         _, _, device = parse_device_args(
             accelerator=accelerator, devices=device, return_device="torch", validate_single_device=True
         )
@@ -521,39 +525,56 @@ class PERTURBO(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
         assert args[0].shape == idx.shape
 
         kwargs = {k: v.to(device) for k, v in kwargs.items()}
-        kwargs[REGISTRY_KEYS.PERTURBATION_KEY] = torch.Tensor(guide_obs)
+        for k, v in kwargs.items():
+            print(k, v.shape)
+        kwargs[REGISTRY_KEYS.PERTURBATION_KEY] = torch.tensor(guide_obs)
         kwargs[REGISTRY_KEYS.X_KEY] = None
 
         if module_kwargs is not None:
             kwargs.update(module_kwargs)
 
         if guide_by_element is not None:
-            guide_by_element = torch.Tensor(guide_by_element)
+            guide_by_element = torch.tensor(guide_by_element, dtype=torch.float32)
+
+        if gene_indices is not None:
+            gene_indices = torch.tensor(gene_indices, dtype=torch.long)
+            n_genes_new = gene_indices.shape[0]
+        else:
+            n_genes_new = self.module.n_genes
 
         # get MAP values for latents from guide then override with any user-provided values
         latent_vars = {k: v for k, v in self.module.guide.median().items() if k not in guide_sites_to_discard}
-        for var in cell_latents:
-            if var in latent_vars:
-                latent_vars[var] = latent_vars[var][..., idx, :]
+        for param_name, param_value in latent_vars.items():
+            if param_name in cell_latents:
+                latent_vars[param_name] = param_value[..., idx, :]
+            elif param_value.shape[-1] == self.module.n_genes and gene_indices is not None:
+                # subset gene indices for gene-specific latents
+                print(f"reshaping {param_name}: {param_value.shape}")
+                latent_vars[param_name] = param_value[..., gene_indices]
+                print(f"new value {latent_vars[param_name].shape}")
 
         if element_by_gene_lfc is not None:
-            element_by_gene_lfc = torch.Tensor(element_by_gene_lfc)
+            element_by_gene_lfc = torch.tensor(element_by_gene_lfc, dtype=torch.float32)
             latent_vars["element_effects"] = element_by_gene_lfc
 
         if param_values is not None:
             latent_vars.update(param_values)
 
         # need to pad posterior samples with leading dimension (since we are sampling once from posterior)
-        posterior_samples = {k: v.unsqueeze(0) for k, v in latent_vars.items()}
+        posterior_samples = {k: v.unsqueeze(0).to(device) for k, v in latent_vars.items()}
 
         n_guides, n_elements = guide_by_element.shape
         if module_init_kwargs is None:
             module_init_kwargs = {}
 
+        # TODO save parameters
+
+        # part 2: create new module to sample from, and sample from it
+
         # create new module to sample from
         module_new = PerTurboPyroModule(
             n_cells=num_samples,
-            n_genes=self.summary_stats.n_vars,
+            n_genes=n_genes_new,
             n_elements=n_elements,
             n_perturbations=n_guides,
             guide_by_element=guide_by_element,
@@ -574,6 +595,7 @@ class PERTURBO(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
         # run data through model once
         module_new(*args, **kwargs)
 
+        # TODO (low-priority) add ability to sample from guide
         # load latent parameter values and sample counts from predictive distribution
         predictive_model = Predictive(module_new, posterior_samples=posterior_samples)
         posterior_predictive = predictive_model(*args, **kwargs)["obs"].squeeze().numpy()
