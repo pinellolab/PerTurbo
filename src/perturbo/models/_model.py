@@ -5,7 +5,8 @@ import pandas as pd
 import torch
 from mudata import AnnData, MuData
 from pandas import DataFrame
-from pyro.infer import Predictive, TraceEnum_ELBO
+from pyro.infer import TraceEnum_ELBO
+from pyro.poutine import condition
 from scipy.sparse import issparse
 from scipy.stats import chi2
 from scvi._types import AnnOrMuData
@@ -501,7 +502,7 @@ class PERTURBO(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
         element_by_gene_lfc=None,
         module_kwargs: dict | None = None,
         module_init_kwargs: dict | None = None,
-        # guide_efficacy =,
+        guide_efficacy=None,
         gene_indices=None,
         # gene_ids = , # TODO: allow subsampling based on gene ids instead of indices
         param_values: dict | None = None,
@@ -524,48 +525,50 @@ class PERTURBO(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
         args = (torch.arange(num_samples).to(device=device),)
         assert args[0].shape == idx.shape
 
+        # load model kwargs from data subset (e.g. covariates, size factors)
         kwargs = {k: v.to(device) for k, v in kwargs.items()}
-        for k, v in kwargs.items():
-            print(k, v.shape)
-        kwargs[REGISTRY_KEYS.PERTURBATION_KEY] = torch.tensor(guide_obs)
+        kwargs[REGISTRY_KEYS.PERTURBATION_KEY] = torch.tensor(guide_obs).to(device)
         kwargs[REGISTRY_KEYS.X_KEY] = None
+
+        if module_init_kwargs is None:
+            module_init_kwargs = {}
 
         if module_kwargs is not None:
             kwargs.update(module_kwargs)
 
         if guide_by_element is not None:
+            n_guides, n_elements = guide_by_element.shape
             guide_by_element = torch.tensor(guide_by_element, dtype=torch.float32)
 
         if gene_indices is not None:
-            gene_indices = torch.tensor(gene_indices, dtype=torch.long)
+            gene_indices = torch.tensor(gene_indices, dtype=torch.long).to(device)
             n_genes_new = gene_indices.shape[0]
         else:
             n_genes_new = self.module.n_genes
 
         # get MAP values for latents from guide then override with any user-provided values
-        latent_vars = {k: v for k, v in self.module.guide.median().items() if k not in guide_sites_to_discard}
+        latent_vars = {
+            k: v.to(device) for k, v in self.module.guide.median().items() if k not in guide_sites_to_discard
+        }
+
         for param_name, param_value in latent_vars.items():
             if param_name in cell_latents:
                 latent_vars[param_name] = param_value[..., idx, :]
             elif param_value.shape[-1] == self.module.n_genes and gene_indices is not None:
                 # subset gene indices for gene-specific latents
-                print(f"reshaping {param_name}: {param_value.shape}")
                 latent_vars[param_name] = param_value[..., gene_indices]
-                print(f"new value {latent_vars[param_name].shape}")
 
         if element_by_gene_lfc is not None:
-            element_by_gene_lfc = torch.tensor(element_by_gene_lfc, dtype=torch.float32)
+            element_by_gene_lfc = torch.tensor(element_by_gene_lfc, dtype=torch.float32).to(device)
             latent_vars["element_effects"] = element_by_gene_lfc
+
+        if guide_efficacy is not None:
+            guide_efficacy = torch.tensor(guide_efficacy, dtype=torch.float32).unsqueeze(-1).to(device)
+            assert guide_efficacy.shape == (n_guides, 1)
+            latent_vars["guide_efficacy"] = guide_efficacy
 
         if param_values is not None:
             latent_vars.update(param_values)
-
-        # need to pad posterior samples with leading dimension (since we are sampling once from posterior)
-        posterior_samples = {k: v.unsqueeze(0).to(device) for k, v in latent_vars.items()}
-
-        n_guides, n_elements = guide_by_element.shape
-        if module_init_kwargs is None:
-            module_init_kwargs = {}
 
         # TODO save parameters
 
@@ -592,14 +595,9 @@ class PERTURBO(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
         )
         module_new.to(device)
 
-        # run data through model once
-        module_new(*args, **kwargs)
-
-        # TODO (low-priority) add ability to sample from guide
-        # load latent parameter values and sample counts from predictive distribution
-        predictive_model = Predictive(module_new, posterior_samples=posterior_samples)
-        posterior_predictive = predictive_model(*args, **kwargs)["obs"].squeeze().numpy()
-        return posterior_predictive
+        conditioned_model = condition(module_new, data=latent_vars)
+        sampled_counts = conditioned_model(*args, **kwargs).squeeze().detach().cpu().numpy()
+        return sampled_counts
 
     def sample_posterior(
         self,

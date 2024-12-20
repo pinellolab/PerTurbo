@@ -156,6 +156,7 @@ def test_model_mdata(
     element_by_gene_lfc = np.random.normal(0, 1, size=(n_elements_new, n_genes_new)).astype(np.float32)
     # generate fake guide status (low MOI)
     grna_counts_new = np.zeros((n_cells_new, n_grna_new), dtype=np.float32)
+    guide_efficacy = np.random.uniform(size=(n_grna_new,))
     for i in range(n_cells_new):
         grna_counts_new[i, np.random.choice(n_grna_new)] = 1
 
@@ -163,6 +164,7 @@ def test_model_mdata(
         num_samples=n_cells_new,
         gene_indices=new_genes_idx,
         guide_obs=grna_counts_new,
+        guide_efficacy=guide_efficacy,
         guide_by_element=guide_by_element_new,
         element_by_gene_lfc=element_by_gene_lfc,
     )
