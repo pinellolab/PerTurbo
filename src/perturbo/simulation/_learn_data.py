@@ -55,15 +55,12 @@ class Learn_Data:  # keep consistent with perturbo / pyro
         modalities
             A dict containing these same setup argument
         """
-<<<<<<< Updated upstream
-=======
 
         if size_factor_key is None:
             size_factor_key = "size_factor"
         if library_size_key is None:
             library_size_key = "library_size"
 
->>>>>>> Stashed changes
         self.mdata_train = mdata
         self.batch_key = batch_key
         self.library_size_key = library_size_key
@@ -177,14 +174,7 @@ class Learn_Data:  # keep consistent with perturbo / pyro
         self.model.train(max_epochs=n_steps, lr=lr, batch_size=batch_size, accelerator=accelerator)
 
     def extract_obs_params(
-<<<<<<< Updated upstream
         self, estimator_type: str | None = None, df_dir_base: str | None = None, mdata_name: str | None = None
-=======
-        self, 
-        estimator_type: Optional[str] = None, 
-        df_dir_base: Optional[str] = None, 
-        mdata_name: Optional[str] = None
->>>>>>> Stashed changes
     ):
         df = self.params_for_simulation
 
@@ -272,13 +262,8 @@ class Learn_Data:  # keep consistent with perturbo / pyro
     def plot_obs(
         self,
     ):
-<<<<<<< Updated upstream
-        """Plot histograms of observable var from .obs"""
-        n_plots = len(self.continuous_covariates_keys)
-=======
         """plot histograms of observable var from .obs"""
         n_plots = len(self.continuous_covariates_keys) + 1
->>>>>>> Stashed changes
 
         # Create n_plots number of subplots
         fig, axes = plt.subplots(1, n_plots, figsize=(12, 5))
