@@ -126,11 +126,12 @@ class Simulate_Data:
         chunk_size: int | None = 10000,
     ):
         """Combine everthing we have together, generate synthetic MuData that contain enough information for training"""
+        nelements_pos = ngenes
+        
         if guide_category is None:
             guide_category = ["positive_control", "negative_control"]
         if guide_efficacy_values is None:
             guide_efficacy_values = [1.0, 1.0, 1.0, 1.0]
-        nelements_pos = ngenes
         if nguides_pos is None:
             nguides_pos = nguides_per_element * nelements_pos
         if library_size_mean is None and mean_reads_per_gene is not None:
@@ -294,7 +295,7 @@ class Simulate_Data:
         batch_key = self.batch_key
         continuous_covariates_keys = self.continuous_covariates_keys
         # library_size_key = self.library_size_key
-        # size_factor_key = self.size_factor_key
+        size_factor_key = self.size_factor_key
 
         obs = pd.DataFrame()
 
@@ -303,7 +304,8 @@ class Simulate_Data:
         obs[batch_key] = prep_batch
 
         # other obs
-        for obs_key in continuous_covariates_keys:
+        for obs_key in (continuous_covariates_keys + [size_factor_key]):
+
             obs_param_key = "params_" + obs_key.replace(".", "_")  # get the key for params_for_simulation
             obs_values = lognorm.rvs(
                 df[obs_param_key][0],
@@ -573,7 +575,7 @@ class Simulate_Data:
             logits = torch.from_numpy(
                 samples_log_gene_mean  # base mean
                 +
-                #                          obs[size_factor_key].values.reshape(-1,1) +    # size factor
+                obs[size_factor_key].values.reshape(-1,1) +    # size factor
                 sum(cov_effect_sizes.values())  # covariate effect sizes
                 - samples_log_gene_dispersion
             )  # torch.tensor, length = ngenes  # torch.tensor, length = ngenes
@@ -581,7 +583,7 @@ class Simulate_Data:
             logits = torch.from_numpy(
                 samples_log_gene_mean  # base mean
                 +
-                #                          obs[size_factor_key].values.reshape(-1,1) +    # size factor
+                obs[size_factor_key].values.reshape(-1,1) +    # size factor
                 sum(cov_effect_sizes.values())  # covariate effect sizes
                 - samples_log_gene_dispersion
                 - samples_multiplicative_noise**2 / 2
@@ -633,11 +635,12 @@ class Simulate_Data:
 
         orig_means_pert = orig_means * np.exp(log_pert_effect)
 
-        correction_term = (library_size_mean) / (orig_means_pert.sum(axis=1))  # array, length = ncells
-        correction_term = correction_term.reshape(
-            -1, 1
-        )  # this correction term already account for Size_Factor in simulation (derived from total UMIs)
-        print(f"correction term shape {correction_term.shape}")
+        correction_term = (library_size_mean) / (orig_means_pert.sum(axis=1).mean())
+        #correction_term = (library_size_mean) / (orig_means_pert.sum(axis=1))  # array, length = ncells
+        #correction_term = correction_term.reshape(
+        #    -1, 1
+        #)  # this correction term already account for Size_Factor in simulation (derived from total UMIs)
+
         self.orig_means = orig_means
         self.correction_term = correction_term
         self.log_pert_effect = log_pert_effect
@@ -731,11 +734,14 @@ class Simulate_Data:
         ngenes = self.ngenes
         chunk_size = self.chunk_size
         total_count_corrected = self.total_count_corrected
+        #print(f"total_count size {total_count_corrected.shape}")
         logits_perturb = self.logits_perturb
+        #print(f"logit size {logits_perturb.shape}")
         multiplicative_noise = self.multiplicative_noise
+        #print(f"noise size {multiplicative_noise.shape}")
 
-        print(f"logits size {logits_perturb.shape}")
-        print(f"total count size {total_count_corrected.shape}")
+        #print(f"logits size {logits_perturb.shape}")
+        #print(f"total count size {total_count_corrected.shape}")
 
         start_time = time.time()
         chunks = []
@@ -748,8 +754,10 @@ class Simulate_Data:
                 # print(f"Simulate chunk {i}.")
                 end_row = min(start_row + chunk_size, ncells)
                 logits_perturb_chunk = logits_perturb[start_row:end_row, :]
-                total_count_chunk = total_count_corrected[start_row:end_row, :]
-                simulate_chunk = dist.NegativeBinomial(logits=logits_perturb_chunk, total_count=total_count_chunk)
+                #total_count_chunk = total_count_corrected[start_row:end_row, :]
+                simulate_chunk = dist.NegativeBinomial(
+                    logits=logits_perturb_chunk, 
+                    total_count=total_count_corrected)
 
                 data_simu_chunk = csr_matrix(simulate_chunk.sample())
                 chunks.append(data_simu_chunk)
@@ -762,10 +770,10 @@ class Simulate_Data:
                 # print(f"Simulate chunk {i}.")
                 end_row = min(start_row + chunk_size, ncells)
                 logits_perturb_chunk = logits_perturb[start_row:end_row, :]
-                total_count_chunk = total_count_corrected[start_row:end_row, :]
+                #total_count_chunk = total_count_corrected[start_row:end_row, :]
                 simulate_chunk = LogNormalNegativeBinomial(
                     logits=logits_perturb_chunk,
-                    total_count=total_count_chunk,
+                    total_count=total_count_corrected,
                     multiplicative_noise_scale=multiplicative_noise,
                 )
 

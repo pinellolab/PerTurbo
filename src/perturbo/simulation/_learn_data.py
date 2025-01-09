@@ -55,12 +55,22 @@ class Learn_Data:  # keep consistent with perturbo / pyro
         modalities
             A dict containing these same setup argument
         """
+<<<<<<< Updated upstream
+=======
+
+        if size_factor_key is None:
+            size_factor_key = "size_factor"
+        if library_size_key is None:
+            library_size_key = "library_size"
+
+>>>>>>> Stashed changes
         self.mdata_train = mdata
         self.batch_key = batch_key
         self.library_size_key = library_size_key
         self.size_factor_key = size_factor_key
         # self.read_depth_key = read_depth_key
         # self.Size_Factor_key = Size_Factor_key
+
         self.continuous_covariates_keys = continuous_covariates_keys
         # self.obs_continuous_covariates_keys = obs_continuous_covariates_keys
         self.gene_by_element_key = gene_by_element_key
@@ -78,14 +88,21 @@ class Learn_Data:  # keep consistent with perturbo / pyro
         params_for_simulation = pd.DataFrame()
         obs_param_keys = []
 
-        for obs_key in self.continuous_covariates_keys:
+        obs_keys_array = self.mdata_train.mod[self.rna_layer].obs.columns.to_numpy()
+        if self.library_size_key not in obs_keys_array:
+            self.mdata_train.mod[self.rna_layer].obs[self.library_size_key] = self.mdata_train.mod[self.rna_layer].X.sum(axis=1)
+        if self.size_factor_key not in obs_keys_array:
+            log_cpm = np.log(self.mdata_train.mod[self.rna_layer].obs[self.library_size_key] / 1e6)
+            self.mdata_train.mod[self.rna_layer].obs[self.size_factor_key] = log_cpm - np.mean(log_cpm)
+
+        for obs_key in (self.continuous_covariates_keys + [self.size_factor_key]):
             obs_param_key = "params_" + obs_key.replace(".", "_")
             obs_values = self.mdata_train.mod[self.rna_layer].obs[obs_key]
-            if obs_key == self.library_size_key:
-                obs_values = obs_values  # / 1e6
-                obs_param = lognorm.fit(obs_values, floc=0)
-            else:
-                obs_param = lognorm.fit(obs_values)
+            # if obs_key == self.library_size_key:
+            #     obs_values = obs_values  # / 1e6
+            #     obs_param = lognorm.fit(obs_values, floc=0)
+            # else:
+            obs_param = lognorm.fit(obs_values)
 
             params_for_simulation[obs_param_key] = obs_param
             obs_param_keys = obs_param_keys + [obs_param_key]
@@ -160,7 +177,14 @@ class Learn_Data:  # keep consistent with perturbo / pyro
         self.model.train(max_epochs=n_steps, lr=lr, batch_size=batch_size, accelerator=accelerator)
 
     def extract_obs_params(
+<<<<<<< Updated upstream
         self, estimator_type: str | None = None, df_dir_base: str | None = None, mdata_name: str | None = None
+=======
+        self, 
+        estimator_type: Optional[str] = None, 
+        df_dir_base: Optional[str] = None, 
+        mdata_name: Optional[str] = None
+>>>>>>> Stashed changes
     ):
         df = self.params_for_simulation
 
@@ -248,8 +272,13 @@ class Learn_Data:  # keep consistent with perturbo / pyro
     def plot_obs(
         self,
     ):
+<<<<<<< Updated upstream
         """Plot histograms of observable var from .obs"""
         n_plots = len(self.continuous_covariates_keys)
+=======
+        """plot histograms of observable var from .obs"""
+        n_plots = len(self.continuous_covariates_keys) + 1
+>>>>>>> Stashed changes
 
         # Create n_plots number of subplots
         fig, axes = plt.subplots(1, n_plots, figsize=(12, 5))
@@ -258,7 +287,7 @@ class Learn_Data:  # keep consistent with perturbo / pyro
             axes = [axes]  # Convert single Axes object to a list for consistent indexing
 
         i = 0
-        for obs_key in self.continuous_covariates_keys:
+        for obs_key in (self.continuous_covariates_keys + [self.size_factor_key]):
             data = self.mdata_train[self.rna_layer].obs[obs_key]  # Your data for the histogram
             if obs_key == self.library_size_key:
                 data = data  # / 1e6
