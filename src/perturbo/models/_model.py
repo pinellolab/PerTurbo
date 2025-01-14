@@ -16,6 +16,10 @@ from scvi.model.base import (
     PyroSampleMixin,
     PyroSviTrainMixin,
 )
+from pyro import poutine
+from pyro.infer import infer_discrete
+from scvi.dataloaders import AnnDataLoader
+
 from scvi.train import PyroTrainingPlan
 from scvi.utils._docstrings import devices_dsp
 
@@ -29,6 +33,7 @@ class PERTURBO(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
     def __init__(
         self,
         mdata: AnnOrMuData,
+        # control_guides=None,
         **model_kwargs,
     ):
         super().__init__(mdata)
@@ -52,17 +57,27 @@ class PERTURBO(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
             self.data_and_attrs.update({REGISTRY_KEYS.CAT_COVS_KEY: np.float32})
             n_cats_per_cov = self.adata_manager.get_state_registry(REGISTRY_KEYS.CAT_COVS_KEY).n_cats_per_key
 
-        gene_mean = self.adata_manager.get_from_registry(REGISTRY_KEYS.GENE_SUMMARY_STATS)
 
         guide_by_element = None
         n_elements = None
         if REGISTRY_KEYS.GUIDE_BY_ELEMENT_KEY in self.adata_manager.data_registry:
             n_elements = self.summary_stats.n_targeted_elements
-            guide_by_element = self.read_varm_from_registry(REGISTRY_KEYS.GUIDE_BY_ELEMENT_KEY)
+            guide_by_element = self.read_matrix_from_registry(REGISTRY_KEYS.GUIDE_BY_ELEMENT_KEY)
 
         gene_by_element = None
         if REGISTRY_KEYS.GENE_BY_ELEMENT_KEY in self.adata_manager.data_registry:
-            gene_by_element = self.read_varm_from_registry(REGISTRY_KEYS.GENE_BY_ELEMENT_KEY)
+            gene_by_element = self.read_matrix_from_registry(REGISTRY_KEYS.GENE_BY_ELEMENT_KEY)
+
+        gene_mean = self.adata_manager.get_from_registry(REGISTRY_KEYS.GENE_SUMMARY_STATS)
+        gene_mean = torch.tensor(gene_mean, dtype=torch.float32)[:, 0]
+        # if control_guides is not None and "n_factors" in model_kwargs and guide_by_element is not None:
+        #     # control_guides, _ = torch.max(guide_by_element[:, control_elements], dim=-1)
+        #     control_mask = self.read_matrix_from_registry(REGISTRY_KEYS.PERTURBATION_KEY)[:, control_guides].sum(dim=-1)
+        #     rna_data = self.read_matrix_from_registry(REGISTRY_KEYS.X_KEY)[control_mask.bool(), :]
+        #     u, s, v = torch.pca_lowrank(torch.tensor(rna_data), q=model_kwargs["n_factors"])
+        #     model_kwargs["control_pcs"] = v.T.unsqueeze(dim=-2)
+        # print(v)
+
         self.module = PerTurboPyroModule(
             n_cells=self.summary_stats.n_cells,
             n_batches=self.summary_stats.n_batch,
@@ -84,14 +99,14 @@ class PERTURBO(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
 
         logger.info("The model has been initialized")
 
-    def read_varm_from_registry(self, registry_key):
-        varm_field = self.adata_manager.get_from_registry(registry_key)
-        if isinstance(varm_field, DataFrame):
-            varm_field = varm_field.values
-        if issparse(varm_field):
-            varm_field = varm_field.todense()
-        varm_tensor = torch.tensor(varm_field, dtype=torch.float32, requires_grad=False)
-        return varm_tensor
+    def read_matrix_from_registry(self, registry_key):
+        data = self.adata_manager.get_from_registry(registry_key)
+        if isinstance(data, DataFrame):
+            data = data.values
+        if issparse(data):
+            data = data.todense()
+        data = torch.tensor(data, dtype=torch.float32, requires_grad=False)
+        return data
 
     @classmethod
     def setup_anndata(
@@ -431,14 +446,16 @@ class PERTURBO(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
         )
         return runner()
 
-    def get_element_effects(
-        self,
-    ):
-        """Return a DataFrame summary of the effects for targeted elements on each gene."""
+    def get_element_names(self):
         if REGISTRY_KEYS.GUIDE_BY_ELEMENT_KEY in self.adata_manager.data_registry:
             element_ids = self.adata_manager.get_state_registry(REGISTRY_KEYS.GUIDE_BY_ELEMENT_KEY).column_names
         else:
             element_ids = self.adata_manager.get_state_registry(REGISTRY_KEYS.PERTURBATION_KEY).column_names
+        return element_ids
+
+    def get_element_effects(self):
+        """Return a DataFrame summary of the effects for targeted elements on each gene."""
+        element_ids = self.get_element_names()
         gene_ids = self.adata_manager.get_state_registry("X").column_names
         for guide in self.module.guide:
             if "element_effects" in guide.median():
@@ -482,6 +499,28 @@ class PERTURBO(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
         )
 
         return element_effects.sort_values("z_value")
+
+    def get_map_labels(self, indices: list | None = None):
+        args, kwargs = self._get_data_subset(indices)
+        self.module.guide(*args, **kwargs)
+        guide_trace = poutine.trace(self.module.guide).get_trace(*args, **kwargs)  # record the globals
+        trained_model = poutine.replay(self.module, trace=guide_trace)  # replay the globals
+        serving_model = infer_discrete(trained_model, first_available_dim=-4, temperature=0)
+        serving_model_trace = poutine.trace(serving_model).get_trace(*args, **kwargs)
+
+        assert "perturbed" in serving_model_trace.nodes, "Only works if module has discrete latent variables"
+
+        map_labels = serving_model_trace.nodes["perturbed"]["value"].squeeze().cpu().numpy()
+        return map_labels
+
+    def _get_data_subset(self, indices: list | None = None):
+        loader = AnnDataLoader(
+            adata_manager=self.adata_manager,
+            indices=indices,
+            batch_size=len(indices) if indices is not None else len(self.adata),
+            data_and_attributes=self.data_and_attrs,
+        )
+        return self.module._get_fn_args_from_batch(next(iter(loader)))
 
     # def sample_posterior(
     #     self,

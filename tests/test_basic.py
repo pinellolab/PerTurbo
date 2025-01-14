@@ -59,6 +59,7 @@ def test_model_mdata(
         n_pert_factors=n_pert_factors,
         efficiency_mode=efficiency_mode,
         merge_guides_mode=merge_guides_mode,
+        use_crispr_factor=True,
     )
     assert model.summary_stats.n_cells == len(mdata)
     assert model.summary_stats.n_vars == len(mdata[rna_key].var)
@@ -89,6 +90,7 @@ def test_model_mdata(
     for i in range(n_cells_new):
         grna_counts_new[i, np.random.choice(n_grna_new)] = 1
 
+    # run simulator once with new args
     mdata_new = perturbo.simulation.simulate_data_from_trained_model(
         model,
         guide_obs=grna_counts_new,

@@ -1,5 +1,4 @@
 import numpy as np
-import pandas as pd
 import torch
 from mudata import AnnData, MuData
 from numpy.typing import ArrayLike
@@ -15,8 +14,9 @@ def simulate_data_from_trained_model(
     model: PERTURBO,
     guide_obs: ArrayLike,
     guide_by_element: ArrayLike,
-    element_by_gene_lfc: ArrayLike,
-    guide_efficacy: ArrayLike,
+    guide_by_gene_lfc: ArrayLike = None,
+    element_by_gene_lfc: ArrayLike = None,
+    guide_efficacy: ArrayLike = None,
     read_depth_adjust_factor: float = 1.0,
     module_kwargs: dict | None = None,
     module_init_kwargs: dict | None = None,
@@ -71,8 +71,8 @@ def simulate_data_from_trained_model(
     n_cells, n_guides = guide_obs.shape
     assert guide_obs.shape[1] == guide_by_element.shape[0]
     assert element_by_gene_lfc.shape[0] == guide_by_element.shape[1]
-
-    guide_sites_to_discard = ["element_effects", "guide_efficacy"]
+    assert (guide_by_gene_lfc is not None) or (element_by_gene_lfc is not None and guide_efficacy is not None)
+    guide_sites_to_discard = ["element_effects", "guide_efficacy", "guide_effects", "perturbed"]
     cell_latents = ["cell_factors"]
 
     # get data args for a subset of cells
@@ -109,7 +109,7 @@ def simulate_data_from_trained_model(
     for param_name, param_value in latent_vars.items():
         if param_name in cell_latents:
             latent_vars[param_name] = param_value[..., idx, :]
-        elif param_value.shape[-1] == model.module.n_genes and gene_indices is not None:
+        elif len(param_value.shape) > 0 and param_value.shape[-1] == model.module.n_genes and gene_indices is not None:
             # subset gene indices for gene-specific latents
             latent_vars[param_name] = param_value[..., gene_indices_tensor]
 
