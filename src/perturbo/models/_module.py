@@ -324,10 +324,13 @@ class PerTurboPyroModule(PyroBaseModuleClass):
             cell_factor_plate,
             pert_factor_plate,
         ) = self.create_plates(idx)
-        batch = tensor_dict[REGISTRY_KEYS.BATCH_KEY]
-        size_factor = tensor_dict[REGISTRY_KEYS.SIZE_FACTOR_KEY]
-        guides_observed = tensor_dict[REGISTRY_KEYS.PERTURBATION_KEY]
-        cont_covariates = tensor_dict[REGISTRY_KEYS.CONT_COVS_KEY]
+                # set to the correct device
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+        batch = tensor_dict[REGISTRY_KEYS.BATCH_KEY].to(device)
+        size_factor = tensor_dict[REGISTRY_KEYS.SIZE_FACTOR_KEY].to(device)
+        guides_observed = tensor_dict[REGISTRY_KEYS.PERTURBATION_KEY].to(device)
+        cont_covariates = tensor_dict[REGISTRY_KEYS.CONT_COVS_KEY].to(device)
 
         # Effect size priors
         if self.effect_prior_dist == "normal_mixture":
@@ -344,7 +347,7 @@ class PerTurboPyroModule(PyroBaseModuleClass):
         # Sample cis/trans effect sizes
         if self.local_effects:
             with element_effects_plate:
-                element_local_effects_values = pyro.sample("element_effects", effects_dist)
+                element_local_effects_values = pyro.sample("element_effects", effects_dist).to(device)
                 element_local_effects = torch.sparse_coo_tensor(
                     self.element_by_gene_idx,
                     element_local_effects_values,
@@ -352,7 +355,8 @@ class PerTurboPyroModule(PyroBaseModuleClass):
                 )
         else:
             with element_plate, gene_plate:
-                element_local_effects = pyro.sample("element_effects", effects_dist)
+                element_local_effects = pyro.sample("element_effects", effects_dist).to(device)
+                element_local_effects = element_local_effects.to(device)  # fix device mismatch error
 
         # Pool guide information based on user-specified strategy
         if self.merge_guides_mode == "shared":
@@ -362,8 +366,10 @@ class PerTurboPyroModule(PyroBaseModuleClass):
                 guide_efficacy_values = pyro.sample(
                     "guide_efficacy",
                     dist.Beta(self.logit_efficacy_alpha, self.logit_efficacy_beta),
-                )
-            # fix weird broadcasting error
+                ).to(device)
+        
+        # fix weird broadcasting error
+        self.guide_by_element = self.guide_by_element.to(device)
         guide_efficacy_by_element = guide_efficacy_values.expand(-1, self.n_elements) * self.guide_by_element
 
         # Sample dense or factorized perturbation effects
@@ -371,10 +377,17 @@ class PerTurboPyroModule(PyroBaseModuleClass):
             element_factor_effects = 0
         else:
             with pert_factor_plate, element_plate:
-                pert_factors = pyro.sample("pert_factors", dist.Laplace(0.0, self.pert_factor_prior_scale))
+                pert_factors = pyro.sample("pert_factors", dist.Laplace(0.0, self.pert_factor_prior_scale)).to(device)
             with pert_factor_plate, gene_plate:
-                pert_loadings = pyro.sample("pert_loadings", dist.Laplace(0.0, self.pert_loading_prior_scale))
+                pert_loadings = pyro.sample("pert_loadings", dist.Laplace(0.0, self.pert_loading_prior_scale)).to(device)
             element_factor_effects = torch.einsum("fei,fjg->eg", pert_factors, pert_loadings)
+
+
+        # fix device mismatch error
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        guides_observed = guides_observed.to(device)
+        guide_efficacy_by_element = guide_efficacy_by_element.to(device)
+
 
         # Sample cell-specific factors (linear unobserved confounders) if using
         if self.n_factors is not None:
@@ -382,12 +395,12 @@ class PerTurboPyroModule(PyroBaseModuleClass):
                 cell_factors = pyro.sample(
                     "cell_factors",
                     dist.Laplace(0.0, self.cell_factor_prior_scale),
-                )
+                ).to(device)
             with cell_factor_plate, gene_plate:
                 cell_loadings = pyro.sample(
                     "cell_loadings",
                     dist.Laplace(0.0, self.cell_loading_prior_scale),
-                )
+                ).to(device)
             cell_factor_effects = torch.einsum("fci,fjg->cg", cell_factors, cell_loadings)
 
             if self.use_interactions and self.n_pert_factors is not None:
@@ -395,7 +408,7 @@ class PerTurboPyroModule(PyroBaseModuleClass):
                     pert_cell_factors = pyro.sample(
                         "pert_cell_factors",
                         dist.Laplace(0.0, self.cell_factor_prior_scale),
-                    )
+                    ).to(device)
                 element_factor_effects = (
                     torch.einsum("fei,fjg->eg", pert_cell_factors, cell_loadings) + element_factor_effects
                 )
@@ -414,7 +427,7 @@ class PerTurboPyroModule(PyroBaseModuleClass):
                 cell_element_efficacy = guides_observed @ guide_efficacy_by_element
             elif self.efficiency_mode == "mixture":
                 pert_prob = guides_observed @ guide_efficacy_values
-                perturbed = pyro.sample("perturbed", dist.Bernoulli(pert_prob))
+                perturbed = pyro.sample("perturbed", dist.Bernoulli(pert_prob)).to(device)
                 cell_element_efficacy = perturbed * guides_observed @ self.guide_by_element
                 # only targeting guides can have a CRISPR effect
             else:
@@ -425,25 +438,25 @@ class PerTurboPyroModule(PyroBaseModuleClass):
             gene_base_log_mean = pyro.sample(
                 "log_gene_mean",
                 dist.Normal(self.gene_mean_prior_loc, self.gene_mean_prior_scale),
-            )
+            ).to(device)
             gene_log_dispersion = pyro.sample(
                 "log_gene_dispersion",
                 dist.Normal(self.gene_disp_prior_loc, self.gene_disp_prior_scale),
-            )
+            ).to(device)
             if self.likelihood == "lnnb":
                 # additional noise for LogNormalNegativeBinomial likelihood
-                multiplicative_noise = pyro.sample("multiplicative_noise", dist.Exponential(self.noise_prior_rate))
+                multiplicative_noise = pyro.sample("multiplicative_noise", dist.Exponential(self.noise_prior_rate)).to(device)
                 # multiplicative_noise = 1 / self.noise_prior_rate
 
             with batch_plate:
                 # batch effects: n_batches x n_genes
-                batch_effect_size = pyro.sample("batch_effect", dist.Normal(0.0, self.batch_effect_prior_scale))
+                batch_effect_size = pyro.sample("batch_effect", dist.Normal(0.0, self.batch_effect_prior_scale)).to(device)
                 batch_effects = batch_effect_size[batch.squeeze(), ...]
                 if self.dispersion_effects:
                     batch_disp_effect_size = pyro.sample(
                         "batch_disp_effect",
                         dist.Normal(0.0, self.batch_effect_prior_scale),
-                    )
+                    ).to(device)
                     batch_disp_effects = batch_disp_effect_size[batch.squeeze(), ...]
 
             with cont_covariate_plate:
@@ -451,7 +464,7 @@ class PerTurboPyroModule(PyroBaseModuleClass):
                 cont_covariate_effect_size = pyro.sample(
                     "cont_covariate_effect",
                     dist.Normal(0.0, self.covariate_prior_sigma),
-                )
+                ).to(device)
                 covariate_effects = cont_covariates @ cont_covariate_effect_size
 
             # Calculate final expression distribution parameters for unperturbed cells
@@ -478,7 +491,7 @@ class PerTurboPyroModule(PyroBaseModuleClass):
 
             # if desired, add mean "perturbation effect" from perturbation modality
             if self.use_crispr_factor:
-                crispr_loading = pyro.sample("crispr_loading", dist.Laplace(self.zero, self.one))
+                crispr_loading = pyro.sample("crispr_loading", dist.Laplace(self.zero, self.one)).to(device)
                 crispr_effect = torch.log2(cell_element_efficacy.sum(dim=-1, keepdim=True) + 1) * crispr_loading
                 mean_perturbation_effect += crispr_effect
 
@@ -489,6 +502,11 @@ class PerTurboPyroModule(PyroBaseModuleClass):
             with cell_plate:
                 observations = tensor_dict.get(REGISTRY_KEYS.X_KEY)
                 if self.likelihood == "lnnb":
+                    nb_log_mean = nb_log_mean.to(device)
+                    nb_log_dispersion = nb_log_dispersion.to(device)
+                    multiplicative_noise = multiplicative_noise.to(device)
+                    self.lnnb_quad_points = self.lnnb_quad_points.to(device)
+                    observations = observations.to(device)
                     return pyro.sample(
                         "obs",
                         LogNormalNegativeBinomial(
@@ -498,8 +516,11 @@ class PerTurboPyroModule(PyroBaseModuleClass):
                             num_quad_points=self.lnnb_quad_points,
                         ),
                         obs=observations,
-                    )
+                    ).to(device)
                 elif self.likelihood == "nb":
+                    nb_log_mean = nb_log_mean.to(device)
+                    nb_log_dispersion = nb_log_dispersion.to(device)
+                    observations = observations.to(device)
                     return pyro.sample(
                         "obs",
                         dist.NegativeBinomial(
@@ -507,7 +528,7 @@ class PerTurboPyroModule(PyroBaseModuleClass):
                             total_count=nb_log_dispersion.exp(),
                         ),
                         obs=observations,
-                    )
+                    ).to(device)
                 else:
                     raise NotImplementedError(f"'{self.likelihood}' likelihood not implemented")
 
