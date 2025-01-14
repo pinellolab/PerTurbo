@@ -532,7 +532,7 @@ class Simulate_Data:
 
     def _get_logits(self):
         """Get the raw logits matrix. A torch.tensor, with ncells rows, ngenes cols."""
-        # size_factor_key = self.size_factor_key
+        size_factor_key = self.size_factor_key
         batch_key = self.batch_key
         continuous_covariates_keys = self.continuous_covariates_keys
         dfs = self.dfs
@@ -715,7 +715,7 @@ class Simulate_Data:
     def _get_logits_perturb(self):
         """Get the logits after perturbation. A torch.tensor, with ncell rows, ngene columns"""
         logits_corrected = self._get_logits_corrected()
-        # total_count_corrected = self._get_total_count_corrected()
+        total_count_corrected = self._get_total_count_corrected()
         # logits_spread = self._add_size_factor_in_logit(logits_corrected, total_count_corrected)
 
         log_pert_effect = self.log_pert_effect
