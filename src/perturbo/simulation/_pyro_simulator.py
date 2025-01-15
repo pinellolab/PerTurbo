@@ -14,9 +14,8 @@ def simulate_data_from_trained_model(
     model: PERTURBO,
     guide_obs: ArrayLike,
     guide_by_element: ArrayLike,
-    guide_by_gene_lfc: ArrayLike = None,
-    element_by_gene_lfc: ArrayLike = None,
-    guide_efficacy: ArrayLike = None,
+    element_by_gene_lfc: ArrayLike,
+    guide_efficacy: ArrayLike,
     read_depth_adjust_factor: float = 1.0,
     module_kwargs: dict | None = None,
     module_init_kwargs: dict | None = None,
@@ -71,7 +70,7 @@ def simulate_data_from_trained_model(
     n_cells, n_guides = guide_obs.shape
     assert guide_obs.shape[1] == guide_by_element.shape[0]
     assert element_by_gene_lfc.shape[0] == guide_by_element.shape[1]
-    assert (guide_by_gene_lfc is not None) or (element_by_gene_lfc is not None and guide_efficacy is not None)
+    assert element_by_gene_lfc is not None and guide_efficacy is not None
     guide_sites_to_discard = ["element_effects", "guide_efficacy", "guide_effects", "perturbed"]
     cell_latents = ["cell_factors"]
 
@@ -94,13 +93,14 @@ def simulate_data_from_trained_model(
     if module_kwargs is not None:
         kwargs.update(module_kwargs)
 
-    guide_by_element = torch.tensor(guide_by_element, dtype=torch.float32)
+    guide_by_element = torch.tensor(guide_by_element, dtype=torch.float32, device=device)
 
-    if gene_indices is not None:
+    if gene_indices is None:
+        n_genes_new = model.module.n_genes
+        gene_indices = slice(n_genes_new)
+    else:
         gene_indices_tensor = torch.tensor(gene_indices, dtype=torch.long).to(device)
         n_genes_new = gene_indices.shape[0]
-    else:
-        n_genes_new = model.module.n_genes
 
     # get MAP values for latents from guide then override with any user-provided values
     latent_vars = {k: v.to(device) for k, v in model.module.guide.median().items() if k not in guide_sites_to_discard}
@@ -109,15 +109,21 @@ def simulate_data_from_trained_model(
     for param_name, param_value in latent_vars.items():
         if param_name in cell_latents:
             latent_vars[param_name] = param_value[..., idx, :]
-        elif len(param_value.shape) > 0 and param_value.shape[-1] == model.module.n_genes and gene_indices is not None:
+        elif (
+            len(param_value.shape) > 0
+            and param_value.shape[-1] == model.module.n_genes
+            and n_genes_new != model.module.n_genes
+        ):
             # subset gene indices for gene-specific latents
             latent_vars[param_name] = param_value[..., gene_indices_tensor]
 
     if element_by_gene_lfc is not None:
-        element_by_gene_lfc = torch.tensor(element_by_gene_lfc, dtype=torch.float32).to(device)
+        element_by_gene_lfc = torch.tensor(element_by_gene_lfc, dtype=torch.float32, device=device)
         latent_vars["element_effects"] = element_by_gene_lfc
 
-    guide_efficacy = torch.tensor(guide_efficacy, dtype=torch.float32).unsqueeze(-1).to(device)
+    guide_efficacy = torch.tensor(guide_efficacy, dtype=torch.float32, device=device)
+    if guide_efficacy.shape == (n_guides,):
+        guide_efficacy = guide_efficacy.unsqueeze(-1)
     assert guide_efficacy.shape == (n_guides, 1)
     latent_vars["guide_efficacy"] = guide_efficacy
 
@@ -158,12 +164,14 @@ def simulate_data_from_trained_model(
         if REGISTRY_KEYS.GUIDE_BY_ELEMENT_KEY in data_registry
         else "targeted_elements"
     )
-    gene_by_element_key = "lfc"
+    gene_by_element_key = "lfc"  # create new field with gnee_by_element info
 
+    obs_new = model.adata[rna_key].obs.iloc[indices, :].reset_index()
+    var_new = model.adata[rna_key].var.iloc[gene_indices, :]
     rna_adata = AnnData(
         X=sampled_counts,
-        obs=model.adata[rna_key].obs.iloc[idx.squeeze().detach().cpu().numpy(), :].reset_index(),
-        var=model.adata[rna_key].var.iloc[gene_indices, :],
+        obs=obs_new,
+        var=var_new,
         varm={gene_by_element_key: element_by_gene_lfc.T.detach().cpu().numpy()},
     )
 
