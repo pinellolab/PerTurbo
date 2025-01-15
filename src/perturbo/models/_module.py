@@ -5,8 +5,6 @@ import pyro
 import pyro.distributions as dist
 import torch
 from pyro import poutine
-from pyro.infer import config_enumerate
-from pyro.infer.reparam import LocScaleReparam
 from pyro.infer.autoguide import AutoDelta, AutoGuideList, AutoNormal, init_to_median, init_to_value
 from scvi.module.base import PyroBaseModuleClass
 
@@ -41,10 +39,8 @@ class PerTurboPyroModule(PyroBaseModuleClass):
         use_interactions: bool = False,
         efficiency_mode: Literal["mixture", "scaled"] = "scaled",
         dispersion_effects: bool = False,
-        use_crispr_factor: bool = False,
-        merge_guides_mode: Literal["partial", "shared"] = "partial",
+        fit_guide_efficiency: bool = True,
         prior_param_dict: Mapping[str, torch.Tensor] | None = None,
-        # control_pcs: torch.Tensor | None = None,
         **module_kwargs,
     ) -> None:
         """
@@ -80,7 +76,7 @@ class PerTurboPyroModule(PyroBaseModuleClass):
         # set user-defined options for model behavior
         self.dispersion_effects = dispersion_effects
         self.likelihood = likelihood
-        self.merge_guides_mode = merge_guides_mode
+        self.fit_guide_efficiency = True
         self.lnnb_quad_points = 8
         self.n_factors = n_factors
         self.n_pert_factors = n_pert_factors
@@ -122,6 +118,7 @@ class PerTurboPyroModule(PyroBaseModuleClass):
         #     init_values["log_gene_mean"] = torch.log(gene_means)
         # if control_pcs is not None and n_factors is not None:
         #     init_values["cell_loadings"] = control_pcs
+
         self._guide.append(
             AutoNormal(
                 poutine.block(self.model, hide=self.delta_sites + self.discrete_sites),
@@ -284,7 +281,7 @@ class PerTurboPyroModule(PyroBaseModuleClass):
                 element_local_effects = element_local_effects.to(device)  # fix device mismatch error
 
         # Pool guide information based on user-specified strategy
-        if self.merge_guides_mode == "shared":
+        if not self.fit_guide_efficiency:
             guide_efficacy = self.one.expand((self.n_perturbations, 1))
         else:
             with guide_plate:
@@ -292,8 +289,6 @@ class PerTurboPyroModule(PyroBaseModuleClass):
                     "guide_efficacy",
                     dist.Beta(self.logit_efficacy_alpha, self.logit_efficacy_beta),
                 )
-            #      fix weird broadcasting error
-        # guide_efficacy_by_element = guide_efficacy_values.expand(-1, self.n_elements) * self.guide_by_element
 
         # Sample dense or factorized perturbation effects
         if self.n_pert_factors is None:
@@ -312,7 +307,6 @@ class PerTurboPyroModule(PyroBaseModuleClass):
         # fix device mismatch error
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         guides_observed = guides_observed.to(device)
-        guide_efficacy_by_element = guide_efficacy_by_element.to(device)
 
         # Sample cell-specific factors (linear unobserved confounders) if using
         if self.n_factors is not None:
@@ -435,7 +429,6 @@ class PerTurboPyroModule(PyroBaseModuleClass):
                 nb_log_dispersion = gene_log_dispersion + batch_disp_effects
 
             nb_log_mean = nb_log_mean_ctrl + mean_perturbation_effect
-            # nb_log_mean = nb_log_mean_ctrl + (cell_guide_efficacy @ self.guide_by_element @ element_effects)
 
             # Sample read counts from distributions
             with cell_plate:
