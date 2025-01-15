@@ -5,7 +5,7 @@ import pandas as pd
 import torch
 from mudata import AnnData, MuData
 from pandas import DataFrame
-from pyro.infer import TraceEnum_ELBO
+from pyro.infer import TraceEnum_ELBO, TraceMeanField_ELBO
 from scipy.sparse import issparse
 from scipy.stats import chi2
 from scvi._types import AnnOrMuData
@@ -399,6 +399,8 @@ class PERTURBO(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
         plan_kwargs = plan_kwargs if plan_kwargs is not None else {}
         if len(self.module.discrete_sites) > 0:
             plan_kwargs.update({"loss_fn": TraceEnum_ELBO(max_plate_nesting=3)})
+        else:
+            plan_kwargs.update({"loss_fn": TraceMeanField_ELBO()})
         if lr is not None and "optim" not in plan_kwargs.keys():
             plan_kwargs.update({"optim_kwargs": {"lr": lr}})
         if data_splitter_kwargs is None:
@@ -464,7 +466,7 @@ class PERTURBO(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
                 # scale_values = loc_plus_scale_values - loc_values
         # loc_values, scale_values = self.module.guide._get_loc_and_scale("element_effects")
 
-        if self.module.local_effects:
+        if len(loc_values.shape) == 1:
             # loc/scale_values are the nonzero elements of a sparse matrix of elements by genes
             i, j = self.module.element_by_gene_idx.detach().cpu().numpy().astype(int)
 

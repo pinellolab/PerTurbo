@@ -32,6 +32,7 @@ class PerTurboPyroModule(PyroBaseModuleClass):
         guide_by_element: torch.Tensor | None = None,
         gene_by_element: torch.Tensor | None = None,
         guide_noise: bool = False,
+        fit_trans_effects: bool = False,
         likelihood: Literal["nb", "lnnb"] = "nb",
         effect_prior_dist: Literal["cauchy", "normal_mixture", "normal", "laplace"] = "laplace",
         n_factors: int | None = None,
@@ -84,6 +85,7 @@ class PerTurboPyroModule(PyroBaseModuleClass):
         self.efficiency_mode = efficiency_mode
         self.local_effects = gene_by_element is not None
         self.guide_noise = guide_noise
+        self.fit_trans_effects = fit_trans_effects
 
         # copy data summary stats
         self.n_cells = n_cells
@@ -109,7 +111,7 @@ class PerTurboPyroModule(PyroBaseModuleClass):
 
         self.delta_sites = []
         # self.delta_sites = ["cell_factors"]
-        # self.delta_sites = ["cell_factors", "cell_loadings", "pert_factors", "pert_loadings"]
+        # self.delta_sites = ["cell_factors", "cell_loadings", "pert_factors", "pert_loadings", "pert_cell_loadings"]
 
         self._guide = AutoGuideList(self.model, create_plates=self.create_plates)
         # init_values = {}
@@ -175,8 +177,9 @@ class PerTurboPyroModule(PyroBaseModuleClass):
         # Normal/Laplace/Cauchy prior
         effect_prior_scales = {"cauchy": 0.01, "laplace": 0.1, "normal": 1.0}
         model_effect_prior_scale = effect_prior_scales[effect_prior_dist]
+        self.register_buffer("local_element_effects_prior_scale", torch.tensor(1.0))
         self.register_buffer("element_effects_prior_scale", torch.tensor(model_effect_prior_scale))
-        self.register_buffer("guide_effects_prior_scale", torch.tensor(model_effect_prior_scale))
+        self.register_buffer("guide_effects_prior_scale", torch.tensor(model_effect_prior_scale / 2))
 
         # normal mixture prior hyperparams
         self.register_buffer("spike_slab_prior_scales", torch.tensor([1.0, 0.1]))
@@ -184,7 +187,7 @@ class PerTurboPyroModule(PyroBaseModuleClass):
 
         # (contrastive) factor model hyperparams
         self.register_buffer("cell_factor_prior_scale", torch.tensor(1.0))
-        self.register_buffer("cell_loading_prior_scale", torch.tensor(1.0))
+        self.register_buffer("cell_loading_prior_scale", torch.tensor(10.0))
         self.register_buffer("pert_factor_prior_scale", torch.tensor(0.1))
         self.register_buffer("pert_loading_prior_scale", torch.tensor(1.0))
 
@@ -198,6 +201,12 @@ class PerTurboPyroModule(PyroBaseModuleClass):
                 assert isinstance(v, torch.Tensor) and k in buffer_keys
                 assert v.shape == self.get_buffer(k).shape
                 self.register_buffer(k, v)
+
+    def on_load(self, model):
+        old_history = model.history_.copy()
+        model.train(1, **self.on_load_kwargs)
+        model.history_ = old_history
+        pyro.clear_param_store()
 
     @staticmethod
     def _get_fn_args_from_batch(tensor_dict):
@@ -234,6 +243,7 @@ class PerTurboPyroModule(PyroBaseModuleClass):
 
     def model(self, idx, **tensor_dict):
         pyro.module("perturbo", self)
+        plates = self.create_plates(idx)
         (
             cell_plate,
             guide_plate,
@@ -244,118 +254,39 @@ class PerTurboPyroModule(PyroBaseModuleClass):
             element_effects_plate,  # sparse mode
             cell_factor_plate,
             pert_factor_plate,
-        ) = self.create_plates(idx)
+        ) = plates
 
         batch = tensor_dict[REGISTRY_KEYS.BATCH_KEY]
         size_factor = tensor_dict[REGISTRY_KEYS.SIZE_FACTOR_KEY]
         guides_observed = tensor_dict[REGISTRY_KEYS.PERTURBATION_KEY]
         cont_covariates = tensor_dict[REGISTRY_KEYS.CONT_COVS_KEY]
 
-        # Effect size priors
-        if self.effect_prior_dist == "normal_mixture":
-            comp_dist = dist.Normal(0.0, self.spike_slab_prior_scales)
-            mix_dist = dist.Categorical(probs=self.spike_slab_prior_probs)
-            effects_dist = dist.MixtureSameFamily(mix_dist, comp_dist)
-        elif self.effect_prior_dist == "cauchy":
-            effects_dist = dist.Cauchy(0.0, self.element_effects_prior_scale)
-        elif self.effect_prior_dist == "normal":
-            effects_dist = dist.Normal(0.0, self.element_effects_prior_scale)
-        elif self.effect_prior_dist == "laplace":
-            effects_dist = dist.Laplace(0.0, self.element_effects_prior_scale)
-
-        # Sample cis/trans effect sizes
-        if self.local_effects:
-            with element_effects_plate:
-                element_local_effects_values = pyro.sample("element_effects", effects_dist)
-                element_local_effects = torch.sparse_coo_tensor(
-                    self.element_by_gene_idx,
-                    element_local_effects_values,
-                    size=(self.n_elements, self.n_genes),
-                )
+        if self.fit_trans_effects:
+            element_effects = self.compute_element_effects()
         else:
-            with element_plate, gene_plate:
-                element_local_effects = pyro.sample("element_effects", effects_dist)
-
+            element_effects = self.compute_subset_element_effects()
         # Pool guide information based on user-specified strategy
         if not self.fit_guide_efficacy:
-            guide_efficacy = self.one.expand((self.n_perturbations, 1))
+            guide_efficacy = 1.0
         else:
             with guide_plate:
                 guide_efficacy = pyro.sample(
                     "guide_efficacy",
                     dist.Beta(self.logit_efficacy_alpha, self.logit_efficacy_beta),
                 )
-
-        # Sample dense or factorized perturbation effects
-        if self.n_pert_factors is None:
-            element_factor_effects = 0
-        else:
-            with pert_factor_plate, element_plate:
-                pert_factors = pyro.sample("pert_factors", dist.Laplace(0.0, self.pert_factor_prior_scale))
-            with pert_factor_plate, gene_plate:
-                pert_loadings = pyro.sample("pert_loadings", dist.Laplace(0.0, self.pert_loading_prior_scale))
-            # pert_factor_scale_term = pyro.sample(
-            #     "pert_factor_scale_term",
-            #     dist.LogNormal(-self.one, self.one),
-            # )
-            element_factor_effects = torch.einsum("fei,fjg->eg", pert_factors, pert_loadings)
-
-
-        # Sample cell-specific factors (linear unobserved confounders) if using
-        if self.n_factors is not None:
-            with cell_factor_plate, cell_plate:
-                cell_factors = pyro.sample(
-                    "cell_factors",
-                    dist.Laplace(0.0, self.cell_factor_prior_scale),
-                )
-            with cell_factor_plate, gene_plate:
-                cell_loadings = pyro.sample(
-                    "cell_loadings",
-                    dist.Laplace(0.0, self.cell_loading_prior_scale),
-                )
-            # cell_factor_scale_term = pyro.sample(
-            #     "cell_factor_scale_term",
-            #     dist.LogNormal(self.zero, self.one),
-            # )
-            cell_factor_effects = torch.einsum("fci,fjg->cg", cell_factors, cell_loadings)
-
-            # if self.use_interactions and self.n_pert_factors is not None:
-            #     with cell_factor_plate, element_plate:
-            #         pert_cell_factors = pyro.sample(
-            #             "pert_cell_factors",
-            #             dist.Laplace(0.0, self.cell_factor_prior_scale),
-            #         )
-            #     element_factor_effects = (
-            #         torch.einsum("fei,fjg->eg", pert_cell_factors, cell_loadings) + element_factor_effects
-            #     )
-        else:
-            cell_factor_effects = 0
-
-        if self.local_effects:
-            # override factor effects
-            element_effects = (1 - self.element_by_gene) * element_factor_effects + element_local_effects
-            # guide_factor_efects = self.guide_by_element @ ((1 - self.element_by_gene) * element_factor_effects)
-            # guide_local_effects = (guide_efficacy * self.guide_by_element) @ element_local_effects
-            # guide_effects = guide_factor_efects + guide_local_effects
-        else:
-            element_effects = element_factor_effects + element_local_effects
-
         guide_effects = (guide_efficacy * self.guide_by_element) @ element_effects
 
         # compute/sample guide effects as function of element effects
         with guide_plate, gene_plate:
             if self.guide_noise:
-                guide_effects = pyro.sample(
-                    "guide_effects",
-                    dist.Laplace(self.zero, self.guide_effects_prior_scale),
-                )
+                guide_effects = pyro.sample("guide_effects", dist.Laplace(self.zero, self.guide_effects_prior_scale))
             else:
                 guide_effects = pyro.deterministic("guide_effects", guide_effects)
 
         # Account for cell-specific latent "perturbation status" variable(s)
         with cell_plate:
             if self.efficiency_mode == "scaled":
-                perturbed = 1
+                perturbed = 1.0
             elif self.efficiency_mode == "mixture":
                 pert_prob = guides_observed @ guide_efficacy
                 perturbed = pyro.sample("perturbed", dist.Bernoulli(pert_prob), infer={"enumerate": "parallel"})
@@ -372,6 +303,29 @@ class PerTurboPyroModule(PyroBaseModuleClass):
         #         mean_perturbation_effect += log_guide_counts @ crispr_loading.unsqueeze(dim=-2)
         # log2_1_plus_n_targeting_guides = torch.log2(1 + guides_observed.sum(dim=-1, keepdim=True))
         # mean_perturbation_effect += log2_1_plus_n_targeting_guides @ crispr_loading.unsqueeze(dim=-2)
+
+        # Sample cell-specific factors (linear unobserved confounders) if using
+        if self.n_factors is not None:
+            with cell_factor_plate, cell_plate:
+                cell_factors = pyro.sample(
+                    "cell_factors",
+                    dist.Laplace(self.zero, self.cell_factor_prior_scale),
+                )
+            with cell_factor_plate, gene_plate:
+                cell_loadings = pyro.sample(
+                    "cell_loadings",
+                    dist.Laplace(self.zero, self.cell_loading_prior_scale),
+                )
+            cell_factor_effects = torch.einsum("fci,fjg->cg", cell_factors, cell_loadings)
+            if self.use_interactions and self.n_pert_factors is not None:
+                with cell_factor_plate, element_plate, gene_plate:
+                    pert_cell_loadings = pyro.sample(
+                        "pert_cell_loadings", dist.Laplace(0.0, self.pert_loading_prior_scale / 10)
+                    )
+                    interaction_effects = torch.einsum("fci,feg->cg", cell_factors, pert_cell_loadings)
+                cell_factor_effects += interaction_effects
+        else:
+            cell_factor_effects = 0
 
         with gene_plate:
             # Sample parameters of baseline gene expression distribution
@@ -391,12 +345,12 @@ class PerTurboPyroModule(PyroBaseModuleClass):
 
             with batch_plate:
                 # batch effects: n_batches x n_genes
-                batch_effect_size = pyro.sample("batch_effect", dist.Normal(0.0, self.batch_effect_prior_scale))
+                batch_effect_size = pyro.sample("batch_effect", dist.Normal(self.zero, self.batch_effect_prior_scale))
                 batch_effects = batch_effect_size[batch.squeeze(), ...]
                 if self.dispersion_effects:
                     batch_disp_effect_size = pyro.sample(
                         "batch_disp_effect",
-                        dist.Normal(0.0, self.batch_effect_prior_scale),
+                        dist.Normal(self.zero, self.batch_effect_prior_scale),
                     )
                     batch_disp_effects = batch_disp_effect_size[batch.squeeze(), ...]
 
@@ -404,7 +358,7 @@ class PerTurboPyroModule(PyroBaseModuleClass):
                 # covariate effects: n_cont_covariates x n_genes
                 cont_covariate_effect_size = pyro.sample(
                     "cont_covariate_effect",
-                    dist.Normal(0.0, self.covariate_prior_sigma),
+                    dist.Normal(self.zero, self.covariate_prior_sigma),
                 )
                 covariate_effects = cont_covariates @ cont_covariate_effect_size
 
@@ -452,6 +406,89 @@ class PerTurboPyroModule(PyroBaseModuleClass):
                     )
                 else:
                     raise NotImplementedError(f"'{self.likelihood}' likelihood not implemented")
+
+    def compute_element_effects(self, plates):
+        (
+            cell_plate,
+            guide_plate,
+            element_plate,
+            batch_plate,
+            gene_plate,
+            cont_covariate_plate,
+            element_effects_plate,  # sparse mode
+            cell_factor_plate,
+            pert_factor_plate,
+        ) = plates
+
+        if self.local_effects:
+            with element_effects_plate:
+                element_local_effects_values = pyro.sample(
+                    "element_local_effects", dist.Laplace(self.zero, self.local_element_effects_prior_scale)
+                )
+            element_local_effects = torch.sparse_coo_tensor(
+                self.element_by_gene_idx,
+                element_local_effects_values,
+                size=(self.n_elements, self.n_genes),
+            )
+        else:
+            element_local_effects = 0
+
+        # Sample dense or factorized perturbation effects
+        if self.n_pert_factors is None:
+            element_factor_effects = 0
+        else:
+            with pert_factor_plate, element_plate:
+                pert_factors = pyro.sample("pert_factors", dist.Laplace(self.zero, self.pert_factor_prior_scale))
+            with pert_factor_plate, gene_plate:
+                pert_loadings = pyro.sample("pert_loadings", dist.Laplace(self.zero, self.pert_loading_prior_scale))
+            element_factor_effects = torch.einsum("fei,fjg->eg", pert_factors, pert_loadings)
+
+        # override factor effects at local sites
+        if self.local_effects:
+            element_prior_effects = (1 - self.element_by_gene) * element_factor_effects + element_local_effects
+        else:
+            element_prior_effects = element_factor_effects
+
+        # Effect size priors
+        if self.effect_prior_dist == "normal_mixture":
+            comp_dist = dist.Normal(element_prior_effects, self.spike_slab_prior_scales)
+            mix_dist = dist.Categorical(probs=self.spike_slab_prior_probs)
+            effects_dist = dist.MixtureSameFamily(mix_dist, comp_dist)
+        elif self.effect_prior_dist == "cauchy":
+            effects_dist = dist.Cauchy(element_prior_effects, self.element_effects_prior_scale)
+        elif self.effect_prior_dist == "normal":
+            effects_dist = dist.Normal(element_prior_effects, self.element_effects_prior_scale)
+        elif self.effect_prior_dist == "laplace":
+            effects_dist = dist.Laplace(element_prior_effects, self.element_effects_prior_scale)
+
+        with element_plate, gene_plate:
+            element_effects = pyro.sample("element_effects", effects_dist)
+
+        return element_effects
+
+    def compute_subset_element_effects(self, element_effects_plate):
+        if self.effect_prior_dist == "normal_mixture":
+            comp_dist = dist.Normal(self.zero, self.spike_slab_prior_scales)
+            mix_dist = dist.Categorical(probs=self.spike_slab_prior_probs)
+            effects_dist = dist.MixtureSameFamily(mix_dist, comp_dist)
+        elif self.effect_prior_dist == "cauchy":
+            effects_dist = dist.Cauchy(self.zero, self.element_effects_prior_scale)
+        elif self.effect_prior_dist == "normal":
+            effects_dist = dist.Normal(self.zero, self.element_effects_prior_scale)
+        elif self.effect_prior_dist == "laplace":
+            effects_dist = dist.Laplace(self.zero, self.element_effects_prior_scale)
+
+        with element_effects_plate:
+            element_local_effects_values = pyro.sample(
+                "element_effects",
+                effects_dist,
+            )
+            element_local_effects = torch.sparse_coo_tensor(
+                self.element_by_gene_idx,
+                element_local_effects_values,
+                size=(self.n_elements, self.n_genes),
+            )
+        return element_local_effects
 
     @property
     def guide(self):
