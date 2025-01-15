@@ -110,7 +110,7 @@ def simulate_data_from_trained_model(
     # get MAP values for latents from guide then override with any user-provided values
     latent_vars = {k: v.to(device) for k, v in model.module.guide.median().items() if k not in guide_sites_to_discard}
 
-    latent_vars["log_gene_mean"] *= np.log(read_depth_adjust_factor)
+    latent_vars["log_gene_mean"] += np.log(read_depth_adjust_factor)
     for param_name, param_value in latent_vars.items():
         if param_name in cell_latents:
             latent_vars[param_name] = param_value[..., idx, :]
