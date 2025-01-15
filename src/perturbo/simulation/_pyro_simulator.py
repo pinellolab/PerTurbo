@@ -19,6 +19,7 @@ def simulate_data_from_trained_model(
     module_kwargs: dict | None = None,
     module_init_kwargs: dict | None = None,
     gene_indices: torch.Tensor | np.ndarray = None,
+    cell_indices: torch.Tensor | np.ndarray = None,
     param_values: dict | None = None,
     accelerator: str = "auto",
     device: int | str = "auto",
@@ -74,10 +75,15 @@ def simulate_data_from_trained_model(
     cell_latents = ["cell_factors"]
 
     # get data args for a subset of cells
-    indices = np.random.randint(model.module.n_cells, size=n_cells)
-    (idx,), kwargs = _get_data_subset(model, indices)
+    if cell_indices is None:
+        if n_cells != model.module.n_cells:
+            cell_indices = np.random.randint(model.module.n_cells, size=n_cells)
+        else:
+            cell_indices = np.arange(model.module.n_cells)
 
-    # new indices should just be 1 to n_samples for subsampling purposes
+    (idx,), kwargs = _get_data_subset(model, cell_indices)
+
+    # new cell indices should just be 1 to n_samples for subsampling purposes
     args = (torch.arange(n_cells).to(device=device),)
     assert args[0].shape == idx.shape
 
@@ -164,7 +170,7 @@ def simulate_data_from_trained_model(
     )
     gene_by_element_key = "lfc"  # create new field with gnee_by_element info
 
-    obs_new = model.adata[rna_key].obs.iloc[indices, :].reset_index()
+    obs_new = model.adata[rna_key].obs.iloc[cell_indices, :].reset_index()
     var_new = model.adata[rna_key].var.iloc[gene_indices, :]
     rna_adata = AnnData(
         X=sampled_counts,
