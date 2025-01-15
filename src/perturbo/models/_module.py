@@ -392,16 +392,12 @@ class PerTurboPyroModule(PyroBaseModuleClass):
 
             if self.likelihood == "lnnb":
                 # additional noise for LogNormalNegativeBinomial likelihood
-                multiplicative_noise = pyro.sample("multiplicative_noise", dist.Exponential(self.noise_prior_rate)).to(
-                    device
-                )
+                multiplicative_noise = pyro.sample("multiplicative_noise", dist.Exponential(self.noise_prior_rate))
                 # multiplicative_noise = 1 / self.noise_prior_rate
 
             with batch_plate:
                 # batch effects: n_batches x n_genes
-                batch_effect_size = pyro.sample("batch_effect", dist.Normal(0.0, self.batch_effect_prior_scale)).to(
-                    device
-                )
+                batch_effect_size = pyro.sample("batch_effect", dist.Normal(0.0, self.batch_effect_prior_scale))
                 batch_effects = batch_effect_size[batch.squeeze(), ...]
                 if self.dispersion_effects:
                     batch_disp_effect_size = pyro.sample(
