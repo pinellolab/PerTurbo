@@ -5,7 +5,7 @@ import pyro
 import pyro.distributions as dist
 import torch
 from pyro import poutine
-from pyro.infer.autoguide import AutoDelta, AutoGuideList, AutoNormal, init_to_median, init_to_value
+from pyro.infer.autoguide import AutoDelta, AutoGuideList, AutoNormal, init_to_median
 from scvi.module.base import PyroBaseModuleClass
 
 from ._constants import REGISTRY_KEYS
@@ -152,7 +152,7 @@ class PerTurboPyroModule(PyroBaseModuleClass):
         if gene_means is not None:
             e_x = gene_means
             epsilon = 1 / self.n_cells
-            self.register_buffer("gene_mean_prior_loc", torch.tensor(e_x + epsilon).log().squeeze())
+            self.register_buffer("gene_mean_prior_loc", torch.log(e_x + epsilon).squeeze())
         else:
             self.register_buffer("gene_mean_prior_loc", torch.tensor(0.0))
         self.register_buffer("gene_disp_prior_loc", torch.tensor(1.0))
@@ -245,8 +245,6 @@ class PerTurboPyroModule(PyroBaseModuleClass):
             cell_factor_plate,
             pert_factor_plate,
         ) = self.create_plates(idx)
-        # set to the correct device
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
         batch = tensor_dict[REGISTRY_KEYS.BATCH_KEY]
         size_factor = tensor_dict[REGISTRY_KEYS.SIZE_FACTOR_KEY]
@@ -277,7 +275,6 @@ class PerTurboPyroModule(PyroBaseModuleClass):
         else:
             with element_plate, gene_plate:
                 element_local_effects = pyro.sample("element_effects", effects_dist)
-                element_local_effects = element_local_effects  # fix device mismatch error
 
         # Pool guide information based on user-specified strategy
         if not self.fit_guide_efficacy:
@@ -303,9 +300,6 @@ class PerTurboPyroModule(PyroBaseModuleClass):
             # )
             element_factor_effects = torch.einsum("fei,fjg->eg", pert_factors, pert_loadings)
 
-        # fix device mismatch error
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        guides_observed = guides_observed
 
         # Sample cell-specific factors (linear unobserved confounders) if using
         if self.n_factors is not None:

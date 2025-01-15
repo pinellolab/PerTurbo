@@ -1,7 +1,6 @@
 import numpy as np
 import torch
 from mudata import AnnData, MuData
-from numpy.typing import ArrayLike
 from pyro.poutine import condition
 from scvi.dataloaders import AnnDataLoader
 from scvi.model._utils import parse_device_args
@@ -12,14 +11,14 @@ from perturbo.models._module import PerTurboPyroModule
 
 def simulate_data_from_trained_model(
     model: PERTURBO,
-    guide_obs: ArrayLike,
-    guide_by_element: ArrayLike,
-    element_by_gene_lfc: ArrayLike,
-    guide_efficacy: ArrayLike,
+    guide_obs: torch.Tensor | np.ndarray,
+    guide_by_element: torch.Tensor | np.ndarray,
+    element_by_gene_lfc: torch.Tensor | np.ndarray,
+    guide_efficacy: torch.Tensor | np.ndarray,
     read_depth_adjust_factor: float = 1.0,
     module_kwargs: dict | None = None,
     module_init_kwargs: dict | None = None,
-    gene_indices: ArrayLike = None,
+    gene_indices: torch.Tensor | np.ndarray = None,
     param_values: dict | None = None,
     accelerator: str = "auto",
     device: int | str = "auto",
@@ -84,7 +83,7 @@ def simulate_data_from_trained_model(
 
     # load model kwargs from data subset (e.g. covariates, size factors)
     kwargs = {k: v.to(device) for k, v in kwargs.items()}
-    kwargs[REGISTRY_KEYS.PERTURBATION_KEY] = torch.tensor(guide_obs).to(device)
+    kwargs[REGISTRY_KEYS.PERTURBATION_KEY] = torch.tensor(guide_obs, dtype=torch.float32).to(device)
     kwargs[REGISTRY_KEYS.X_KEY] = None
 
     if module_init_kwargs is None:
@@ -154,7 +153,6 @@ def simulate_data_from_trained_model(
     sampled_counts = conditioned_model(*args, **kwargs).squeeze().detach().cpu().numpy()
 
     # Create an AnnData object to return
-    obs_cols = [REGISTRY_KEYS.SIZE_FACTOR_KEY, REGISTRY_KEYS.BATCH_KEY]
 
     data_registry = model.adata_manager.data_registry
     rna_key = data_registry[REGISTRY_KEYS.X_KEY].mod_key
