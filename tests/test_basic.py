@@ -59,7 +59,6 @@ def test_model_mdata(
         n_pert_factors=n_pert_factors,
         efficiency_mode=efficiency_mode,
         merge_guides_mode=merge_guides_mode,
-        use_crispr_factor=True,
     )
     assert model.summary_stats.n_cells == len(mdata)
     assert model.summary_stats.n_vars == len(mdata[rna_key].var)

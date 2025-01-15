@@ -140,7 +140,6 @@ def simulate_data_from_trained_model(
         effect_prior_dist=model.module.effect_prior_dist,
         use_interactions=model.module.use_interactions,
         efficiency_mode=model.module.efficiency_mode,
-        use_crispr_factor=model.module.use_crispr_factor,
         **module_init_kwargs,
     )
     module_new.to(device)

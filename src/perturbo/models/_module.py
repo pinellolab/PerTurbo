@@ -347,21 +347,23 @@ class PerTurboPyroModule(PyroBaseModuleClass):
         if self.local_effects:
             # override factor effects
             element_effects = (1 - self.element_by_gene) * element_factor_effects + element_local_effects
+            # guide_factor_efects = self.guide_by_element @ ((1 - self.element_by_gene) * element_factor_effects)
+            # guide_local_effects = (guide_efficacy * self.guide_by_element) @ element_local_effects
+            # guide_effects = guide_factor_efects + guide_local_effects
         else:
             element_effects = element_factor_effects + element_local_effects
 
+        guide_effects = (guide_efficacy * self.guide_by_element) @ element_effects
+
         # compute/sample guide effects as function of element effects
         with guide_plate, gene_plate:
-            guide_effects = self.guide_by_element @ element_effects
-            if self.efficiency_mode == "scaled":
-                guide_effects *= guide_efficacy
-
             if self.guide_noise:
-                guide_effect_shift = pyro.sample(
+                guide_effects = pyro.sample(
                     "guide_effects",
                     dist.Laplace(self.zero, self.guide_effects_prior_scale),
                 )
-                guide_effects += guide_effect_shift
+            else:
+                guide_effects = pyro.deterministic("guide_effects", guide_effects)
 
         # Account for cell-specific latent "perturbation status" variable(s)
         with cell_plate:
