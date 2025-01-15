@@ -39,9 +39,8 @@ class PerTurboPyroModule(PyroBaseModuleClass):
         use_interactions: bool = False,
         efficiency_mode: Literal["mixture", "scaled"] = "scaled",
         dispersion_effects: bool = False,
-        fit_guide_efficiency: bool = True,
+        fit_guide_efficacy: bool = True,
         prior_param_dict: Mapping[str, torch.Tensor] | None = None,
-        **module_kwargs,
     ) -> None:
         """
         Pyro module underlying perturbo.
@@ -76,7 +75,7 @@ class PerTurboPyroModule(PyroBaseModuleClass):
         # set user-defined options for model behavior
         self.dispersion_effects = dispersion_effects
         self.likelihood = likelihood
-        self.fit_guide_efficiency = True
+        self.fit_guide_efficacy = fit_guide_efficacy
         self.lnnb_quad_points = 8
         self.n_factors = n_factors
         self.n_pert_factors = n_pert_factors
@@ -249,10 +248,10 @@ class PerTurboPyroModule(PyroBaseModuleClass):
         # set to the correct device
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-        batch = tensor_dict[REGISTRY_KEYS.BATCH_KEY].to(device)
-        size_factor = tensor_dict[REGISTRY_KEYS.SIZE_FACTOR_KEY].to(device)
-        guides_observed = tensor_dict[REGISTRY_KEYS.PERTURBATION_KEY].to(device)
-        cont_covariates = tensor_dict[REGISTRY_KEYS.CONT_COVS_KEY].to(device)
+        batch = tensor_dict[REGISTRY_KEYS.BATCH_KEY]
+        size_factor = tensor_dict[REGISTRY_KEYS.SIZE_FACTOR_KEY]
+        guides_observed = tensor_dict[REGISTRY_KEYS.PERTURBATION_KEY]
+        cont_covariates = tensor_dict[REGISTRY_KEYS.CONT_COVS_KEY]
 
         # Effect size priors
         if self.effect_prior_dist == "normal_mixture":
@@ -269,7 +268,7 @@ class PerTurboPyroModule(PyroBaseModuleClass):
         # Sample cis/trans effect sizes
         if self.local_effects:
             with element_effects_plate:
-                element_local_effects_values = pyro.sample("element_effects", effects_dist).to(device)
+                element_local_effects_values = pyro.sample("element_effects", effects_dist)
                 element_local_effects = torch.sparse_coo_tensor(
                     self.element_by_gene_idx,
                     element_local_effects_values,
@@ -277,11 +276,11 @@ class PerTurboPyroModule(PyroBaseModuleClass):
                 )
         else:
             with element_plate, gene_plate:
-                element_local_effects = pyro.sample("element_effects", effects_dist).to(device)
-                element_local_effects = element_local_effects.to(device)  # fix device mismatch error
+                element_local_effects = pyro.sample("element_effects", effects_dist)
+                element_local_effects = element_local_effects  # fix device mismatch error
 
         # Pool guide information based on user-specified strategy
-        if not self.fit_guide_efficiency:
+        if not self.fit_guide_efficacy:
             guide_efficacy = self.one.expand((self.n_perturbations, 1))
         else:
             with guide_plate:
@@ -295,7 +294,7 @@ class PerTurboPyroModule(PyroBaseModuleClass):
             element_factor_effects = 0
         else:
             with pert_factor_plate, element_plate:
-                pert_factors = pyro.sample("pert_factors", dist.Laplace(0.0, self.pert_factor_prior_scale)).to(device)
+                pert_factors = pyro.sample("pert_factors", dist.Laplace(0.0, self.pert_factor_prior_scale))
             with pert_factor_plate, gene_plate:
                 pert_loadings = pyro.sample("pert_loadings", dist.Laplace(0.0, self.pert_loading_prior_scale))
             # pert_factor_scale_term = pyro.sample(
@@ -306,7 +305,7 @@ class PerTurboPyroModule(PyroBaseModuleClass):
 
         # fix device mismatch error
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        guides_observed = guides_observed.to(device)
+        guides_observed = guides_observed
 
         # Sample cell-specific factors (linear unobserved confounders) if using
         if self.n_factors is not None:
@@ -314,7 +313,7 @@ class PerTurboPyroModule(PyroBaseModuleClass):
                 cell_factors = pyro.sample(
                     "cell_factors",
                     dist.Laplace(0.0, self.cell_factor_prior_scale),
-                ).to(device)
+                )
             with cell_factor_plate, gene_plate:
                 cell_loadings = pyro.sample(
                     "cell_loadings",
@@ -385,7 +384,7 @@ class PerTurboPyroModule(PyroBaseModuleClass):
             gene_base_log_mean = pyro.sample(
                 "log_gene_mean",
                 dist.Normal(self.gene_mean_prior_loc, self.gene_mean_prior_scale),
-            ).to(device)
+            )
             gene_log_dispersion = pyro.sample(
                 "log_gene_dispersion",
                 dist.Normal(self.gene_disp_prior_loc, self.gene_disp_prior_scale),
@@ -408,7 +407,7 @@ class PerTurboPyroModule(PyroBaseModuleClass):
                     batch_disp_effect_size = pyro.sample(
                         "batch_disp_effect",
                         dist.Normal(0.0, self.batch_effect_prior_scale),
-                    ).to(device)
+                    )
                     batch_disp_effects = batch_disp_effect_size[batch.squeeze(), ...]
 
             with cont_covariate_plate:
@@ -416,7 +415,7 @@ class PerTurboPyroModule(PyroBaseModuleClass):
                 cont_covariate_effect_size = pyro.sample(
                     "cont_covariate_effect",
                     dist.Normal(0.0, self.covariate_prior_sigma),
-                ).to(device)
+                )
                 covariate_effects = cont_covariates @ cont_covariate_effect_size
 
             nb_log_mean_ctrl = (
@@ -434,11 +433,11 @@ class PerTurboPyroModule(PyroBaseModuleClass):
             with cell_plate:
                 observations = tensor_dict.get(REGISTRY_KEYS.X_KEY)
                 if self.likelihood == "lnnb":
-                    nb_log_mean = nb_log_mean.to(device)
-                    nb_log_dispersion = nb_log_dispersion.to(device)
-                    multiplicative_noise = multiplicative_noise.to(device)
-                    self.lnnb_quad_points = self.lnnb_quad_points.to(device)
-                    observations = observations.to(device)
+                    nb_log_mean = nb_log_mean
+                    nb_log_dispersion = nb_log_dispersion
+                    multiplicative_noise = multiplicative_noise
+                    self.lnnb_quad_points = self.lnnb_quad_points
+                    observations = observations
                     return pyro.sample(
                         "obs",
                         LogNormalNegativeBinomial(
@@ -448,11 +447,11 @@ class PerTurboPyroModule(PyroBaseModuleClass):
                             num_quad_points=self.lnnb_quad_points,
                         ),
                         obs=observations,
-                    ).to(device)
+                    )
                 elif self.likelihood == "nb":
-                    nb_log_mean = nb_log_mean.to(device)
-                    nb_log_dispersion = nb_log_dispersion.to(device)
-                    observations = observations.to(device)
+                    nb_log_mean = nb_log_mean
+                    nb_log_dispersion = nb_log_dispersion
+                    observations = observations
                     return pyro.sample(
                         "obs",
                         dist.NegativeBinomial(
@@ -460,7 +459,7 @@ class PerTurboPyroModule(PyroBaseModuleClass):
                             total_count=nb_log_dispersion.exp(),
                         ),
                         obs=observations,
-                    ).to(device)
+                    )
                 else:
                     raise NotImplementedError(f"'{self.likelihood}' likelihood not implemented")
 

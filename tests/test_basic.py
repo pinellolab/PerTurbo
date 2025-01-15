@@ -20,7 +20,7 @@ def test_package_has_version():
 @pytest.mark.parametrize("efficiency_mode", ["mixture", "scaled"])
 @pytest.mark.parametrize("use_guide_by_element", [True, False])
 @pytest.mark.parametrize("use_gene_by_element", [True, False])
-@pytest.mark.parametrize("merge_guides_mode", ["partial", "shared"])
+@pytest.mark.parametrize("fit_guide_efficacy", ["partial", "shared"])
 @pytest.mark.parametrize("n_factors", [None, 2])
 @pytest.mark.parametrize("n_pert_factors", [None, 2])
 def test_model_mdata(
@@ -29,7 +29,7 @@ def test_model_mdata(
     efficiency_mode,
     use_guide_by_element,
     use_gene_by_element,
-    merge_guides_mode,
+    fit_guide_efficacy,
     n_factors,
     n_pert_factors,
 ):
@@ -58,7 +58,7 @@ def test_model_mdata(
         n_factors=n_factors,
         n_pert_factors=n_pert_factors,
         efficiency_mode=efficiency_mode,
-        merge_guides_mode=merge_guides_mode,
+        fit_guide_efficacy=fit_guide_efficacy,
     )
     assert model.summary_stats.n_cells == len(mdata)
     assert model.summary_stats.n_vars == len(mdata[rna_key].var)

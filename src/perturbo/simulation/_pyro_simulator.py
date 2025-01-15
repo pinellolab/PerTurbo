@@ -136,7 +136,6 @@ def simulate_data_from_trained_model(
         n_factors=model.module.n_factors,
         dispersion_effects=model.module.dispersion_effects,
         likelihood=model.module.likelihood,
-        merge_guides_mode=model.module.merge_guides_mode,
         effect_prior_dist=model.module.effect_prior_dist,
         use_interactions=model.module.use_interactions,
         efficiency_mode=model.module.efficiency_mode,

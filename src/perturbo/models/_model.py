@@ -88,7 +88,7 @@ class PERTURBO(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
             gene_means=gene_mean,
             guide_by_element=guide_by_element,
             gene_by_element=gene_by_element,
-            n_cats_per_cov=n_cats_per_cov,
+            # n_cats_per_cov=n_cats_per_cov,
             **model_kwargs,
         )
 
