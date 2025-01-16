@@ -1,45 +1,40 @@
 import math
 import os
 import time
-import warnings
-from typing import List, Optional
-
-import numpy as np
-import pandas as pd
-import torch
-
-from scipy.stats import gamma, lognorm
-from scipy.sparse import random as sparse_random
-from scipy.sparse import csr_matrix, eye, vstack
 
 import mudata as md
-from mudata import MuData
-
+import numpy as np
+import pandas as pd
 import pyro.distributions as dist
-from ..models._module import LogNormalNegativeBinomial
+import torch
+from scipy.sparse import csr_matrix, eye, vstack
+from scipy.sparse import random as sparse_random
+from scipy.stats import lognorm
+
+from perturbo.models._module import LogNormalNegativeBinomial
 
 
 class Simulate_Data:
     def __init__(
         self,
-        df_dir_base: Optional[str] = "from_real_data",
-        mdata_name: Optional[str] = None,
-        estimator_type: Optional[str] = None,
-        batch_key: Optional[str] = "prep_batch",
-        library_size_key: Optional[str] = "library_size",
-        size_factor_key: Optional[str] = "size_factor",
-        #read_depth_key: Optional[str] = "read_depth",
-        #Size_Factor_key: Optional[str] = "Size_Factor",
-        continuous_covariates_keys: Optional[List[str]] = None,
-        #obs_continuous_covariates_keys: Optional[List[str]] = None,
-        guide_by_element_key: Optional[str] = None,
-        gene_by_element_key: Optional[str] = None,
+        df_dir_base: str | None = "from_real_data",
+        mdata_name: str | None = None,
+        estimator_type: str | None = None,
+        batch_key: str | None = "prep_batch",
+        library_size_key: str | None = "library_size",
+        size_factor_key: str | None = "size_factor",
+        # read_depth_key: Optional[str] = "read_depth",
+        # Size_Factor_key: Optional[str] = "Size_Factor",
+        continuous_covariates_keys: list[str] | None = None,
+        # obs_continuous_covariates_keys: Optional[List[str]] = None,
+        guide_by_element_key: str | None = None,
+        gene_by_element_key: str | None = None,
     ):
         """
         Extract the desired estimation output.
 
         Parameters
-        -----------
+        ----------
         df_dir_base
             Path, to which we extract the estimated parameters, by requirement. Will add the dataset and estimation method to it.
         mdata_name
@@ -84,9 +79,7 @@ class Simulate_Data:
         self._assign_values()
 
     def _read_params(self):
-        """
-        Read in the estimated parameters for later simulation.
-        """
+        """Read in the estimated parameters for later simulation."""
         df_dir = self.df_dir_base + "_" + f"{self.mdata_name}" + "_" + f"{self.estimator_type}"
         all_files = [f for f in os.listdir(df_dir) if f.endswith(".csv")]
 
@@ -100,7 +93,7 @@ class Simulate_Data:
         self.df = df  # parameters for obs
 
     def _assign_values(self):
-        """ "Assign values like total number genes from the estimated parameters, which have just been read in."""
+        """Assign values like total number genes from the estimated parameters, which have just been read in."""
         dfs = self.dfs
 
         total_genes = dfs["log_gene_mean"].shape[0]
@@ -112,28 +105,33 @@ class Simulate_Data:
 
     def sample_mudata(
         self,
-        simulate_distribution: Optional[str] = "lnnb",
-        ncells: Optional[int] = 200000,
-        ngenes: Optional[int] = 100,
-        nbatches: Optional[int] = 1,      # number of experimental batches
-        nguides_pos: Optional[int] = None,  # number of guides targeting elements that affect genes
-        nguides_per_element: Optional[int] = 4,  # number of guides per element (that affects a gene)
-        nguides_ntc: Optional[int] = 50,    # number of control guides
-        ntc_element_target_method: Optional[str] = "random",   # "random" / "fixed". Shows if ntc guide are randomly assigned to ntc elements or each ntc guide is assigned to only one ntc element.
-        nelements_ntc: Optional[int] = 100,  # number of control elements, i.e. control pairs
-        ncells_per_guide: Optional[int] = 20,  # number of cells each positive guide is detected in
-        guide_efficacy_values: Optional[List[float]] = [1.0, 1.0, 1.0, 1.0],
-        guide_efficacy_type: Optional[str] = "mixed",  # "mixed" / "scaled"
-        guide_category: Optional[List[str]] = ["positive_control", "negative_control"],
-        log2_fold_change: Optional[float] = 1.0,
-        mean_reads_per_gene: Optional[float] = 1.0,
-        library_size_mean: Optional[float] = None,
-        library_size: Optional[int] = None,
-        chunk_size: Optional[int] = 10000,
+        simulate_distribution: str | None = "lnnb",
+        ncells: int | None = 200000,
+        ngenes: int | None = 100,
+        nbatches: int | None = 1,  # number of experimental batches
+        nguides_pos: int | None = None,  # number of guides targeting elements that affect genes
+        nguides_per_element: int | None = 4,  # number of guides per element (that affects a gene)
+        nguides_ntc: int | None = 50,  # number of control guides
+        ntc_element_target_method: str
+        | None = "random",  # "random" / "fixed". Shows if ntc guide are randomly assigned to ntc elements or each ntc guide is assigned to only one ntc element.
+        nelements_ntc: int | None = 100,  # number of control elements, i.e. control pairs
+        ncells_per_guide: int | None = 20,  # number of cells each positive guide is detected in
+        guide_efficacy_values: list[float] | None = None,
+        guide_efficacy_type: str | None = "mixed",  # "mixed" / "scaled"
+        guide_category: list[str] | None = None,
+        log2_fold_change: float | None = 1.0,
+        mean_reads_per_gene: float | None = 1.0,
+        library_size_mean: float | None = None,
+        library_size: int | None = None,
+        chunk_size: int | None = 10000,
     ):
         """Combine everthing we have together, generate synthetic MuData that contain enough information for training"""
-
         nelements_pos = ngenes
+        
+        if guide_category is None:
+            guide_category = ["positive_control", "negative_control"]
+        if guide_efficacy_values is None:
+            guide_efficacy_values = [1.0, 1.0, 1.0, 1.0]
         if nguides_pos is None:
             nguides_pos = nguides_per_element * nelements_pos
         if library_size_mean is None and mean_reads_per_gene is not None:
@@ -279,15 +277,15 @@ class Simulate_Data:
         batch_list = []
         for i in batch_ids:
             batch_list.extend([f"batch_{i}"] * (ncells // nbatches))
-        
+
         # Step 2: Handle any remaining cells (in case ncells is not perfectly divisible by n)
         remaining = ncells % nbatches
         for i in range(remaining):
             batch_list.append(f"batch_{i}")
-        
+
         # Step 3: Shuffle the list to randomize the order
         np.random.shuffle(batch_list)
-        
+
         return batch_list
 
     def _sample_obs(self):
@@ -297,7 +295,7 @@ class Simulate_Data:
         batch_key = self.batch_key
         continuous_covariates_keys = self.continuous_covariates_keys
         # library_size_key = self.library_size_key
-        # size_factor_key = self.size_factor_key
+        size_factor_key = self.size_factor_key
 
         obs = pd.DataFrame()
 
@@ -306,7 +304,8 @@ class Simulate_Data:
         obs[batch_key] = prep_batch
 
         # other obs
-        for obs_key in continuous_covariates_keys:
+        for obs_key in (continuous_covariates_keys + [size_factor_key]):
+
             obs_param_key = "params_" + obs_key.replace(".", "_")  # get the key for params_for_simulation
             obs_values = lognorm.rvs(
                 df[obs_param_key][0],
@@ -328,6 +327,7 @@ class Simulate_Data:
     def _sample_grna(self):
         """
         Generate grna.X: self.grna_data, a sparse matrix, with ncell rows and nguides columns
+
         The number of positive guides in each cell follows number of guides per cell computed from a pre-defined number of cells per guide,
         the number of ntc guides in each cell should also follow the previous computed number of guides per cell, to mimic the real functional guides.
         """
@@ -358,16 +358,18 @@ class Simulate_Data:
 
         element_targeted_dense = element_targeted_pos_dense
 
-        # Fill the specific entries with 1s (for negative elements) 
+        # Fill the specific entries with 1s (for negative elements)
         if "negative_control" in guide_category:
             nelements_ntc = self.nelements_ntc
             nguides_ntc = self.nguides_ntc
             element_targeted_ntc_dense = np.zeros((nguides_ntc, nelements_ntc))
-            
+
             if ntc_element_target_method == "random":
                 # randomly assign ntc guides to ntc elements
                 for j in range(nelements_ntc):
-                    affecting_rows = np.random.choice(nguides_ntc, nguides_per_element, replace=False)  # in each column assign 4 values to 1
+                    affecting_rows = np.random.choice(
+                        nguides_ntc, nguides_per_element, replace=False
+                    )  # in each column assign 4 values to 1
                     element_targeted_ntc_dense[affecting_rows, j] = 1
 
             elif ntc_element_target_method == "fixed":
@@ -379,7 +381,7 @@ class Simulate_Data:
                         end_row = start_row + nguides_per_element
                         element_targeted_ntc_dense[start_row:end_row, i] = 1
 
-            # Combine pos+neg. 
+            # Combine pos+neg.
             element_targeted_dense = np.zeros((nguides_pos + nguides_ntc, nelements_pos + nelements_ntc))
             element_targeted_dense[:nguides_pos, :nelements_pos] = element_targeted_pos_dense
             element_targeted_dense[nguides_pos:, nelements_pos:] = element_targeted_ntc_dense
@@ -403,6 +405,7 @@ class Simulate_Data:
     def _get_element_tested(self):
         """
         Generate rna.varm["element_tested"]. self.element_tested, a sparse matrix indicating potentially related elements and genes, with nelement rows, ngenes cols.
+
         In "positive_control" case, it is an identity matrix, one element is only targeting one gene.
         In "negative_control" case, it is a matrix full of 1. Studying as much negative pairs as possible creates a more realistic negative control distribution.
         """
@@ -412,7 +415,7 @@ class Simulate_Data:
 
         # for positive control elements
         element_tested_pos = eye(ngenes, dtype="float32").tocsr()
-        
+
         element_tested = element_tested_pos
 
         # add ntc elements (if there are any)
@@ -440,6 +443,7 @@ class Simulate_Data:
     def _get_total_perturbation_effect(self):
         """
         Get matrix of the effect of each guide on each gene according to guide_efficacy and element_effects.
+
         Output: self.total_perturbation_effect. An np.array, with nguides rows and ngenes cols
         """
         lfc = self.lfc
@@ -449,7 +453,7 @@ class Simulate_Data:
         nelements = self.nelements
         nelements_pos = self.nelements_pos
         if "negative_control" in guide_category:
-            nelements_ntc = self.nelements_ntc
+            # nelements_ntc = self.nelements_ntc
             nguides_ntc = self.nguides_ntc
         element_targeted = self.element_targeted
         element_tested = self.element_tested
@@ -498,30 +502,31 @@ class Simulate_Data:
 
         return gene_ids
 
-    def _get_batch_effect(self):  
-        '''Out put should have shape (ncells, ngenes)'''
-
+    def _get_batch_effect(self):
+        """Out put should have shape (ncells, ngenes)"""
         obs = self.obs
         dfs = self.dfs
         gene_ids = self._get_random_indices()
         batch_key = self.batch_key
         total_batches = self.total_batches
-        nbatches = self.nbatches
+        # nbatches = self.nbatches
         ncells = self.ncells
 
         # get random batch ids for selecting corresponding batch effects from real_world data
-        #batch_ids = np.random.choice(range(total_batches), size=nbatches, replace=True)
+        # batch_ids = np.random.choice(range(total_batches), size=nbatches, replace=True)
 
         # One-hot encode batch number
         one_hot_matrix = np.zeros((ncells, total_batches), dtype=int)
         batch_mapping = {f"batch_{i}": i for i in range(total_batches)}
-        batch_list = obs[batch_key]
+        # batch_list = obs[batch_key]
 
         for i, batch in enumerate(obs[batch_key]):
             col_idx = batch_mapping[batch]
             one_hot_matrix[i, col_idx] = 1
 
-        batch_effect_sizes = one_hot_matrix.reshape(-1, total_batches) @ dfs["batch_effect"].iloc[:, gene_ids].values.reshape(total_batches, -1)
+        batch_effect_sizes = one_hot_matrix.reshape(-1, total_batches) @ dfs["batch_effect"].iloc[
+            :, gene_ids
+        ].values.reshape(total_batches, -1)
 
         return batch_effect_sizes
 
@@ -570,7 +575,7 @@ class Simulate_Data:
             logits = torch.from_numpy(
                 samples_log_gene_mean  # base mean
                 +
-                #                          obs[size_factor_key].values.reshape(-1,1) +    # size factor
+                obs[size_factor_key].values.reshape(-1,1) +    # size factor
                 sum(cov_effect_sizes.values())  # covariate effect sizes
                 - samples_log_gene_dispersion
             )  # torch.tensor, length = ngenes  # torch.tensor, length = ngenes
@@ -578,7 +583,7 @@ class Simulate_Data:
             logits = torch.from_numpy(
                 samples_log_gene_mean  # base mean
                 +
-                #                          obs[size_factor_key].values.reshape(-1,1) +    # size factor
+                obs[size_factor_key].values.reshape(-1,1) +    # size factor
                 sum(cov_effect_sizes.values())  # covariate effect sizes
                 - samples_log_gene_dispersion
                 - samples_multiplicative_noise**2 / 2
@@ -590,7 +595,7 @@ class Simulate_Data:
         self.cov_effect_sizes = cov_effect_sizes
 
         self.logits = logits
-        #print(f"logit before adding size_factor {self.logits}")
+        # print(f"logit before adding size_factor {self.logits}")
 
     def _get_total_count(self):
         """Get self.total count. A torch.tensor, with 1 row, ngenes columns"""
@@ -608,12 +613,11 @@ class Simulate_Data:
 
         self.multiplicative_noise = multiplicative_noise
 
-
     def _get_correction_term(self):
         """A cell specific shift value of gene mean. A np.array, length ncells."""
         library_size_mean = self.library_size_mean
-        ngenes = self.ngenes
-        ncells = self.ncells
+        # ngenes = self.ngenes
+        # ncells = self.ncells
         grna_data = self.grna_data
         simulate_distribution = self.simulate_distribution
         total_perturbation_effect = self._get_total_perturbation_effect()
@@ -631,11 +635,12 @@ class Simulate_Data:
 
         orig_means_pert = orig_means * np.exp(log_pert_effect)
 
-        correction_term = (library_size_mean) / (orig_means_pert.sum(axis=1))  # array, length = ncells
-        correction_term = correction_term.reshape(
-            -1, 1
-        )  # this correction term already account for Size_Factor in simulation (derived from total UMIs)
-        print(f"correction term shape {correction_term.shape}")
+        correction_term = (library_size_mean) / (orig_means_pert.sum(axis=1).mean())
+        #correction_term = (library_size_mean) / (orig_means_pert.sum(axis=1))  # array, length = ncells
+        #correction_term = correction_term.reshape(
+        #    -1, 1
+        #)  # this correction term already account for Size_Factor in simulation (derived from total UMIs)
+
         self.orig_means = orig_means
         self.correction_term = correction_term
         self.log_pert_effect = log_pert_effect
@@ -654,12 +659,12 @@ class Simulate_Data:
     def _get_logits_corrected(self):
         """Get the logits after correction. A torch.tensor, with ncell rows, ngene columns"""
         correction_term = self._get_correction_term()
-        ncells = self.ncells
+        # ncells = self.ncells
         logits = self.logits
         slope = self.log_mean_disp_slope
 
-        #expr_spread = np.random.normal(loc=0, scale=np.sqrt(0.2), size=ncells)  # add some noise to the expression mean
-        #logits_corrected = logits + (1 / (slope + 1)) * np.log(correction_term) + expr_spread.reshape(-1,1)
+        # expr_spread = np.random.normal(loc=0, scale=np.sqrt(0.2), size=ncells)  # add some noise to the expression mean
+        # logits_corrected = logits + (1 / (slope + 1)) * np.log(correction_term) + expr_spread.reshape(-1,1)
         logits_corrected = logits + (1 / (slope + 1)) * np.log(correction_term)
         self.logits_corrected = logits_corrected
 
@@ -709,9 +714,9 @@ class Simulate_Data:
 
     def _get_logits_perturb(self):
         """Get the logits after perturbation. A torch.tensor, with ncell rows, ngene columns"""
-        logits_corrected = self._get_logits_corrected() 
+        logits_corrected = self._get_logits_corrected()
         total_count_corrected = self._get_total_count_corrected()
-        #logits_spread = self._add_size_factor_in_logit(logits_corrected, total_count_corrected)
+        # logits_spread = self._add_size_factor_in_logit(logits_corrected, total_count_corrected)
 
         log_pert_effect = self.log_pert_effect
 
@@ -729,11 +734,14 @@ class Simulate_Data:
         ngenes = self.ngenes
         chunk_size = self.chunk_size
         total_count_corrected = self.total_count_corrected
+        #print(f"total_count size {total_count_corrected.shape}")
         logits_perturb = self.logits_perturb
+        #print(f"logit size {logits_perturb.shape}")
         multiplicative_noise = self.multiplicative_noise
+        #print(f"noise size {multiplicative_noise.shape}")
 
-        print(f"logits size {logits_perturb.shape}")
-        print(f"total count size {total_count_corrected.shape}")
+        #print(f"logits size {logits_perturb.shape}")
+        #print(f"total count size {total_count_corrected.shape}")
 
         start_time = time.time()
         chunks = []
@@ -746,8 +754,10 @@ class Simulate_Data:
                 # print(f"Simulate chunk {i}.")
                 end_row = min(start_row + chunk_size, ncells)
                 logits_perturb_chunk = logits_perturb[start_row:end_row, :]
-                total_count_chunk = total_count_corrected[start_row:end_row, :]
-                simulate_chunk = dist.NegativeBinomial(logits=logits_perturb_chunk, total_count=total_count_chunk)
+                #total_count_chunk = total_count_corrected[start_row:end_row, :]
+                simulate_chunk = dist.NegativeBinomial(
+                    logits=logits_perturb_chunk, 
+                    total_count=total_count_corrected)
 
                 data_simu_chunk = csr_matrix(simulate_chunk.sample())
                 chunks.append(data_simu_chunk)
@@ -760,10 +770,10 @@ class Simulate_Data:
                 # print(f"Simulate chunk {i}.")
                 end_row = min(start_row + chunk_size, ncells)
                 logits_perturb_chunk = logits_perturb[start_row:end_row, :]
-                total_count_chunk = total_count_corrected[start_row:end_row, :]
+                #total_count_chunk = total_count_corrected[start_row:end_row, :]
                 simulate_chunk = LogNormalNegativeBinomial(
                     logits=logits_perturb_chunk,
-                    total_count=total_count_chunk,
+                    total_count=total_count_corrected,
                     multiplicative_noise_scale=multiplicative_noise,
                 )
 

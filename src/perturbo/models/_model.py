@@ -1,5 +1,4 @@
 import logging
-from typing import Optional, Union
 
 import numpy as np
 import pandas as pd
@@ -11,14 +10,16 @@ from scipy.sparse import issparse
 from scipy.stats import chi2
 from scvi._types import AnnOrMuData
 from scvi.data import AnnDataManager, fields
-from scvi.dataloaders import AnnDataLoader, DeviceBackedDataSplitter
-from scvi.model._utils import parse_device_args
+from scvi.dataloaders import DeviceBackedDataSplitter
 from scvi.model.base import (
     BaseModelClass,
-    PyroJitGuideWarmup,
     PyroSampleMixin,
     PyroSviTrainMixin,
 )
+from pyro import poutine
+from pyro.infer import infer_discrete
+from scvi.dataloaders import AnnDataLoader
+
 from scvi.train import PyroTrainingPlan
 from scvi.utils._docstrings import devices_dsp
 
@@ -32,6 +33,7 @@ class PERTURBO(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
     def __init__(
         self,
         mdata: AnnOrMuData,
+        # control_guides=None,
         **model_kwargs,
     ):
         super().__init__(mdata)
@@ -45,7 +47,9 @@ class PERTURBO(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
             REGISTRY_KEYS.INDICES_KEY: np.int64,
         }
 
+        n_extra_continuous_covs = 0
         if "n_extra_continuous_covs" in self.summary_stats:
+            n_extra_continuous_covs = self.summary_stats.n_extra_continuous_covs
             self.data_and_attrs.update({REGISTRY_KEYS.CONT_COVS_KEY: np.float32})
 
         n_cats_per_cov = None
@@ -53,22 +57,38 @@ class PERTURBO(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
             self.data_and_attrs.update({REGISTRY_KEYS.CAT_COVS_KEY: np.float32})
             n_cats_per_cov = self.adata_manager.get_state_registry(REGISTRY_KEYS.CAT_COVS_KEY).n_cats_per_key
 
-        gene_summary_stats = self.adata_manager.get_from_registry(REGISTRY_KEYS.GENE_SUMMARY_STATS)
 
         guide_by_element = None
+        n_elements = None
         if REGISTRY_KEYS.GUIDE_BY_ELEMENT_KEY in self.adata_manager.data_registry:
-            guide_by_element = self.read_varm_from_registry(REGISTRY_KEYS.GUIDE_BY_ELEMENT_KEY)
+            n_elements = self.summary_stats.n_targeted_elements
+            guide_by_element = self.read_matrix_from_registry(REGISTRY_KEYS.GUIDE_BY_ELEMENT_KEY)
 
         gene_by_element = None
         if REGISTRY_KEYS.GENE_BY_ELEMENT_KEY in self.adata_manager.data_registry:
-            gene_by_element = self.read_varm_from_registry(REGISTRY_KEYS.GENE_BY_ELEMENT_KEY)
+            gene_by_element = self.read_matrix_from_registry(REGISTRY_KEYS.GENE_BY_ELEMENT_KEY)
+
+        gene_mean = self.adata_manager.get_from_registry(REGISTRY_KEYS.GENE_SUMMARY_STATS)
+        gene_mean = torch.tensor(gene_mean, dtype=torch.float32)[:, 0]
+        # if control_guides is not None and "n_factors" in model_kwargs and guide_by_element is not None:
+        #     # control_guides, _ = torch.max(guide_by_element[:, control_elements], dim=-1)
+        #     control_mask = self.read_matrix_from_registry(REGISTRY_KEYS.PERTURBATION_KEY)[:, control_guides].sum(dim=-1)
+        #     rna_data = self.read_matrix_from_registry(REGISTRY_KEYS.X_KEY)[control_mask.bool(), :]
+        #     u, s, v = torch.pca_lowrank(torch.tensor(rna_data), q=model_kwargs["n_factors"])
+        #     model_kwargs["control_pcs"] = v.T.unsqueeze(dim=-2)
+        # print(v)
 
         self.module = PerTurboPyroModule(
-            self.summary_stats,
-            gene_summary_stats=gene_summary_stats,
+            n_cells=self.summary_stats.n_cells,
+            n_batches=self.summary_stats.n_batch,
+            n_perturbations=self.summary_stats.n_perturbations,
+            n_genes=self.summary_stats.n_vars,
+            n_cont_covariates=n_extra_continuous_covs,
+            n_elements=n_elements,
+            gene_means=gene_mean,
             guide_by_element=guide_by_element,
             gene_by_element=gene_by_element,
-            n_cats_per_cov=n_cats_per_cov,
+            # n_cats_per_cov=n_cats_per_cov,
             **model_kwargs,
         )
 
@@ -79,95 +99,93 @@ class PERTURBO(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
 
         logger.info("The model has been initialized")
 
-    def read_varm_from_registry(self, registry_key):
-        varm_field = self.adata_manager.get_from_registry(registry_key)
-        if isinstance(varm_field, DataFrame):
-            varm_field = varm_field.values
-        if issparse(varm_field):
-            varm_field = varm_field.todense()
-        varm_tensor = torch.tensor(varm_field, dtype=torch.float32, requires_grad=False)
-        return varm_tensor
+    def read_matrix_from_registry(self, registry_key):
+        data = self.adata_manager.get_from_registry(registry_key)
+        if isinstance(data, DataFrame):
+            data = data.values
+        if issparse(data):
+            data = data.todense()
+        data = torch.tensor(data, dtype=torch.float32, requires_grad=False)
+        return data
 
     @classmethod
     def setup_anndata(
         cls,
         adata: AnnData,
-        batch_key: Optional[str] = None,
-        perturbation_key: Optional[str] = None,
-        library_size_key: Optional[str] = None,
-        size_factor_key: Optional[str] = None,
-        continuous_covariates_keys: Optional[str] = None,
         **kwargs,
     ):
-        setup_method_args = cls._get_setup_method_args(**locals())
-        anndata_fields = [
-            fields.LayerField(REGISTRY_KEYS.X_KEY, None, is_count_data=True),
-            fields.CategoricalObsField(REGISTRY_KEYS.BATCH_KEY, batch_key),
-            fields.CategoricalObsField(REGISTRY_KEYS.PERTURBATION_KEY, perturbation_key),
-            fields.NumericalObsField(REGISTRY_KEYS.SIZE_FACTOR_KEY, size_factor_key, required=False),
-            fields.NumericalJointObsField(REGISTRY_KEYS.CONT_COVS_KEY, continuous_covariates_keys),
-        ]
-        # add library size if not present
-        if library_size_key is None:
-            library_size_key = "_library_size"
-            library_size = adata.X.sum(axis=1)
-            if not library_size.all():
-                raise ValueError(
-                    "Cannot infer library size: cells with zero counts. Set library_size_key manually instead."
-                )
-            adata.obs[library_size_key] = library_size
-
-        # add size factor if not present
-        if size_factor_key is None:
-            size_factor_key = "_size_factor"
-            library_size = adata.obs[library_size_key]
-            if not library_size.all():
-                raise ValueError(
-                    "Cannot infer size factors: cells with zero library size. Set size_factor_key manually instead."
-                )
-            log_cpm = np.log(library_size / 1e6)
-            adata.obs[size_factor_key] = log_cpm - log_cpm.mean()
-
-        # add indices to enable pyro subsampling of local vars
-        adata.obs = adata.obs.assign(_ind_x=lambda x: np.arange(len(x)))
-        index_field = fields.MuDataNumericalObsField(
-            REGISTRY_KEYS.INDICES_KEY,
-            "_ind_x",
-        )
-
-        # add info for method of moments estimation of gene params
-        mean_counts = np.mean(adata.X, axis=0)
-        if isinstance(mean_counts, np.matrix):  # occurs when summing sparse array
-            mean_counts = mean_counts.A1
-        adata.var["_gene_mean"] = mean_counts
-        # rna_adata.var["_gene_variance"] = np.var(rna_adata.X, axis=0).squeeze()
-        gene_field = fields.MuDataNumericalJointVarField(
-            REGISTRY_KEYS.GENE_SUMMARY_STATS,
-            ["_gene_mean"],
-        )
-
-        adata_manager = AnnDataManager(fields=anndata_fields, setup_method_args=setup_method_args)
-        adata_manager.register_fields(adata, **kwargs)
-        cls.register_manager(adata_manager)
-
         raise NotImplementedError("MuData input required, use setup_mudata.")
+
+    #     setup_method_args = cls._get_setup_method_args(**locals())
+    #     anndata_fields = [
+    #         fields.LayerField(REGISTRY_KEYS.X_KEY, None, is_count_data=True),
+    #         fields.CategoricalObsField(REGISTRY_KEYS.BATCH_KEY, batch_key),
+    #         fields.CategoricalObsField(REGISTRY_KEYS.PERTURBATION_KEY, perturbation_key),
+    #         fields.NumericalObsField(REGISTRY_KEYS.SIZE_FACTOR_KEY, size_factor_key, required=False),
+    #         fields.NumericalJointObsField(REGISTRY_KEYS.CONT_COVS_KEY, continuous_covariates_keys),
+    #     ]
+    #     # add library size if not present
+    #     if library_size_key is None:
+    #         library_size_key = "_library_size"
+    #         library_size = adata.X.sum(axis=1)
+    #         if not library_size.all():
+    #             raise ValueError(
+    #                 "Cannot infer library size: cells with zero counts. Set library_size_key manually instead."
+    #             )
+    #         adata.obs[library_size_key] = library_size
+
+    #     # add size factor if not present
+    #     if size_factor_key is None:
+    #         size_factor_key = "_size_factor"
+    #         library_size = adata.obs[library_size_key]
+    #         if not library_size.all():
+    #             raise ValueError(
+    #                 "Cannot infer size factors: cells with zero library size. Set size_factor_key manually instead."
+    #             )
+    #         log_cpm = np.log(library_size / 1e6)
+    #         adata.obs[size_factor_key] = log_cpm - log_cpm.mean()
+
+    #     # add indices to enable pyro subsampling of local vars
+    #     adata.obs = adata.obs.assign(_ind_x=lambda x: np.arange(len(x)))
+    #     index_field = fields.MuDataNumericalObsField(
+    #         REGISTRY_KEYS.INDICES_KEY,
+    #         "_ind_x",
+    #     )
+
+    #     # add info for method of moments estimation of gene params
+    #     mean_counts = np.mean(adata.X, axis=0)
+    #     if isinstance(mean_counts, np.matrix):  # occurs when summing sparse array
+    #         mean_counts = mean_counts.A1
+    #     adata.var["_gene_mean"] = mean_counts
+    #     # rna_adata.var["_gene_variance"] = np.var(rna_adata.X, axis=0).squeeze()
+    #     gene_field = fields.MuDataNumericalVarField(
+    #         REGISTRY_KEYS.GENE_SUMMARY_STATS,
+    #         "_gene_mean",
+    #     )
+
+    #     adata_manager = AnnDataManager(fields=anndata_fields, setup_method_args=setup_method_args)
+    #     adata_manager.register_fields(adata, **kwargs)
+    #     cls.register_manager(adata_manager)
+
+    #     raise NotImplementedError("MuData input required, use setup_mudata.")
 
     @classmethod
     def setup_mudata(
         cls,
         mdata: MuData,
-        rna_layer: Optional[str] = None,
-        perturbation_layer: Optional[str] = None,
-        batch_key: Optional[str] = None,
-        gene_by_element_key: Optional[str] = None,
-        rna_element_uns_key: Optional[str] = None,
-        guide_element_uns_key: Optional[str] = None,
-        guide_by_element_key: Optional[str] = None,
-        library_size_key: Optional[str] = None,
-        size_factor_key: Optional[str] = None,
-        continuous_covariates_keys: Optional[str] = None,
-        categorical_covariates_keys: Optional[str] = None,
-        modalities: Optional[dict[str, str]] = None,
+        rna_layer: str | None = None,
+        perturbation_layer: str | None = None,
+        batch_key: str | None = None,
+        gene_by_element_key: str | None = None,
+        rna_element_uns_key: str | None = None,
+        guide_element_uns_key: str | None = None,
+        guide_by_element_key: str | None = None,
+        library_size_key: str | None = None,
+        size_factor_key: str | None = None,
+        gene_mean_key: str | None = None,
+        continuous_covariates_keys: str | None = None,
+        categorical_covariates_keys: str | None = None,
+        modalities: dict[str, str] | None = None,
         **kwargs,
     ):
         """Registers data from a MuData object with the model.
@@ -239,15 +257,17 @@ class PERTURBO(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
         )
 
         # add info for method of moments estimation of gene params
-        rna_adata = mdata[modalities.rna_layer]
-        mean_counts = np.mean(rna_adata.X, axis=0)
-        if isinstance(mean_counts, np.matrix):  # occurs when summing sparse array
-            mean_counts = mean_counts.A1
-        rna_adata.var["_gene_mean"] = mean_counts
-        # rna_adata.var["_gene_variance"] = np.var(rna_adata.X, axis=0).squeeze()
-        gene_field = fields.MuDataNumericalJointVarField(
+        if gene_mean_key is None:
+            gene_mean_key = "_gene_mean"
+            rna_adata = mdata[modalities.rna_layer]
+            mean_counts = np.mean(rna_adata.X, axis=0)
+            if isinstance(mean_counts, np.matrix):  # occurs when summing sparse array
+                mean_counts = mean_counts.A1
+            rna_adata.var["_gene_mean"] = mean_counts
+            # rna_adata.var["_gene_variance"] = np.var(rna_adata.X, axis=0).squeeze()
+        gene_field = fields.MuDataNumericalVarField(
             REGISTRY_KEYS.GENE_SUMMARY_STATS,
-            ["_gene_mean"],
+            "_gene_mean",
             mod_key=modalities.rna_layer,
         )
 
@@ -326,18 +346,18 @@ class PERTURBO(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
     @devices_dsp.dedent
     def train(
         self,
-        max_epochs: Optional[int] = None,
+        max_epochs: int | None = None,
         accelerator: str = "cpu",
-        device: Union[int, str] = "auto",
+        device: int | str = "auto",
         train_size: float = 1.0,
-        validation_size: Optional[float] = None,
+        validation_size: float | None = None,
         shuffle_set_split: bool = False,
         batch_size: int = 128,
         early_stopping: bool = False,
-        lr: Optional[float] = None,
+        lr: float | None = None,
         training_plan: PyroTrainingPlan = PyroTrainingPlan,
-        plan_kwargs: Optional[dict] = None,
-        data_splitter_kwargs: Optional[dict] = None,
+        plan_kwargs: dict | None = None,
+        data_splitter_kwargs: dict | None = None,
         **trainer_kwargs,
     ):
         """
@@ -411,9 +431,9 @@ class PERTURBO(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
         es = "early_stopping"
         trainer_kwargs[es] = early_stopping if es not in trainer_kwargs.keys() else trainer_kwargs[es]
 
-        if "callbacks" not in trainer_kwargs.keys():
-            trainer_kwargs["callbacks"] = []
-        trainer_kwargs["callbacks"].append(PyroJitGuideWarmup())
+        # if "callbacks" not in trainer_kwargs.keys():
+        #     trainer_kwargs["callbacks"] = []
+        # trainer_kwargs["callbacks"].append(PyroJitGuideWarmup())
 
         runner = self._train_runner_cls(
             self,
@@ -426,14 +446,16 @@ class PERTURBO(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
         )
         return runner()
 
-    def get_element_effects(
-        self,
-    ):
-        """Return a DataFrame summary of the effects for targeted elements on each gene."""
+    def get_element_names(self):
         if REGISTRY_KEYS.GUIDE_BY_ELEMENT_KEY in self.adata_manager.data_registry:
             element_ids = self.adata_manager.get_state_registry(REGISTRY_KEYS.GUIDE_BY_ELEMENT_KEY).column_names
         else:
             element_ids = self.adata_manager.get_state_registry(REGISTRY_KEYS.PERTURBATION_KEY).column_names
+        return element_ids
+
+    def get_element_effects(self):
+        """Return a DataFrame summary of the effects for targeted elements on each gene."""
+        element_ids = self.get_element_names()
         gene_ids = self.adata_manager.get_state_registry("X").column_names
         for guide in self.module.guide:
             if "element_effects" in guide.median():
@@ -478,7 +500,20 @@ class PERTURBO(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
 
         return element_effects.sort_values("z_value")
 
-    def _get_data_subset(self, indices: Optional[list] = None):
+    def get_map_labels(self, indices: list | None = None):
+        args, kwargs = self._get_data_subset(indices)
+        self.module.guide(*args, **kwargs)
+        guide_trace = poutine.trace(self.module.guide).get_trace(*args, **kwargs)  # record the globals
+        trained_model = poutine.replay(self.module, trace=guide_trace)  # replay the globals
+        serving_model = infer_discrete(trained_model, first_available_dim=-4, temperature=0)
+        serving_model_trace = poutine.trace(serving_model).get_trace(*args, **kwargs)
+
+        assert "perturbed" in serving_model_trace.nodes, "Only works if module has discrete latent variables"
+
+        map_labels = serving_model_trace.nodes["perturbed"]["value"].squeeze().cpu().numpy()
+        return map_labels
+
+    def _get_data_subset(self, indices: list | None = None):
         loader = AnnDataLoader(
             adata_manager=self.adata_manager,
             indices=indices,
@@ -487,29 +522,29 @@ class PERTURBO(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
         )
         return self.module._get_fn_args_from_batch(next(iter(loader)))
 
-    def sample_posterior(
-        self,
-        num_samples: int = 1000,
-        return_sites: Optional[list] = None,
-        accelerator: str = "auto",
-        device: Union[int, str] = "auto",
-        return_observed: bool = False,
-    ):
-        _, _, device = parse_device_args(
-            accelerator=accelerator, devices=device, return_device="torch", validate_single_device=True
-        )
+    # def sample_posterior(
+    #     self,
+    #     num_samples: int = 1,
+    #     return_sites: list | None = None,
+    #     accelerator: str = "auto",
+    #     device: int | str = "auto",
+    #     return_observed: bool = False,
+    # ):
+    #     _, _, device = parse_device_args(
+    #         accelerator=accelerator, devices=device, return_device="torch", validate_single_device=True
+    #     )
 
-        args, kwargs = self._get_data_subset()
-        args = [a.to(device) for a in args]
-        kwargs = {k: v.to(device) for k, v in kwargs.items()}
-        kwargs[REGISTRY_KEYS.X_KEY] = None
-        self.to_device(device)
+    #     args, kwargs = self._get_data_subset()
+    #     args = [a.to(device) for a in args]
+    #     kwargs = {k: v.to(device) for k, v in kwargs.items()}
+    #     kwargs[REGISTRY_KEYS.X_KEY] = None
+    #     self.to_device(device)
 
-        samples = self._get_posterior_samples(
-            args,
-            kwargs=kwargs,
-            num_samples=num_samples,
-            return_sites=return_sites,
-            return_observed=return_observed,
-        )
-        return samples
+    #     samples = self._get_posterior_samples(
+    #         args,
+    #         kwargs=kwargs,
+    #         num_samples=num_samples,
+    #         return_sites=return_sites,
+    #         return_observed=return_observed,
+    #     )
+    #     return samples
