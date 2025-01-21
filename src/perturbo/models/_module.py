@@ -456,3 +456,9 @@ class PerTurboPyroModule(PyroBaseModuleClass):
     @property
     def guide(self):
         return self._guide
+
+    def on_load(self, model):
+        old_history = model.history_.copy()
+        model.train(1, **self.on_load_kwargs)
+        model.history_ = old_history
+        pyro.clear_param_store()
