@@ -90,6 +90,7 @@ class PerTurboPyroModule(PyroBaseModuleClass):
         self.n_genes = n_genes
         self.n_perturbations = n_perturbations
         self.n_cont_covariates = 1  # include (inferred) size factor as covariate always
+        self.on_load_kwargs = {"max_epochs": 1}  # fixes new bug from ipywidgets loading bar on model load
 
         self.discrete_sites = []
         if efficiency_mode == "mixture":
@@ -300,7 +301,6 @@ class PerTurboPyroModule(PyroBaseModuleClass):
             # )
             element_factor_effects = torch.einsum("fei,fjg->eg", pert_factors, pert_loadings)
 
-
         # Sample cell-specific factors (linear unobserved confounders) if using
         if self.n_factors is not None:
             with cell_factor_plate, cell_plate:
@@ -456,9 +456,3 @@ class PerTurboPyroModule(PyroBaseModuleClass):
     @property
     def guide(self):
         return self._guide
-
-    def on_load(self, model):
-        old_history = model.history_.copy()
-        model.train(1, **self.on_load_kwargs)
-        model.history_ = old_history
-        pyro.clear_param_store()
