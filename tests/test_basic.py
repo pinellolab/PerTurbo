@@ -97,6 +97,7 @@ def test_model_mdata(
         element_by_gene_lfc=element_by_gene_lfc,
         guide_efficacy=guide_efficacy,
         gene_indices=new_genes_idx,
+        module_init_kwargs={"efficiency_mode": "mixture_high_moi"},
     )
 
     assert mdata_new[rna_key].shape == (n_cells_new, n_genes_new)
