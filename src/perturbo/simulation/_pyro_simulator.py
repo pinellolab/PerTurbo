@@ -123,6 +123,7 @@ def simulate_data_from_trained_model(
             latent_vars[param_name] = param_value[..., gene_indices_tensor]
 
     if element_by_gene_lfc is not None:
+        assert element_by_gene_lfc.shape[1] == n_genes_new
         element_by_gene_lfc = torch.tensor(element_by_gene_lfc, dtype=torch.float32, device=device)
         latent_vars["element_effects"] = element_by_gene_lfc
 
@@ -135,6 +136,20 @@ def simulate_data_from_trained_model(
     if param_values is not None:
         latent_vars.update(param_values)
 
+    module_kwargs = {
+        "n_batches": model.module.n_batches,
+        "n_cont_covariates": model.module.n_cont_covariates - 1,  # size factor auto included
+        "n_factors": model.module.n_factors,
+        "dispersion_effects": model.module.dispersion_effects,
+        "likelihood": model.module.likelihood,
+        "effect_prior_dist": model.module.effect_prior_dist,
+        "use_interactions": model.module.use_interactions,
+        "efficiency_mode": model.module.efficiency_mode,
+    }
+
+    if module_init_kwargs is not None:
+        module_kwargs.update(module_init_kwargs)
+
     # create new module to sample from
     module_new = PerTurboPyroModule(
         n_cells=n_cells,
@@ -142,15 +157,7 @@ def simulate_data_from_trained_model(
         n_elements=n_elements,
         n_perturbations=n_guides,
         guide_by_element=guide_by_element,
-        n_batches=model.module.n_batches,
-        n_cont_covariates=model.module.n_cont_covariates - 1,  # size factor auto included
-        n_factors=model.module.n_factors,
-        dispersion_effects=model.module.dispersion_effects,
-        likelihood=model.module.likelihood,
-        effect_prior_dist=model.module.effect_prior_dist,
-        use_interactions=model.module.use_interactions,
-        efficiency_mode=model.module.efficiency_mode,
-        **module_init_kwargs,
+        **module_kwargs,
     )
     module_new.to(device)
 
@@ -159,7 +166,6 @@ def simulate_data_from_trained_model(
     sampled_counts = conditioned_model(*args, **kwargs).squeeze().detach().cpu().numpy()
 
     # Create an AnnData object to return
-
     data_registry = model.adata_manager.data_registry
     rna_key = data_registry[REGISTRY_KEYS.X_KEY].mod_key
     grna_key = data_registry[REGISTRY_KEYS.PERTURBATION_KEY].mod_key

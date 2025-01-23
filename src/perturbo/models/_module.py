@@ -359,6 +359,10 @@ class PerTurboPyroModule(PyroBaseModuleClass):
             elif self.efficiency_mode == "mixture":
                 pert_prob = guides_observed @ guide_efficacy
                 perturbed = pyro.sample("perturbed", dist.Bernoulli(pert_prob), infer={"enumerate": "parallel"})
+            elif self.efficiency_mode == "mixture_high_moi":  # for simulation only!
+                pert_prob = guide_efficacy.expand((self.n_cells, -1, -1)).transpose(-3, -2)
+                assert pert_prob.shape == (self.n_perturbations, self.n_cells, 1)
+                perturbed = pyro.sample("perturbed", dist.Bernoulli(pert_prob)).squeeze(-1).T
             else:
                 raise Exception("efficiency_mode must be either 'scaled' or 'mixture'")
 
