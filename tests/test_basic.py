@@ -75,27 +75,48 @@ def test_model_mdata(
     model = perturbo.PERTURBO.load(tmp_path / "model")
 
     # test simulator
+    n_cells = mdata[rna_key].n_obs
+    n_cells_new = n_cells * 2  # greater than original
+    n_genes = mdata[rna_key].n_vars
+
+    grna_counts = mdata[perturb_key].X
+    cell_idx = np.arange(3)
+
+    # run simulator once with original settings
+    guide_by_element = np.random.binomial(1, 0.8, size=(model.module.n_perturbations, model.module.n_elements))
+    element_by_gene_lfc = np.random.normal(0, 1, size=(model.module.n_elements, model.module.n_genes))
+
+    guide_efficacy = np.random.random_sample(size=(model.module.n_perturbations, 1))
+
+    mdata_new = perturbo.simulation.simulate_data_from_trained_model(
+        model,
+        guide_obs=grna_counts.todense()[cell_idx, :],
+        guide_by_element=guide_by_element,
+        element_by_gene_lfc=element_by_gene_lfc,
+        guide_efficacy=guide_efficacy,
+        cell_indices=cell_idx,
+    )
+
+    # run simulator once with new data shape/model
     n_grna_new = 16
     n_elements_new = 4
-    n_cells_new = mdata[rna_key].n_obs * 2  # greater than original
-    n_genes = mdata[rna_key].n_vars
-    n_genes_new = n_genes // 2  # less than original
-    new_genes_idx = np.random.choice(n_genes, size=n_genes_new, replace=False)
-    guide_by_element_new = np.random.binomial(1, 0.8, size=(n_grna_new, n_elements_new)).astype(np.float32)
-    element_by_gene_lfc = np.random.normal(0, 1, size=(n_elements_new, n_genes_new)).astype(np.float32)
-    # generate fake guide status (low MOI)
+
     grna_counts_new = np.zeros((n_cells_new, n_grna_new), dtype=np.float32)
-    guide_efficacy = np.random.uniform(size=(n_grna_new,))
+    guide_efficacy_new = np.random.uniform(size=(n_grna_new,))
     for i in range(n_cells_new):
         grna_counts_new[i, np.random.choice(n_grna_new)] = 1
 
-    # run simulator once with new args
+    n_genes_new = n_genes // 2  # less than original
+    new_genes_idx = np.random.choice(n_genes, size=n_genes_new, replace=False)
+    guide_by_element_new = np.random.binomial(1, 0.8, size=(n_grna_new, n_elements_new))
+    element_by_gene_lfc_new = np.random.normal(0, 1, size=(n_elements_new, n_genes_new))
+
     mdata_new = perturbo.simulation.simulate_data_from_trained_model(
         model,
         guide_obs=grna_counts_new,
         guide_by_element=guide_by_element_new,
-        element_by_gene_lfc=element_by_gene_lfc,
-        guide_efficacy=guide_efficacy,
+        element_by_gene_lfc=element_by_gene_lfc_new,
+        guide_efficacy=guide_efficacy_new,
         gene_indices=new_genes_idx,
         module_init_kwargs={"efficiency_mode": "mixture_high_moi"},
     )

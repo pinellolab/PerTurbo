@@ -123,6 +123,7 @@ def simulate_data_from_trained_model(
             latent_vars[param_name] = param_value[..., gene_indices_tensor]
 
     if element_by_gene_lfc is not None:
+        assert element_by_gene_lfc.shape[1] == n_genes_new
         element_by_gene_lfc = torch.tensor(element_by_gene_lfc, dtype=torch.float32, device=device)
         latent_vars["element_effects"] = element_by_gene_lfc
 
