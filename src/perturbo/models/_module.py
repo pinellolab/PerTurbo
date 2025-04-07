@@ -31,7 +31,7 @@ class PerTurboPyroModule(PyroBaseModuleClass):
         gene_means: torch.Tensor | None = None,
         guide_by_element: torch.Tensor | None = None,
         gene_by_element: torch.Tensor | None = None,
-        guide_noise: bool = False,
+        # guide_noise: bool = False,
         likelihood: Literal["nb", "lnnb"] = "nb",
         effect_prior_dist: Literal["cauchy", "normal_mixture", "normal", "laplace"] = "laplace",
         n_factors: int | None = None,
@@ -83,7 +83,7 @@ class PerTurboPyroModule(PyroBaseModuleClass):
         self.use_interactions = use_interactions
         self.efficiency_mode = efficiency_mode
         self.local_effects = gene_by_element is not None
-        self.guide_noise = guide_noise
+        # self.guide_noise = guide_noise
 
         # copy data summary stats
         self.n_cells = n_cells
@@ -340,22 +340,22 @@ class PerTurboPyroModule(PyroBaseModuleClass):
         else:
             element_effects = element_factor_effects + element_local_effects
 
-        guide_effects = (guide_efficacy * self.guide_by_element) @ element_effects
+        guide_effects = self.guide_by_element @ element_effects
 
-        # compute/sample guide effects as function of element effects
-        with guide_plate, gene_plate:
-            if self.guide_noise:
-                guide_effects = pyro.sample(
-                    "guide_effects",
-                    dist.Laplace(self.zero, self.guide_effects_prior_scale),
-                )
-            else:
-                guide_effects = pyro.deterministic("guide_effects", guide_effects)
+        # # compute/sample guide effects as function of element effects
+        # with guide_plate, gene_plate:
+        #     if self.guide_noise:
+        #         guide_effects = pyro.sample(
+        #             "guide_effects",
+        #             dist.Laplace(self.zero, self.guide_effects_prior_scale),
+        #         )
+        #     else:
+        #         guide_effects = pyro.deterministic("guide_effects", guide_effects)
 
         # Account for cell-specific latent "perturbation status" variable(s)
         with cell_plate:
             if self.efficiency_mode == "scaled":
-                perturbed = 1
+                perturbed = guides_observed @ guide_efficacy
             elif self.efficiency_mode == "mixture":
                 pert_prob = guides_observed @ guide_efficacy
                 perturbed = pyro.sample("perturbed", dist.Bernoulli(pert_prob), infer={"enumerate": "parallel"})
