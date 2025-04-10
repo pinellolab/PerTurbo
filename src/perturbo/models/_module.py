@@ -355,7 +355,7 @@ class PerTurboPyroModule(PyroBaseModuleClass):
         # Account for cell-specific latent "perturbation status" variable(s)
         with cell_plate:
             if self.efficiency_mode == "scaled":
-                perturbed = guides_observed @ guide_efficacy
+                perturbed = guide_efficacy.T * guides_observed
             elif self.efficiency_mode == "mixture":
                 pert_prob = guides_observed @ guide_efficacy
                 perturbed = pyro.sample("perturbed", dist.Bernoulli(pert_prob), infer={"enumerate": "parallel"})
