@@ -28,7 +28,8 @@ class PerTurboPyroModule(PyroBaseModuleClass):
         n_elements: int | None = None,
         n_cont_covariates: int | None = None,
         n_batches: int | None = 1,
-        init_values: dict[torch.Tensor] | None = None,
+        log_gene_mean_init: torch.Tensor | None = None,
+        log_gene_dispersion_init: torch.Tensor | None = None,
         guide_by_element: torch.Tensor | None = None,
         gene_by_element: torch.Tensor | None = None,
         # guide_noise: bool = False,
@@ -113,7 +114,15 @@ class PerTurboPyroModule(PyroBaseModuleClass):
         # self.delta_sites = ["cell_factors", "cell_loadings", "pert_factors", "pert_loadings"]
 
         self._guide = AutoGuideList(self.model, create_plates=self.create_plates)
-        # init_values = init_values or {}
+
+        init_values = {}
+        if log_gene_mean_init is not None:
+            self.register_buffer("log_gene_mean_init", log_gene_mean_init)
+            init_values["log_gene_mean"] = self.log_gene_mean_init
+
+        if log_gene_dispersion_init is not None:
+            self.register_buffer("log_gene_dispersion_init", log_gene_dispersion_init)
+            init_values["log_gene_dispersion"] = self.log_gene_dispersion_init
 
         # if control_pcs is not None and n_factors is not None:
         #     init_values["cell_loadings"] = control_pcs

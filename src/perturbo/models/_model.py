@@ -85,10 +85,9 @@ class PERTURBO(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
             sample_var = (X**2).mean(axis=0).squeeze() - sample_mean_squared
 
         theta_hat = torch.tensor(sample_mean_squared / (sample_var - sample_mean)).clamp(min=1e-1)
-        init_values = {
-            "log_gene_mean": torch.tensor(sample_mean, dtype=torch.float32).log(),
-            "log_gene_dispersion": torch.tensor(theta_hat).log(),
-        }
+        log_gene_mean_init = torch.tensor(sample_mean, dtype=torch.float32).log()
+        log_gene_dispersion_init = theta_hat.float().log()
+
         # if control_guides is not None and "n_factors" in model_kwargs and guide_by_element is not None:
         #     # control_guides, _ = torch.max(guide_by_element[:, control_elements], dim=-1)
         #     control_mask = self.read_matrix_from_registry(REGISTRY_KEYS.PERTURBATION_KEY)[:, control_guides].sum(dim=-1)
@@ -104,7 +103,8 @@ class PERTURBO(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
             n_genes=self.summary_stats.n_vars,
             n_cont_covariates=n_extra_continuous_covs,
             n_elements=n_elements,
-            init_values=init_values,
+            log_gene_mean_init=log_gene_mean_init,
+            log_gene_dispersion_init=log_gene_dispersion_init,
             guide_by_element=guide_by_element,
             gene_by_element=gene_by_element,
             # n_cats_per_cov=n_cats_per_cov,
@@ -229,7 +229,6 @@ class PERTURBO(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
             "_ind_x",
             mod_key=modalities.rna_layer,
         )
-
 
         batch_field = fields.MuDataCategoricalObsField(
             REGISTRY_KEYS.BATCH_KEY,
