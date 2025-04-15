@@ -155,11 +155,11 @@ class PerTurboPyroModule(PyroBaseModuleClass):
         ## register hyperparameters as buffers so they get automatically moved to GPU by scvi-tools
 
         # guide_by_element encoding
-        self.register_buffer("guide_by_element", guide_by_element)
+        self.register_buffer("guide_by_element", guide_by_element.to_sparse_coo())
 
         if self.local_effects:
             assert gene_by_element.shape[1] == self.n_elements
-            self.register_buffer("element_by_gene", gene_by_element.T)
+            self.register_buffer("element_by_gene", gene_by_element.T.to_sparse_coo())
             self.register_buffer("element_by_gene_idx", gene_by_element.T.to_sparse_coo().indices())
             # self.register_buffer("guide_by_gene_idx", (guide_by_element @ gene_by_element.T).to_sparse_coo().indices())
         self.n_element_effects = self.element_by_gene_idx.shape[1] if self.local_effects else 1
@@ -346,7 +346,9 @@ class PerTurboPyroModule(PyroBaseModuleClass):
 
         if self.local_effects:
             # override factor effects
-            element_effects = (1 - self.element_by_gene) * element_factor_effects + element_local_effects
+            element_effects = (
+                torch.ones(self.element_by_gene.shape) - self.element_by_gene
+            ) * element_factor_effects + element_local_effects
             # guide_factor_efects = self.guide_by_element @ ((1 - self.element_by_gene) * element_factor_effects)
             # guide_local_effects = (guide_efficacy * self.guide_by_element) @ element_local_effects
             # guide_effects = guide_factor_efects + guide_local_effects

@@ -478,6 +478,7 @@ class PERTURBO(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
             indices=indices,
             batch_size=len(indices) if indices is not None else len(self.adata),
             data_and_attributes=self.data_and_attrs,
+            load_sparse_tensor=True,
         )
         return self.module._get_fn_args_from_batch(next(iter(loader)))
 
