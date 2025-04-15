@@ -393,7 +393,7 @@ class PERTURBO(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
         self.to_device(device)
         if "callbacks" not in trainer_kwargs.keys():
             trainer_kwargs["callbacks"] = []
-        trainer_kwargs["callbacks"].append(PyroJitGuideWarmup())
+        # trainer_kwargs["callbacks"].append(PyroJitGuideWarmup())
 
         runner = self._train_runner_cls(
             self,
