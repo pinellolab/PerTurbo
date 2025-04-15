@@ -5,7 +5,7 @@ import pyro
 import pyro.distributions as dist
 import torch
 from pyro import poutine
-from pyro.infer.autoguide import AutoDelta, AutoGuideList, AutoNormal, init_to_median
+from pyro.infer.autoguide import AutoDelta, AutoGuideList, AutoNormal, init_to_median, init_to_value
 from scvi.module.base import PyroBaseModuleClass
 
 from ._constants import REGISTRY_KEYS
@@ -28,7 +28,7 @@ class PerTurboPyroModule(PyroBaseModuleClass):
         n_elements: int | None = None,
         n_cont_covariates: int | None = None,
         n_batches: int | None = 1,
-        gene_means: torch.Tensor | None = None,
+        init_values: dict[torch.Tensor] | None = None,
         guide_by_element: torch.Tensor | None = None,
         gene_by_element: torch.Tensor | None = None,
         # guide_noise: bool = False,
@@ -36,9 +36,9 @@ class PerTurboPyroModule(PyroBaseModuleClass):
         effect_prior_dist: Literal["cauchy", "normal_mixture", "normal", "laplace"] = "laplace",
         n_factors: int | None = None,
         n_pert_factors: int | None = None,
-        use_interactions: bool = False,
+        # use_interactions: bool = False,
         efficiency_mode: Literal["mixture", "scaled"] = "scaled",
-        dispersion_effects: bool = False,
+        # dispersion_effects: bool = False,
         fit_guide_efficacy: bool = True,
         prior_param_dict: Mapping[str, torch.Tensor] | None = None,
     ) -> None:
@@ -73,14 +73,14 @@ class PerTurboPyroModule(PyroBaseModuleClass):
         """
         super().__init__()
         # set user-defined options for model behavior
-        self.dispersion_effects = dispersion_effects
+        # self.dispersion_effects = dispersion_effects
         self.likelihood = likelihood
         self.fit_guide_efficacy = fit_guide_efficacy
         self.lnnb_quad_points = 8
         self.n_factors = n_factors
         self.n_pert_factors = n_pert_factors
         self.effect_prior_dist = effect_prior_dist
-        self.use_interactions = use_interactions
+        # self.use_interactions = use_interactions
         self.efficiency_mode = efficiency_mode
         self.local_effects = gene_by_element is not None
         # self.guide_noise = guide_noise
@@ -108,28 +108,31 @@ class PerTurboPyroModule(PyroBaseModuleClass):
 
         self.n_batches = n_batches
 
-        self.delta_sites = []
+        self.delta_sites = ["log_gene_mean"]
         # self.delta_sites = ["cell_factors"]
         # self.delta_sites = ["cell_factors", "cell_loadings", "pert_factors", "pert_loadings"]
 
         self._guide = AutoGuideList(self.model, create_plates=self.create_plates)
-        # init_values = {}
-        # if gene_means is not None:
-        #     init_values["log_gene_mean"] = torch.log(gene_means)
+        # init_values = init_values or {}
+
         # if control_pcs is not None and n_factors is not None:
         #     init_values["cell_loadings"] = control_pcs
 
         self._guide.append(
             AutoNormal(
                 poutine.block(self.model, hide=self.delta_sites + self.discrete_sites),
-                init_loc_fn=lambda x: init_to_median(x, num_samples=100),
-            )
+                init_loc_fn=init_to_value(values=init_values, fallback=init_to_median),
+            ),
         )
+
         if self.delta_sites:
             self._guide.append(
                 AutoDelta(
                     poutine.block(self.model, expose=self.delta_sites),
-                    init_loc_fn=lambda x: init_to_median(x, num_samples=100),
+                    init_loc_fn=init_to_value(
+                        values=init_values,
+                        fallback=init_to_median,
+                    ),
                 )
             )
 
@@ -150,12 +153,7 @@ class PerTurboPyroModule(PyroBaseModuleClass):
         self.register_buffer("one", torch.tensor(1.0))
 
         # per-gene hyperparams
-        if gene_means is not None:
-            e_x = gene_means
-            epsilon = 1 / self.n_cells
-            self.register_buffer("gene_mean_prior_loc", torch.log(e_x + epsilon).squeeze())
-        else:
-            self.register_buffer("gene_mean_prior_loc", torch.tensor(0.0))
+        self.register_buffer("gene_mean_prior_loc", torch.tensor(0.0))
         self.register_buffer("gene_disp_prior_loc", torch.tensor(1.0))
 
         self.register_buffer("gene_mean_prior_scale", torch.tensor(3.0))
@@ -174,7 +172,7 @@ class PerTurboPyroModule(PyroBaseModuleClass):
         ##  element effect size hyperparams
 
         # Normal/Laplace/Cauchy prior
-        effect_prior_scales = {"cauchy": 0.01, "laplace": 0.1, "normal": 1.0}
+        effect_prior_scales = {"cauchy": 0.1, "laplace": 0.5, "normal": 2.0}
         model_effect_prior_scale = effect_prior_scales[effect_prior_dist]
         self.register_buffer("element_effects_prior_scale", torch.tensor(model_effect_prior_scale))
         self.register_buffer("guide_effects_prior_scale", torch.tensor(model_effect_prior_scale))
@@ -229,7 +227,7 @@ class PerTurboPyroModule(PyroBaseModuleClass):
             pyro.plate("Genes", self.n_genes, dim=-1),
             pyro.plate("Covariates", self.n_cont_covariates, dim=-2),
             pyro.plate("Elements_sparse", self.n_element_effects, dim=-1),
-            pyro.plate("Cell_factors", self.n_factors, dim=-3),
+            # pyro.plate("Cell_factors", self.n_factors, dim=-3),
             pyro.plate("Pert_factors", self.n_pert_factors, dim=-3),
         )
 
@@ -243,7 +241,6 @@ class PerTurboPyroModule(PyroBaseModuleClass):
             gene_plate,
             cont_covariate_plate,
             element_effects_plate,  # sparse mode
-            cell_factor_plate,
             pert_factor_plate,
         ) = self.create_plates(idx)
 
@@ -301,35 +298,35 @@ class PerTurboPyroModule(PyroBaseModuleClass):
             # )
             element_factor_effects = torch.einsum("fei,fjg->eg", pert_factors, pert_loadings)
 
-        # Sample cell-specific factors (linear unobserved confounders) if using
-        if self.n_factors is not None:
-            with cell_factor_plate, cell_plate:
-                cell_factors = pyro.sample(
-                    "cell_factors",
-                    dist.Laplace(0.0, self.cell_factor_prior_scale),
-                )
-            with cell_factor_plate, gene_plate:
-                cell_loadings = pyro.sample(
-                    "cell_loadings",
-                    dist.Laplace(0.0, self.cell_loading_prior_scale),
-                )
-            # cell_factor_scale_term = pyro.sample(
-            #     "cell_factor_scale_term",
-            #     dist.LogNormal(self.zero, self.one),
-            # )
-            cell_factor_effects = torch.einsum("fci,fjg->cg", cell_factors, cell_loadings)
+        # # Sample cell-specific factors (linear unobserved confounders) if using
+        # if self.n_factors is not None:
+        #     with cell_factor_plate, cell_plate:
+        #         cell_factors = pyro.sample(
+        #             "cell_factors",
+        #             dist.Laplace(0.0, self.cell_factor_prior_scale),
+        #         )
+        #     with cell_factor_plate, gene_plate:
+        #         cell_loadings = pyro.sample(
+        #             "cell_loadings",
+        #             dist.Laplace(0.0, self.cell_loading_prior_scale),
+        #         )
+        #     # cell_factor_scale_term = pyro.sample(
+        #     #     "cell_factor_scale_term",
+        #     #     dist.LogNormal(self.zero, self.one),
+        #     # )
+        #     cell_factor_effects = torch.einsum("fci,fjg->cg", cell_factors, cell_loadings)
 
-            # if self.use_interactions and self.n_pert_factors is not None:
-            #     with cell_factor_plate, element_plate:
-            #         pert_cell_factors = pyro.sample(
-            #             "pert_cell_factors",
-            #             dist.Laplace(0.0, self.cell_factor_prior_scale),
-            #         )
-            #     element_factor_effects = (
-            #         torch.einsum("fei,fjg->eg", pert_cell_factors, cell_loadings) + element_factor_effects
-            #     )
-        else:
-            cell_factor_effects = 0
+        #     # if self.use_interactions and self.n_pert_factors is not None:
+        #     #     with cell_factor_plate, element_plate:
+        #     #         pert_cell_factors = pyro.sample(
+        #     #             "pert_cell_factors",
+        #     #             dist.Laplace(0.0, self.cell_factor_prior_scale),
+        #     #         )
+        #     #     element_factor_effects = (
+        #     #         torch.einsum("fei,fjg->eg", pert_cell_factors, cell_loadings) + element_factor_effects
+        #     #     )
+        # else:
+        #     cell_factor_effects = 0
 
         if self.local_effects:
             # override factor effects
@@ -381,9 +378,9 @@ class PerTurboPyroModule(PyroBaseModuleClass):
             # Sample parameters of baseline gene expression distribution
             gene_base_log_mean = pyro.sample(
                 "log_gene_mean",
-                dist.Normal(self.gene_mean_prior_loc, self.gene_mean_prior_scale),
+                dist.Normal(self.zero, self.gene_mean_prior_scale),
             )
-            gene_log_dispersion = pyro.sample(
+            nb_log_dispersion = pyro.sample(
                 "log_gene_dispersion",
                 dist.Normal(self.gene_disp_prior_loc, self.gene_disp_prior_scale),
             )
@@ -397,12 +394,12 @@ class PerTurboPyroModule(PyroBaseModuleClass):
                 # batch effects: n_batches x n_genes
                 batch_effect_size = pyro.sample("batch_effect", dist.Normal(0.0, self.batch_effect_prior_scale))
                 batch_effects = batch_effect_size[batch.squeeze(), ...]
-                if self.dispersion_effects:
-                    batch_disp_effect_size = pyro.sample(
-                        "batch_disp_effect",
-                        dist.Normal(0.0, self.batch_effect_prior_scale),
-                    )
-                    batch_disp_effects = batch_disp_effect_size[batch.squeeze(), ...]
+                # if self.dispersion_effects:
+                #     batch_disp_effect_size = pyro.sample(
+                #         "batch_disp_effect",
+                #         dist.Normal(0.0, self.batch_effect_prior_scale),
+                #     )
+                #     batch_disp_effects = batch_disp_effect_size[batch.squeeze(), ...]
 
             with cont_covariate_plate:
                 # covariate effects: n_cont_covariates x n_genes
@@ -412,14 +409,15 @@ class PerTurboPyroModule(PyroBaseModuleClass):
                 )
                 covariate_effects = cont_covariates @ cont_covariate_effect_size
 
-            nb_log_mean_ctrl = (
-                gene_base_log_mean + size_factor + batch_effects + covariate_effects + cell_factor_effects
-            )
+            nb_log_mean_ctrl = gene_base_log_mean + size_factor + batch_effects + covariate_effects
+            # nb_log_mean_ctrl = (
+            #     gene_base_log_mean + size_factor + batch_effects + covariate_effects + cell_factor_effects
+            # )
 
-            if not self.dispersion_effects:
-                nb_log_dispersion = gene_log_dispersion
-            else:
-                nb_log_dispersion = gene_log_dispersion + batch_disp_effects
+            # if not self.dispersion_effects:
+            #     nb_log_dispersion = gene_log_dispersion
+            # else:
+            #     nb_log_dispersion = gene_log_dispersion + batch_disp_effects
 
             nb_log_mean = nb_log_mean_ctrl + mean_perturbation_effect
 
@@ -427,11 +425,6 @@ class PerTurboPyroModule(PyroBaseModuleClass):
             with cell_plate:
                 observations = tensor_dict.get(REGISTRY_KEYS.X_KEY)
                 if self.likelihood == "lnnb":
-                    nb_log_mean = nb_log_mean
-                    nb_log_dispersion = nb_log_dispersion
-                    multiplicative_noise = multiplicative_noise
-                    self.lnnb_quad_points = self.lnnb_quad_points
-                    observations = observations
                     return pyro.sample(
                         "obs",
                         LogNormalNegativeBinomial(
@@ -443,9 +436,6 @@ class PerTurboPyroModule(PyroBaseModuleClass):
                         obs=observations,
                     )
                 elif self.likelihood == "nb":
-                    nb_log_mean = nb_log_mean
-                    nb_log_dispersion = nb_log_dispersion
-                    observations = observations
                     return pyro.sample(
                         "obs",
                         dist.NegativeBinomial(

@@ -5,21 +5,18 @@ import pandas as pd
 import torch
 from mudata import AnnData, MuData
 from pandas import DataFrame
-from pyro.infer import TraceEnum_ELBO
+from pyro import poutine
+from pyro.infer import TraceEnum_ELBO, infer_discrete
 from scipy.sparse import issparse
 from scipy.stats import chi2
 from scvi._types import AnnOrMuData
 from scvi.data import AnnDataManager, fields
-from scvi.dataloaders import DeviceBackedDataSplitter
+from scvi.dataloaders import AnnDataLoader, DeviceBackedDataSplitter
 from scvi.model.base import (
     BaseModelClass,
     PyroSampleMixin,
     PyroSviTrainMixin,
 )
-from pyro import poutine
-from pyro.infer import infer_discrete
-from scvi.dataloaders import AnnDataLoader
-
 from scvi.train import PyroTrainingPlan
 from scvi.utils._docstrings import devices_dsp
 
@@ -33,7 +30,7 @@ class PERTURBO(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
     def __init__(
         self,
         mdata: AnnOrMuData,
-        # control_guides=None,
+        control_guides=None,
         **model_kwargs,
     ):
         super().__init__(mdata)
@@ -57,7 +54,6 @@ class PERTURBO(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
             self.data_and_attrs.update({REGISTRY_KEYS.CAT_COVS_KEY: np.float32})
             n_cats_per_cov = self.adata_manager.get_state_registry(REGISTRY_KEYS.CAT_COVS_KEY).n_cats_per_key
 
-
         guide_by_element = None
         n_elements = None
         if REGISTRY_KEYS.GUIDE_BY_ELEMENT_KEY in self.adata_manager.data_registry:
@@ -68,8 +64,31 @@ class PERTURBO(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
         if REGISTRY_KEYS.GENE_BY_ELEMENT_KEY in self.adata_manager.data_registry:
             gene_by_element = self.read_matrix_from_registry(REGISTRY_KEYS.GENE_BY_ELEMENT_KEY)
 
-        gene_mean = self.adata_manager.get_from_registry(REGISTRY_KEYS.GENE_SUMMARY_STATS)
-        gene_mean = torch.tensor(gene_mean, dtype=torch.float32)[:, 0]
+        epsilon = 1e-3
+        X = self.adata_manager.get_from_registry(REGISTRY_KEYS.X_KEY)
+        grna_counts = self.adata_manager.get_from_registry(REGISTRY_KEYS.PERTURBATION_KEY)
+
+        if control_guides is not None:
+            if issparse(grna_counts):
+                control_guide_idx = grna_counts[:, control_guides].X.sum(axis=1).A1 > 0
+            else:
+                control_guide_idx = grna_counts[:, control_guides].X.sum(axis=1) > 0
+            X = X[control_guide_idx, :]
+
+        if issparse(X):
+            sample_mean = X.mean(axis=0).A1 + epsilon
+            sample_mean_squared = sample_mean * sample_mean
+            sample_var = (X.multiply(X)).mean(axis=0).A1 - sample_mean_squared
+        else:
+            sample_mean = X.mean(axis=0).squeeze() + epsilon
+            sample_mean_squared = sample_mean**2
+            sample_var = (X**2).mean(axis=0).squeeze() - sample_mean_squared
+
+        theta_hat = torch.tensor(sample_mean_squared / (sample_var - sample_mean)).clamp(min=1e-1)
+        init_values = {
+            "log_gene_mean": torch.tensor(sample_mean, dtype=torch.float32).log(),
+            "log_gene_dispersion": torch.tensor(theta_hat).log(),
+        }
         # if control_guides is not None and "n_factors" in model_kwargs and guide_by_element is not None:
         #     # control_guides, _ = torch.max(guide_by_element[:, control_elements], dim=-1)
         #     control_mask = self.read_matrix_from_registry(REGISTRY_KEYS.PERTURBATION_KEY)[:, control_guides].sum(dim=-1)
@@ -85,7 +104,7 @@ class PERTURBO(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
             n_genes=self.summary_stats.n_vars,
             n_cont_covariates=n_extra_continuous_covs,
             n_elements=n_elements,
-            gene_means=gene_mean,
+            init_values=init_values,
             guide_by_element=guide_by_element,
             gene_by_element=gene_by_element,
             # n_cats_per_cov=n_cats_per_cov,
@@ -115,59 +134,6 @@ class PERTURBO(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
         **kwargs,
     ):
         raise NotImplementedError("MuData input required, use setup_mudata.")
-
-    #     setup_method_args = cls._get_setup_method_args(**locals())
-    #     anndata_fields = [
-    #         fields.LayerField(REGISTRY_KEYS.X_KEY, None, is_count_data=True),
-    #         fields.CategoricalObsField(REGISTRY_KEYS.BATCH_KEY, batch_key),
-    #         fields.CategoricalObsField(REGISTRY_KEYS.PERTURBATION_KEY, perturbation_key),
-    #         fields.NumericalObsField(REGISTRY_KEYS.SIZE_FACTOR_KEY, size_factor_key, required=False),
-    #         fields.NumericalJointObsField(REGISTRY_KEYS.CONT_COVS_KEY, continuous_covariates_keys),
-    #     ]
-    #     # add library size if not present
-    #     if library_size_key is None:
-    #         library_size_key = "_library_size"
-    #         library_size = adata.X.sum(axis=1)
-    #         if not library_size.all():
-    #             raise ValueError(
-    #                 "Cannot infer library size: cells with zero counts. Set library_size_key manually instead."
-    #             )
-    #         adata.obs[library_size_key] = library_size
-
-    #     # add size factor if not present
-    #     if size_factor_key is None:
-    #         size_factor_key = "_size_factor"
-    #         library_size = adata.obs[library_size_key]
-    #         if not library_size.all():
-    #             raise ValueError(
-    #                 "Cannot infer size factors: cells with zero library size. Set size_factor_key manually instead."
-    #             )
-    #         log_cpm = np.log(library_size / 1e6)
-    #         adata.obs[size_factor_key] = log_cpm - log_cpm.mean()
-
-    #     # add indices to enable pyro subsampling of local vars
-    #     adata.obs = adata.obs.assign(_ind_x=lambda x: np.arange(len(x)))
-    #     index_field = fields.MuDataNumericalObsField(
-    #         REGISTRY_KEYS.INDICES_KEY,
-    #         "_ind_x",
-    #     )
-
-    #     # add info for method of moments estimation of gene params
-    #     mean_counts = np.mean(adata.X, axis=0)
-    #     if isinstance(mean_counts, np.matrix):  # occurs when summing sparse array
-    #         mean_counts = mean_counts.A1
-    #     adata.var["_gene_mean"] = mean_counts
-    #     # rna_adata.var["_gene_variance"] = np.var(rna_adata.X, axis=0).squeeze()
-    #     gene_field = fields.MuDataNumericalVarField(
-    #         REGISTRY_KEYS.GENE_SUMMARY_STATS,
-    #         "_gene_mean",
-    #     )
-
-    #     adata_manager = AnnDataManager(fields=anndata_fields, setup_method_args=setup_method_args)
-    #     adata_manager.register_fields(adata, **kwargs)
-    #     cls.register_manager(adata_manager)
-
-    #     raise NotImplementedError("MuData input required, use setup_mudata.")
 
     @classmethod
     def setup_mudata(
@@ -256,20 +222,6 @@ class PERTURBO(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
             mod_key=modalities.rna_layer,
         )
 
-        # add info for method of moments estimation of gene params
-        if gene_mean_key is None:
-            gene_mean_key = "_gene_mean"
-            rna_adata = mdata[modalities.rna_layer]
-            mean_counts = np.mean(rna_adata.X, axis=0)
-            if isinstance(mean_counts, np.matrix):  # occurs when summing sparse array
-                mean_counts = mean_counts.A1
-            rna_adata.var["_gene_mean"] = mean_counts
-            # rna_adata.var["_gene_variance"] = np.var(rna_adata.X, axis=0).squeeze()
-        gene_field = fields.MuDataNumericalVarField(
-            REGISTRY_KEYS.GENE_SUMMARY_STATS,
-            "_gene_mean",
-            mod_key=modalities.rna_layer,
-        )
 
         batch_field = fields.MuDataCategoricalObsField(
             REGISTRY_KEYS.BATCH_KEY,
@@ -286,7 +238,6 @@ class PERTURBO(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
         mudata_fields = [
             index_field,
             batch_field,
-            gene_field,
             fields.MuDataLayerField(
                 REGISTRY_KEYS.PERTURBATION_KEY,
                 perturbation_layer,
@@ -346,15 +297,15 @@ class PERTURBO(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
     @devices_dsp.dedent
     def train(
         self,
-        max_epochs: int | None = None,
+        max_epochs: int = 1000,
         accelerator: str = "cpu",
         device: int | str = "auto",
         train_size: float = 1.0,
         validation_size: float | None = None,
         shuffle_set_split: bool = False,
-        batch_size: int = 128,
+        batch_size: int = 1024,
         early_stopping: bool = False,
-        lr: float | None = None,
+        lr: float | None = 0.005,
         training_plan: PyroTrainingPlan = PyroTrainingPlan,
         plan_kwargs: dict | None = None,
         data_splitter_kwargs: dict | None = None,
