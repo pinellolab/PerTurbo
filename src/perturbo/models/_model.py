@@ -390,9 +390,9 @@ class PERTURBO(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
         es = "early_stopping"
         trainer_kwargs[es] = early_stopping if es not in trainer_kwargs.keys() else trainer_kwargs[es]
 
-        # if "callbacks" not in trainer_kwargs.keys():
-        #     trainer_kwargs["callbacks"] = []
-        trainer_kwargs["callbacks"].append(PyroJitGuideWarmup(), PyroModelGuideWarmup())
+        if "callbacks" not in trainer_kwargs.keys():
+            trainer_kwargs["callbacks"] = []
+        trainer_kwargs["callbacks"].append(PyroJitGuideWarmup())
 
         runner = self._train_runner_cls(
             self,
