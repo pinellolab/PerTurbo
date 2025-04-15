@@ -214,6 +214,14 @@ class PERTURBO(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
             log_cpm = np.log(library_size / 1e6)
             mdata[modalities.rna_layer].obs[size_factor_key] = log_cpm - log_cpm.mean()
 
+        # add gene mean estimate (legacy, for simulator)
+        gene_mean_key = "_gene_mean"
+        rna_adata = mdata[modalities.rna_layer]
+        mean_counts = np.mean(rna_adata.X, axis=0)
+        if isinstance(mean_counts, np.matrix):  # occurs when summing sparse array
+            mean_counts = mean_counts.A1
+        rna_adata.var["_gene_mean"] = mean_counts
+
         # add indices to enable pyro subsampling of local vars
         mdata[modalities.rna_layer].obs = mdata[modalities.rna_layer].obs.assign(_ind_x=lambda x: np.arange(len(x)))
         index_field = fields.MuDataNumericalObsField(
