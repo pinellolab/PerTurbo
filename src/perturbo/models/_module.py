@@ -5,7 +5,7 @@ import pyro
 import pyro.distributions as dist
 import torch
 from pyro import poutine
-from pyro.infer.autoguide import AutoDelta, AutoGuideList, AutoNormal, init_to_median, init_to_value
+from pyro.infer.autoguide import AutoDelta, AutoGuideList, AutoNormal, init_to_median
 from scvi.module.base import PyroBaseModuleClass
 
 from ._constants import REGISTRY_KEYS
@@ -17,6 +17,19 @@ class LogNormalNegativeBinomial(dist.LogNormalNegativeBinomial):
             dist.Normal(0, self.multiplicative_noise_scale).expand(self.batch_shape).sample(sample_shape=sample_shape)
         )
         return dist.NegativeBinomial(total_count=self.total_count, logits=self.logits + normals).sample()
+
+
+class LazyInitToValue:
+    def __init__(self, module, name_map):
+        self.module = module
+        self.name_map = name_map  # e.g., {"my_param": "my_init"}
+
+    def __call__(self, site):
+        name = site["name"]
+        if name in self.name_map:
+            buf = getattr(self.module, self.name_map[name])
+            return buf.to(site["fn"].support.device)
+        return None  # fallback to Pyro default
 
 
 class PerTurboPyroModule(PyroBaseModuleClass):
@@ -113,24 +126,21 @@ class PerTurboPyroModule(PyroBaseModuleClass):
         # self.delta_sites = ["cell_factors"]
         # self.delta_sites = ["cell_factors", "cell_loadings", "pert_factors", "pert_loadings"]
 
-        self._guide = AutoGuideList(self.model, create_plates=self.create_plates)
+        if log_gene_mean_init is None:
+            log_gene_mean_init = torch.zeros(self.n_genes)
 
-        init_values = {}
-        if log_gene_mean_init is not None:
-            self.register_buffer("log_gene_mean_init", log_gene_mean_init)
-            init_values["log_gene_mean"] = self.log_gene_mean_init
-
-        if log_gene_dispersion_init is not None:
-            self.register_buffer("log_gene_dispersion_init", log_gene_dispersion_init)
-            init_values["log_gene_dispersion"] = self.log_gene_dispersion_init
+        if log_gene_dispersion_init is None:
+            log_gene_dispersion_init = torch.ones(self.n_genes)
 
         # if control_pcs is not None and n_factors is not None:
         #     init_values["cell_loadings"] = control_pcs
 
+        self._guide = AutoGuideList(self.model, create_plates=self.create_plates)
+
         self._guide.append(
             AutoNormal(
                 poutine.block(self.model, hide=self.delta_sites + self.discrete_sites),
-                init_loc_fn=init_to_value(values=init_values, fallback=init_to_median),
+                init_loc_fn=lambda x: init_to_median(x, num_samples=100),
             ),
         )
 
@@ -138,10 +148,7 @@ class PerTurboPyroModule(PyroBaseModuleClass):
             self._guide.append(
                 AutoDelta(
                     poutine.block(self.model, expose=self.delta_sites),
-                    init_loc_fn=init_to_value(
-                        values=init_values,
-                        fallback=init_to_median,
-                    ),
+                    init_loc_fn=lambda x: init_to_median(x, num_samples=100),
                 )
             )
 
@@ -162,8 +169,8 @@ class PerTurboPyroModule(PyroBaseModuleClass):
         self.register_buffer("one", torch.tensor(1.0))
 
         # per-gene hyperparams
-        self.register_buffer("gene_mean_prior_loc", torch.tensor(0.0))
-        self.register_buffer("gene_disp_prior_loc", torch.tensor(1.0))
+        self.register_buffer("gene_mean_prior_loc", log_gene_mean_init)
+        self.register_buffer("gene_disp_prior_loc", log_gene_dispersion_init)
 
         self.register_buffer("gene_mean_prior_scale", torch.tensor(3.0))
         self.register_buffer("gene_disp_prior_scale", torch.tensor(3.0))

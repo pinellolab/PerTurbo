@@ -12,9 +12,9 @@ from scipy.stats import chi2
 from scvi._types import AnnOrMuData
 from scvi.data import AnnDataManager, fields
 from scvi.dataloaders import AnnDataLoader, DeviceBackedDataSplitter
-from scvi.model.base import PyroJitGuideWarmup
 from scvi.model.base import (
     BaseModelClass,
+    PyroJitGuideWarmup,
     PyroSampleMixin,
     PyroSviTrainMixin,
 )
@@ -390,10 +390,9 @@ class PERTURBO(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
         es = "early_stopping"
         trainer_kwargs[es] = early_stopping if es not in trainer_kwargs.keys() else trainer_kwargs[es]
 
-        self.to_device(device)
         if "callbacks" not in trainer_kwargs.keys():
             trainer_kwargs["callbacks"] = []
-        # trainer_kwargs["callbacks"].append(PyroJitGuideWarmup())
+        trainer_kwargs["callbacks"].append(PyroJitGuideWarmup())
 
         runner = self._train_runner_cls(
             self,
