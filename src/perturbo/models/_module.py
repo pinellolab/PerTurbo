@@ -1,3 +1,4 @@
+import warnings
 from collections.abc import Mapping
 from typing import Literal
 
@@ -17,19 +18,6 @@ class LogNormalNegativeBinomial(dist.LogNormalNegativeBinomial):
             dist.Normal(0, self.multiplicative_noise_scale).expand(self.batch_shape).sample(sample_shape=sample_shape)
         )
         return dist.NegativeBinomial(total_count=self.total_count, logits=self.logits + normals).sample()
-
-
-class LazyInitToValue:
-    def __init__(self, module, name_map):
-        self.module = module
-        self.name_map = name_map  # e.g., {"my_param": "my_init"}
-
-    def __call__(self, site):
-        name = site["name"]
-        if name in self.name_map:
-            buf = getattr(self.module, self.name_map[name])
-            return buf.to(site["fn"].support.device)
-        return None  # fallback to Pyro default
 
 
 class PerTurboPyroModule(PyroBaseModuleClass):
@@ -55,6 +43,7 @@ class PerTurboPyroModule(PyroBaseModuleClass):
         # dispersion_effects: bool = False,
         fit_guide_efficacy: bool = True,
         prior_param_dict: Mapping[str, torch.Tensor] | None = None,
+        **module_kwargs,
     ) -> None:
         """
         Pyro module underlying perturbo.
@@ -88,6 +77,9 @@ class PerTurboPyroModule(PyroBaseModuleClass):
         super().__init__()
         # set user-defined options for model behavior
         # self.dispersion_effects = dispersion_effects
+        for k, v in module_kwargs.items():
+            warnings.warn(f"Unused module_kwargs: {k} = {v}")
+
         self.likelihood = likelihood
         self.fit_guide_efficacy = fit_guide_efficacy
         self.lnnb_quad_points = 8
@@ -155,11 +147,11 @@ class PerTurboPyroModule(PyroBaseModuleClass):
         ## register hyperparameters as buffers so they get automatically moved to GPU by scvi-tools
 
         # guide_by_element encoding
-        self.register_buffer("guide_by_element", guide_by_element.to_sparse_coo())
+        self.register_buffer("guide_by_element", guide_by_element)
 
         if self.local_effects:
             assert gene_by_element.shape[1] == self.n_elements
-            self.register_buffer("element_by_gene", gene_by_element.T.to_sparse_coo())
+            self.register_buffer("element_by_gene", gene_by_element.T)
             self.register_buffer("element_by_gene_idx", gene_by_element.T.to_sparse_coo().indices())
             # self.register_buffer("guide_by_gene_idx", (guide_by_element @ gene_by_element.T).to_sparse_coo().indices())
         self.n_element_effects = self.element_by_gene_idx.shape[1] if self.local_effects else 1
@@ -257,6 +249,7 @@ class PerTurboPyroModule(PyroBaseModuleClass):
             gene_plate,
             cont_covariate_plate,
             element_effects_plate,  # sparse mode
+            # cell_factor_plate,
             pert_factor_plate,
         ) = self.create_plates(idx)
 
