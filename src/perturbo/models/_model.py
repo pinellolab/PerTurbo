@@ -32,6 +32,7 @@ class PERTURBO(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
         self,
         mdata: AnnOrMuData,
         control_guides=None,
+        load_sparse_tensors=False,
         **model_kwargs,
     ):
         super().__init__(mdata)
@@ -44,6 +45,8 @@ class PERTURBO(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
             REGISTRY_KEYS.BATCH_KEY: np.int64,
             REGISTRY_KEYS.INDICES_KEY: np.int64,
         }
+
+        self.load_sparse_tensors = load_sparse_tensors
 
         n_extra_continuous_covs = 0
         if "n_extra_continuous_covs" in self.summary_stats:
@@ -478,7 +481,7 @@ class PERTURBO(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
             indices=indices,
             batch_size=len(indices) if indices is not None else len(self.adata),
             data_and_attributes=self.data_and_attrs,
-            load_sparse_tensor=True,
+            load_sparse_tensor=self.load_sparse_tensors,
         )
         return self.module._get_fn_args_from_batch(next(iter(loader)))
 
