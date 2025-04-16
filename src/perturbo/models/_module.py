@@ -1,3 +1,4 @@
+import warnings
 from collections.abc import Mapping
 from typing import Literal
 
@@ -17,19 +18,6 @@ class LogNormalNegativeBinomial(dist.LogNormalNegativeBinomial):
             dist.Normal(0, self.multiplicative_noise_scale).expand(self.batch_shape).sample(sample_shape=sample_shape)
         )
         return dist.NegativeBinomial(total_count=self.total_count, logits=self.logits + normals).sample()
-
-
-class LazyInitToValue:
-    def __init__(self, module, name_map):
-        self.module = module
-        self.name_map = name_map  # e.g., {"my_param": "my_init"}
-
-    def __call__(self, site):
-        name = site["name"]
-        if name in self.name_map:
-            buf = getattr(self.module, self.name_map[name])
-            return buf.to(site["fn"].support.device)
-        return None  # fallback to Pyro default
 
 
 class PerTurboPyroModule(PyroBaseModuleClass):
@@ -55,6 +43,7 @@ class PerTurboPyroModule(PyroBaseModuleClass):
         # dispersion_effects: bool = False,
         fit_guide_efficacy: bool = True,
         prior_param_dict: Mapping[str, torch.Tensor] | None = None,
+        **module_kwargs,
     ) -> None:
         """
         Pyro module underlying perturbo.
@@ -88,6 +77,9 @@ class PerTurboPyroModule(PyroBaseModuleClass):
         super().__init__()
         # set user-defined options for model behavior
         # self.dispersion_effects = dispersion_effects
+        for k, v in module_kwargs.items():
+            warnings.warn(f"Unused module_kwargs: {k}", stacklevel=2)
+
         self.likelihood = likelihood
         self.fit_guide_efficacy = fit_guide_efficacy
         self.lnnb_quad_points = 8
@@ -257,6 +249,7 @@ class PerTurboPyroModule(PyroBaseModuleClass):
             gene_plate,
             cont_covariate_plate,
             element_effects_plate,  # sparse mode
+            # cell_factor_plate,
             pert_factor_plate,
         ) = self.create_plates(idx)
 
@@ -346,7 +339,9 @@ class PerTurboPyroModule(PyroBaseModuleClass):
 
         if self.local_effects:
             # override factor effects
-            element_effects = (1 - self.element_by_gene) * element_factor_effects + element_local_effects
+            element_effects = (
+                torch.ones(self.element_by_gene.shape) - self.element_by_gene
+            ) * element_factor_effects + element_local_effects
             # guide_factor_efects = self.guide_by_element @ ((1 - self.element_by_gene) * element_factor_effects)
             # guide_local_effects = (guide_efficacy * self.guide_by_element) @ element_local_effects
             # guide_effects = guide_factor_efects + guide_local_effects

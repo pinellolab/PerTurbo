@@ -37,7 +37,7 @@ def mudata_filtering(
         print("Please indicate the correct guide_by_element_key.")
         return
 
-    rna = mdata[rna_modality].X.toarray()
+    rna = mdata[rna_modality].X
     # grna = mdata[grna_modality].X.toarray()
     guide_by_element = mdata[grna_modality].varm[guide_by_element_key]
     if isinstance(guide_by_element, pd.DataFrame):
@@ -63,7 +63,10 @@ def mudata_filtering(
 
         for col in cols:
             # Extract the column from rna and convert to dense format
-            rna_col = rna[:, col].flatten()
+            rna_col = rna[:, col]
+            if issparse(rna_col):
+                rna_col = rna_col.toarray()
+            rna_col = rna_col.flatten()
             # print(rna_col.shape)
 
             # Condition 1: Number of non-zero values in 'rna' where 'element' has entry 1 should be >= n_nonzero_trt_thresh
