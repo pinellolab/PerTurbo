@@ -78,7 +78,7 @@ class PerTurboPyroModule(PyroBaseModuleClass):
         # set user-defined options for model behavior
         # self.dispersion_effects = dispersion_effects
         for k, v in module_kwargs.items():
-            warnings.warn(f"Unused module_kwargs: {k} = {v}")
+            warnings.warn(f"Unused module_kwargs: {k}", stacklevel=2)
 
         self.likelihood = likelihood
         self.fit_guide_efficacy = fit_guide_efficacy
