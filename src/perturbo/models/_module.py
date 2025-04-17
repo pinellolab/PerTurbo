@@ -339,9 +339,7 @@ class PerTurboPyroModule(PyroBaseModuleClass):
 
         if self.local_effects:
             # override factor effects
-            element_effects = (
-                torch.ones(self.element_by_gene.shape) - self.element_by_gene
-            ) * element_factor_effects + element_local_effects
+            element_effects = (1 - self.element_by_gene) * element_factor_effects + element_local_effects
             # guide_factor_efects = self.guide_by_element @ ((1 - self.element_by_gene) * element_factor_effects)
             # guide_local_effects = (guide_efficacy * self.guide_by_element) @ element_local_effects
             # guide_effects = guide_factor_efects + guide_local_effects
