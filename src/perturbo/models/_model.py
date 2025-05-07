@@ -37,6 +37,7 @@ class PERTURBO(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
         control_guides=None,
         load_sparse_tensors=False,
         dispersion_smoothing="none",
+        smoothing_factor=0.3,
         **model_kwargs,
     ):
         super().__init__(mdata)
@@ -85,6 +86,9 @@ class PERTURBO(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
 
         log_means, log_disp, log_disp_smoothed = estimate_nb_params(X, smoothing=dispersion_smoothing)
         log_disp_smoothed = np.where(np.isfinite(log_disp_smoothed), log_disp_smoothed, 0)
+        log_disp = np.where(np.isfinite(log_disp), log_disp, log_disp_smoothed)
+        if dispersion_smoothing != "none":
+            log_disp = smoothing_factor * log_disp_smoothed + (1 - smoothing_factor) * log_disp
         log_means = np.clip(log_means, 1 / X.shape[0], None)
 
         # if control_guides is not None and "n_factors" in model_kwargs and guide_by_element is not None:
