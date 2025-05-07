@@ -2,6 +2,7 @@ import logging
 
 import numpy as np
 import pandas as pd
+import scipy.sparse as sp
 import torch
 from mudata import AnnData, MuData
 from pandas import DataFrame
@@ -20,6 +21,8 @@ from scvi.model.base import (
 )
 from scvi.train import PyroTrainingPlan
 from scvi.utils._docstrings import devices_dsp
+from sklearn.isotonic import IsotonicRegression
+from sklearn.linear_model import LinearRegression
 
 from ._constants import REGISTRY_KEYS
 from ._module import PerTurboPyroModule
@@ -33,6 +36,7 @@ class PERTURBO(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
         mdata: AnnOrMuData,
         control_guides=None,
         load_sparse_tensors=False,
+        dispersion_smoothing="none",
         **model_kwargs,
     ):
         super().__init__(mdata)
@@ -79,18 +83,9 @@ class PERTURBO(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
                 control_guide_idx = grna_counts[:, control_guides].X.sum(axis=1) > 0
             X = X[control_guide_idx, :]
 
-        if issparse(X):
-            sample_mean = X.mean(axis=0).A1 + epsilon
-            sample_mean_squared = sample_mean * sample_mean
-            sample_var = (X.multiply(X)).mean(axis=0).A1 - sample_mean_squared
-        else:
-            sample_mean = X.mean(axis=0).squeeze() + epsilon
-            sample_mean_squared = sample_mean**2
-            sample_var = (X**2).mean(axis=0).squeeze() - sample_mean_squared
-
-        theta_hat = torch.tensor(sample_mean_squared / (sample_var - sample_mean)).clamp(min=1e-1)
-        log_gene_mean_init = torch.tensor(sample_mean, dtype=torch.float32).log()
-        log_gene_dispersion_init = theta_hat.float().log()
+        log_means, log_disp, log_disp_smoothed = estimate_nb_params(X, smoothing=dispersion_smoothing)
+        log_disp_smoothed = np.where(np.isfinite(log_disp_smoothed), log_disp_smoothed, 0)
+        log_means = np.clip(log_means, 1 / X.shape[0], None)
 
         # if control_guides is not None and "n_factors" in model_kwargs and guide_by_element is not None:
         #     # control_guides, _ = torch.max(guide_by_element[:, control_elements], dim=-1)
@@ -107,8 +102,8 @@ class PERTURBO(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
             n_genes=self.summary_stats.n_vars,
             n_cont_covariates=n_extra_continuous_covs,
             n_elements=n_elements,
-            log_gene_mean_init=log_gene_mean_init,
-            log_gene_dispersion_init=log_gene_dispersion_init,
+            log_gene_mean_init=torch.tensor(log_means),
+            log_gene_dispersion_init=torch.tensor(log_disp_smoothed),
             guide_by_element=guide_by_element,
             gene_by_element=gene_by_element,
             # n_cats_per_cov=n_cats_per_cov,
@@ -244,7 +239,6 @@ class PERTURBO(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
             REGISTRY_KEYS.CONT_COVS_KEY,
             continuous_covariates_keys,
             mod_key=modalities.rna_layer,
-
         )
 
         mudata_fields = [
@@ -512,3 +506,48 @@ class PERTURBO(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
     #         return_observed=return_observed,
     #     )
     #     return samples
+
+
+def estimate_nb_params(X, smoothing="isotonic"):
+    """
+    Estimate NB mean and dispersion (MoM) for each gene (column) in count matrix X.
+
+    With optional smoothing: 'linear', 'quadratic', or 'isotonic' (monotonic).
+    """
+    if sp.issparse(X):
+        means = np.array(X.mean(axis=0)).flatten()
+        variances = np.array(X.power(2).mean(axis=0) - means**2).flatten()
+    else:
+        means = X.mean(axis=0)
+        variances = X.var(axis=0, ddof=0)
+
+    with np.errstate(divide="ignore", invalid="ignore"):
+        dispersions = means**2 / (variances - means)
+
+    dispersions[~np.isfinite(dispersions)] = np.nan
+    dispersions[dispersions <= 0] = np.nan
+
+    log_means = np.log(means)
+    log_disp = np.log(dispersions)
+
+    valid_mask = np.isfinite(log_means) & np.isfinite(log_disp)
+    x_valid = log_means[valid_mask]
+    y_valid = log_disp[valid_mask]
+
+    if smoothing == "linear":
+        model = LinearRegression()
+        model.fit(x_valid.reshape(-1, 1), y_valid)
+        log_disp_smoothed = model.predict(log_means.reshape(-1, 1))
+
+    elif smoothing == "none":
+        log_disp_smoothed = log_disp
+
+    elif smoothing == "isotonic":
+        iso = IsotonicRegression(increasing=True, out_of_bounds="clip")
+        iso.fit(x_valid, y_valid)
+        log_disp_smoothed = iso.predict(log_means)
+
+    else:
+        raise ValueError("smoothing must be 'linear', 'quadratic', or 'isotonic'")
+
+    return log_means, log_disp, log_disp_smoothed
