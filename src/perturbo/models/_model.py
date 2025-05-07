@@ -244,6 +244,7 @@ class PERTURBO(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
             REGISTRY_KEYS.CONT_COVS_KEY,
             continuous_covariates_keys,
             mod_key=modalities.rna_layer,
+
         )
 
         mudata_fields = [
