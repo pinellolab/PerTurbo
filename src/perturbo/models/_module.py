@@ -448,7 +448,7 @@ class PerTurboPyroModule(PyroBaseModuleClass):
                     return pyro.sample(
                         "obs",
                         dist.NegativeBinomial(
-                            logits=nb_log_mean,
+                            logits=nb_log_mean - nb_log_dispersion,
                             total_count=nb_log_dispersion.exp(),
                         ),
                         obs=observations,
