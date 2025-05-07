@@ -387,7 +387,7 @@ class PerTurboPyroModule(PyroBaseModuleClass):
             # Sample parameters of baseline gene expression distribution
             gene_base_log_mean = pyro.sample(
                 "log_gene_mean",
-                dist.Normal(self.zero, self.gene_mean_prior_scale),
+                dist.Normal(self.gene_mean_prior_loc, self.gene_mean_prior_scale),
             )
             nb_log_dispersion = pyro.sample(
                 "log_gene_dispersion",
