@@ -114,7 +114,8 @@ class PerTurboPyroModule(PyroBaseModuleClass):
 
         self.n_batches = n_batches
 
-        self.delta_sites = ["log_gene_mean"]
+        # self.delta_sites = ["log_gene_mean"]
+        self.delta_sites = []
         # self.delta_sites = ["cell_factors"]
         # self.delta_sites = ["cell_factors", "cell_loadings", "pert_factors", "pert_loadings"]
 
@@ -168,8 +169,8 @@ class PerTurboPyroModule(PyroBaseModuleClass):
         self.register_buffer("gene_disp_prior_scale", torch.tensor(3.0))
 
         # batch/covariate hyperparams
-        self.register_buffer("batch_effect_prior_scale", torch.tensor(3.0))
-        self.register_buffer("covariate_prior_sigma", torch.tensor(3.0))
+        self.register_buffer("batch_effect_prior_scale", torch.tensor(1.0))
+        self.register_buffer("covariate_prior_sigma", torch.tensor(1.0))
         self.register_buffer("covariate_disp_prior_sigma", torch.tensor(1.0))
 
         # efficiency hyperparams
@@ -298,9 +299,9 @@ class PerTurboPyroModule(PyroBaseModuleClass):
             element_factor_effects = 0
         else:
             with pert_factor_plate, element_plate:
-                pert_factors = pyro.sample("pert_factors", dist.Laplace(0.0, self.pert_factor_prior_scale))
+                pert_factors = pyro.sample("pert_factors", dist.Laplace(self.zero, self.pert_factor_prior_scale))
             with pert_factor_plate, gene_plate:
-                pert_loadings = pyro.sample("pert_loadings", dist.Laplace(0.0, self.pert_loading_prior_scale))
+                pert_loadings = pyro.sample("pert_loadings", dist.Laplace(self.zero, self.pert_loading_prior_scale))
             # pert_factor_scale_term = pyro.sample(
             #     "pert_factor_scale_term",
             #     dist.LogNormal(-self.one, self.one),
@@ -387,7 +388,7 @@ class PerTurboPyroModule(PyroBaseModuleClass):
             # Sample parameters of baseline gene expression distribution
             gene_base_log_mean = pyro.sample(
                 "log_gene_mean",
-                dist.Normal(self.zero, self.gene_mean_prior_scale),
+                dist.Normal(self.gene_mean_prior_loc, self.gene_mean_prior_scale),
             )
             nb_log_dispersion = pyro.sample(
                 "log_gene_dispersion",
@@ -401,7 +402,7 @@ class PerTurboPyroModule(PyroBaseModuleClass):
 
             with batch_plate:
                 # batch effects: n_batches x n_genes
-                batch_effect_size = pyro.sample("batch_effect", dist.Normal(0.0, self.batch_effect_prior_scale))
+                batch_effect_size = pyro.sample("batch_effect", dist.Normal(self.zero, self.batch_effect_prior_scale))
                 batch_effects = batch_effect_size[batch.squeeze(), ...]
                 # if self.dispersion_effects:
                 #     batch_disp_effect_size = pyro.sample(
@@ -414,7 +415,7 @@ class PerTurboPyroModule(PyroBaseModuleClass):
                 # covariate effects: n_cont_covariates x n_genes
                 cont_covariate_effect_size = pyro.sample(
                     "cont_covariate_effect",
-                    dist.Normal(0.0, self.covariate_prior_sigma),
+                    dist.Normal(self.zero, self.covariate_prior_sigma),
                 )
                 covariate_effects = cont_covariates @ cont_covariate_effect_size
 
@@ -448,7 +449,7 @@ class PerTurboPyroModule(PyroBaseModuleClass):
                     return pyro.sample(
                         "obs",
                         dist.NegativeBinomial(
-                            logits=nb_log_mean,
+                            logits=nb_log_mean - nb_log_dispersion,
                             total_count=nb_log_dispersion.exp(),
                         ),
                         obs=observations,
