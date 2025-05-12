@@ -89,7 +89,7 @@ class PERTURBO(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
         log_disp = np.where(np.isfinite(log_disp), log_disp, log_disp_smoothed)
         if dispersion_smoothing != "none":
             log_disp_smoothed = smoothing_factor * log_disp_smoothed + (1 - smoothing_factor) * log_disp
-        log_means = np.clip(log_means, 1 / X.shape[0], None)
+        log_means = np.clip(log_means, a_min=np.log(1 / X.shape[0]), a_max=None)
 
         # if control_guides is not None and "n_factors" in model_kwargs and guide_by_element is not None:
         #     # control_guides, _ = torch.max(guide_by_element[:, control_elements], dim=-1)
@@ -425,7 +425,7 @@ class PERTURBO(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
                 # scale_values = loc_plus_scale_values - loc_values
         # loc_values, scale_values = self.module.guide._get_loc_and_scale("element_effects")
 
-        if self.module.local_effects:
+        if hasattr(self.module, "element_by_gene_idx"):
             # loc/scale_values are the nonzero elements of a sparse matrix of elements by genes
             i, j = self.module.element_by_gene_idx.detach().cpu().numpy().astype(int)
 
