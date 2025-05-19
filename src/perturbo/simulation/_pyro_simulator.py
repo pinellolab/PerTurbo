@@ -139,7 +139,7 @@ def simulate_data_from_trained_model(
     module_kwargs = {
         "n_batches": model.module.n_batches,
         "n_cont_covariates": model.module.n_cont_covariates - 1,  # size factor auto included
-        # "n_factors": model.module.n_factors,
+        "n_factors": model.module.n_factors,
         # "dispersion_effects": model.module.dispersion_effects,
         "likelihood": model.module.likelihood,
         "effect_prior_dist": model.module.effect_prior_dist,

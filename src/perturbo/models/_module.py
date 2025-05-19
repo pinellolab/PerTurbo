@@ -78,7 +78,7 @@ class PerTurboPyroModule(PyroBaseModuleClass):
         super().__init__()
         # set user-defined options for model behavior
         # self.dispersion_effects = dispersion_effects
-        for k, v in module_kwargs.items():
+        for k in module_kwargs:
             warnings.warn(f"Unused module_kwargs: {k}", stacklevel=2)
 
         self.likelihood = likelihood
@@ -243,7 +243,7 @@ class PerTurboPyroModule(PyroBaseModuleClass):
             pyro.plate("Covariates", self.n_cont_covariates, dim=-2),
             pyro.plate("Elements_sparse", self.n_element_effects, dim=-1),
             pyro.plate("Guides_sparse", self.n_guide_effects, dim=-1),
-            # pyro.plate("Cell_factors", self.n_factors, dim=-3),
+            pyro.plate("Cell_factors", self.n_factors, dim=-3),
             pyro.plate("Pert_factors", self.n_pert_factors, dim=-3),
         )
 
@@ -258,7 +258,7 @@ class PerTurboPyroModule(PyroBaseModuleClass):
             cont_covariate_plate,
             element_effects_plate,  # sparse mode
             guide_plate_sparse,
-            # cell_factor_plate,
+            cell_factor_plate,
             pert_factor_plate,
         ) = self.create_plates(idx)
 
@@ -328,34 +328,34 @@ class PerTurboPyroModule(PyroBaseModuleClass):
             element_factor_effects = torch.einsum("fei,fjg->eg", pert_factors, pert_loadings)
 
         # # Sample cell-specific factors (linear unobserved confounders) if using
-        # if self.n_factors is not None:
-        #     with cell_factor_plate, cell_plate:
-        #         cell_factors = pyro.sample(
-        #             "cell_factors",
-        #             dist.Laplace(0.0, self.cell_factor_prior_scale),
-        #         )
-        #     with cell_factor_plate, gene_plate:
-        #         cell_loadings = pyro.sample(
-        #             "cell_loadings",
-        #             dist.Laplace(0.0, self.cell_loading_prior_scale),
-        #         )
-        #     # cell_factor_scale_term = pyro.sample(
-        #     #     "cell_factor_scale_term",
-        #     #     dist.LogNormal(self.zero, self.one),
-        #     # )
-        #     cell_factor_effects = torch.einsum("fci,fjg->cg", cell_factors, cell_loadings)
+        if self.n_factors is not None:
+            with cell_factor_plate, cell_plate:
+                cell_factors = pyro.sample(
+                    "cell_factors",
+                    dist.Laplace(0.0, self.cell_factor_prior_scale),
+                )
+            with cell_factor_plate, gene_plate:
+                cell_loadings = pyro.sample(
+                    "cell_loadings",
+                    dist.Laplace(0.0, self.cell_loading_prior_scale),
+                )
+            # cell_factor_scale_term = pyro.sample(
+            #     "cell_factor_scale_term",
+            #     dist.LogNormal(self.zero, self.one),
+            # )
+            cell_factor_effects = torch.einsum("fci,fjg->cg", cell_factors, cell_loadings)
 
-        #     # if self.use_interactions and self.n_pert_factors is not None:
-        #     #     with cell_factor_plate, element_plate:
-        #     #         pert_cell_factors = pyro.sample(
-        #     #             "pert_cell_factors",
-        #     #             dist.Laplace(0.0, self.cell_factor_prior_scale),
-        #     #         )
-        #     #     element_factor_effects = (
-        #     #         torch.einsum("fei,fjg->eg", pert_cell_factors, cell_loadings) + element_factor_effects
-        #     #     )
-        # else:
-        #     cell_factor_effects = 0
+            # if self.use_interactions and self.n_pert_factors is not None:
+            #     with cell_factor_plate, element_plate:
+            #         pert_cell_factors = pyro.sample(
+            #             "pert_cell_factors",
+            #             dist.Laplace(0.0, self.cell_factor_prior_scale),
+            #         )
+            #     element_factor_effects = (
+            #         torch.einsum("fei,fjg->eg", pert_cell_factors, cell_loadings) + element_factor_effects
+            #     )
+        else:
+            cell_factor_effects = 0
 
         if self.local_effects:
             # override factor effects
@@ -447,10 +447,10 @@ class PerTurboPyroModule(PyroBaseModuleClass):
                 )
                 covariate_effects = cont_covariates @ cont_covariate_effect_size
 
-            nb_log_mean_ctrl = gene_base_log_mean + size_factor + batch_effects + covariate_effects
-            # nb_log_mean_ctrl = (
-            #     gene_base_log_mean + size_factor + batch_effects + covariate_effects + cell_factor_effects
-            # )
+            # nb_log_mean_ctrl = gene_base_log_mean + size_factor + batch_effects + covariate_effects
+            nb_log_mean_ctrl = (
+                gene_base_log_mean + size_factor + batch_effects + covariate_effects + cell_factor_effects
+            )
 
             # if not self.dispersion_effects:
             #     nb_log_dispersion = gene_log_dispersion
