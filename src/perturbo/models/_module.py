@@ -115,7 +115,6 @@ class PerTurboPyroModule(PyroBaseModuleClass):
 
         self.n_batches = n_batches
 
-        # self.delta_sites = ["log_gene_mean", "log_gene_dispersion"]
         self.delta_sites = []
         # self.delta_sites = ["cell_factors"]
         # self.delta_sites = ["cell_factors", "cell_loadings", "pert_factors", "pert_loadings"]
