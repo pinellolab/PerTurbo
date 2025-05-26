@@ -176,6 +176,12 @@ class PerTurboPyroModule(PyroBaseModuleClass):
 
         ## register hyperparameters as buffers so they get automatically moved to GPU by scvi-tools
 
+        if self.local_effects:
+            if self.sparse_tensors:
+                self.register_buffer("element_by_gene", gene_by_element.T.to_sparse_coo())
+            else:
+                self.register_buffer("element_by_gene", gene_by_element.T.to_sparse_coo())
+
         # guide_by_element encoding
         if self.sparse_tensors:
             assert gene_by_element.shape[1] == self.n_elements
@@ -189,9 +195,7 @@ class PerTurboPyroModule(PyroBaseModuleClass):
             self.n_guide_effects = self.guide_by_gene_idx.shape[1]
 
         else:
-            if self.local_effects:
-                self.register_buffer("element_by_gene", gene_by_element.T)
-            self.n_element_effects = self.n_guide_effects = 1
+            self.n_element_effects = self.n_guide_effects = 1  # for setting plate sizes
 
         # global hyperparams
         self.register_buffer("zero", torch.tensor(0.0))
@@ -366,7 +370,8 @@ class PerTurboPyroModule(PyroBaseModuleClass):
             # option 1b: cis effects with factorized trans effects
             else:
                 element_factor_effects = torch.einsum("fei,fjg->eg", pert_factors, pert_loadings)
-                element_effects = element_factor_effects + element_local_effects
+                one = self.one.expand(self.n_elements, self.n_genes)
+                element_effects = (one - self.element_by_gene) * element_factor_effects + element_local_effects
 
         # option 2: trans effects
         elif not self.n_pert_factors:
