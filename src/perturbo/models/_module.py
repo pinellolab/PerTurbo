@@ -130,11 +130,11 @@ class PerTurboPyroModule(PyroBaseModuleClass):
             assert n_elements is not None, "n_elements must be specified if not equal to n_guides"
         self.n_elements = guide_by_element.shape[1]
 
-        # if self.sparse_tensors:
-        #     self.register_buffer("guide_by_element", guide_by_element.to_sparse_coo())
-        # else:
-        #     self.register_buffer("guide_by_element", guide_by_element)
-        self.register_buffer("guide_by_element", guide_by_element)
+        if self.sparse_tensors:
+            self.register_buffer("guide_by_element", guide_by_element.to_sparse_coo())
+        else:
+            self.register_buffer("guide_by_element", guide_by_element)
+        # self.register_buffer("guide_by_element", guide_by_element)
 
         if n_cont_covariates is not None:
             self.n_cont_covariates += n_cont_covariates
@@ -349,7 +349,7 @@ class PerTurboPyroModule(PyroBaseModuleClass):
             else:
                 with element_plate, gene_plate:
                     element_local_effects = pyro.sample("element_effects", effects_dist)
-                    element_local_effects *= self.element_by_gene
+                    element_local_effects = self.element_by_gene * element_local_effects
 
             if self.n_pert_factors is None:
                 element_effects = element_local_effects
@@ -472,10 +472,13 @@ class PerTurboPyroModule(PyroBaseModuleClass):
         #     else:
         #         guide_effects = pyro.deterministic("guide_effects", guide_effects)
 
-        # Account for cell-specific latent "perturbation status" variable(s)
-
+        # Account for guide efficiency/efficacy
         if self.efficiency_mode == "scaled":
+            # Ensure dense for matmul (should only trigger if using factors with sparse cis effects)
+            if guide_efficiency.is_sparse and not guide_effects.is_sparse:
+                guide_efficiency = guide_efficiency.to_dense()
             mean_perturbation_effect = guides_observed @ (guide_efficiency * guide_effects)
+
         elif self.efficiency_mode == "mixture":
             pert_prob = guides_observed @ guide_efficiency
             assert pert_prob.shape[0] == self.n_cells
