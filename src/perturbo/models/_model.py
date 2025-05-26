@@ -271,6 +271,32 @@ class PERTURBO(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
             mod_key=modalities.rna_layer,
         )
 
+        # Check continuous covariates for potential issues
+        obs_df = mdata[modalities.rna_layer].obs
+        if continuous_covariates_keys is not None:
+            for cov in continuous_covariates_keys:
+                values = obs_df[cov].values
+                unique_vals = np.unique(values)
+                std = np.std(values)
+                is_all_int = np.all(np.equal(np.mod(values, 1), 0))
+                is_all_same = len(unique_vals) == 1
+                is_binary = np.array_equal(unique_vals, [0, 1]) or np.array_equal(unique_vals, [1, 0])
+
+                if is_all_same:
+                    logger.warning(
+                        f"Continuous covariate '{cov}' has the same value for all observations. "
+                        "Consider removing this covariate."
+                    )
+                elif is_all_int and len(unique_vals) > 1 and not is_binary:
+                    logger.warning(
+                        f"Continuous covariate '{cov}' contains only discrete counts. "
+                        "Consider applying log1p transform followed by z-scoring."
+                    )
+                elif std > 10 or std < 0.1:
+                    logger.warning(
+                        f"Continuous covariate '{cov}' has standard deviation {std:.3g}. Consider z-scoring."
+                    )
+
         covariates_field = fields.MuDataNumericalJointObsField(
             REGISTRY_KEYS.CONT_COVS_KEY,
             continuous_covariates_keys,
