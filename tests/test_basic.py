@@ -41,6 +41,7 @@ def test_model_mdata(
         mdata,
         library_size_key="lib_size",
         batch_key="batch_id",
+        continuous_covariates_keys=["cov1"],
         guide_element_uns_key="elements" if use_guide_by_element else None,
         rna_element_uns_key="elements" if use_gene_by_element else None,
         guide_by_element_key=guide_by_element_key if use_guide_by_element else None,
