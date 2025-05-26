@@ -48,8 +48,6 @@ class PERTURBO(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
             MuData or AnnData object containing the data.
         control_guides : list or None
             List of control guide indices (optional, only used for setting initial values).
-        load_sparse_tensors : bool
-            Whether to load sparse tensors.
         dispersion_smoothing : str
             Smoothing method for dispersion estimation ("none", "linear", "isotonic").
         smoothing_factor : float
@@ -371,7 +369,7 @@ class PERTURBO(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
         batch_size: int = 1024,
         early_stopping: bool = False,
         lr: float | None = 0.005,
-        load_sparse_tensor: bool = False,
+        load_sparse_tensor: bool = "auto",
         training_plan: PyroTrainingPlan = PyroTrainingPlan,
         plan_kwargs: dict | None = None,
         data_splitter_kwargs: dict | None = None,
@@ -400,6 +398,9 @@ class PERTURBO(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
             Perform early stopping.
         lr : float or None
             Optimizer learning rate.
+        load_sparse_tensor : bool | "auto"
+            Whether to transfer data to GPU as sparse tensors (may speed up GPU transfer).
+            On by default for "gpu" accelerator, otherwise off.
         training_plan : type
             Training plan class.
         plan_kwargs : dict or None
@@ -423,7 +424,8 @@ class PERTURBO(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
             data_splitter_kwargs = {}
         if "data_and_attributes" not in data_splitter_kwargs:
             data_splitter_kwargs["data_and_attributes"] = self.data_and_attrs
-
+        if load_sparse_tensor == "auto":
+            load_sparse_tensor = accelerator == "gpu"
         if batch_size is None:
             # use data splitter which moves data to GPU once
             data_splitter = DeviceBackedDataSplitter(
