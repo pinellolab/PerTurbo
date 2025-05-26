@@ -20,7 +20,8 @@ def test_package_has_version():
 @pytest.mark.parametrize("efficiency_mode", ["mixture", "scaled"])
 @pytest.mark.parametrize("use_guide_by_element", [True, False])
 @pytest.mark.parametrize("use_gene_by_element", [True, False])
-@pytest.mark.parametrize("fit_guide_efficacy", ["partial", "shared"])
+@pytest.mark.parametrize("fit_guide_efficacy", [True, False])
+@pytest.mark.parametrize("sparse_tensors", [True, False])
 # @pytest.mark.parametrize("n_factors", [None, 2])
 @pytest.mark.parametrize("n_pert_factors", [None, 2])
 def test_model_mdata(
@@ -30,6 +31,7 @@ def test_model_mdata(
     use_guide_by_element,
     use_gene_by_element,
     fit_guide_efficacy,
+    sparse_tensors,
     n_pert_factors,
 ):
     """Check that we can register our MuData object with our model and perform training"""
@@ -57,6 +59,7 @@ def test_model_mdata(
         n_pert_factors=n_pert_factors,
         efficiency_mode=efficiency_mode,
         fit_guide_efficacy=fit_guide_efficacy,
+        sparse_effect_tensors=sparse_tensors,
     )
     assert model.summary_stats.n_cells == len(mdata)
     assert model.summary_stats.n_vars == len(mdata[rna_key].var)
