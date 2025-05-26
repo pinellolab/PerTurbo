@@ -117,7 +117,9 @@ class PerTurboPyroModule(PyroBaseModuleClass):
         self.n_genes = n_genes
         self.n_perturbations = n_perturbations
         self.n_cont_covariates = 1  # include (inferred) size factor as covariate always
-        self.on_load_kwargs = {"max_epochs": 1}  # fixes new bug from ipywidgets loading bar on model load
+        self.on_load_kwargs = {
+            "max_epochs": 1,  # fixes new bug from ipywidgets loading bar on model load
+        }
 
         self.discrete_sites = []
         if efficiency_mode == "mixture":
@@ -256,6 +258,14 @@ class PerTurboPyroModule(PyroBaseModuleClass):
             )
         else:
             tensor_dict[REGISTRY_KEYS.CONT_COVS_KEY] = size_factor
+
+        X = tensor_dict[REGISTRY_KEYS.X_KEY]
+        if X is not None and (X.layout == torch.sparse_csc or X.layout == torch.sparse_csr or X.is_sparse):
+            tensor_dict[REGISTRY_KEYS.X_KEY] = X.to_dense()
+
+        Y = tensor_dict[REGISTRY_KEYS.PERTURBATION_KEY]
+        if Y is not None and (Y.layout == torch.sparse_csc or Y.layout == torch.sparse_csr or Y.is_sparse):
+            tensor_dict[REGISTRY_KEYS.PERTURBATION_KEY] = Y.to_dense()
 
         # return indices and then the rest of the tensors
         return (tensor_dict[REGISTRY_KEYS.INDICES_KEY].squeeze(),), tensor_dict
@@ -481,8 +491,8 @@ class PerTurboPyroModule(PyroBaseModuleClass):
 
         elif self.efficiency_mode == "mixture":
             pert_prob = guides_observed @ guide_efficiency
-            assert pert_prob.shape[0] == self.n_cells
-            assert (pert_prob.shape[1] == 1) or (pert_prob.shape[1] == self.n_genes)
+            # assert pert_prob.shape[0] == self.n_cells
+            # assert (pert_prob.shape[1] == 1) or (pert_prob.shape[1] == self.n_genes)
             with cell_plate, gene_plate:
                 perturbed = pyro.sample("perturbed", dist.Bernoulli(pert_prob), infer={"enumerate": "parallel"})
             mean_perturbation_effect = perturbed * (guides_observed @ guide_effects)

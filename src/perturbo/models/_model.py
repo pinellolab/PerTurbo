@@ -12,7 +12,7 @@ from scipy.sparse import issparse
 from scipy.stats import chi2
 from scvi._types import AnnOrMuData
 from scvi.data import AnnDataManager, fields
-from scvi.dataloaders import AnnDataLoader, DeviceBackedDataSplitter
+from scvi.dataloaders import AnnDataLoader, DataSplitter, DeviceBackedDataSplitter
 from scvi.model.base import (
     BaseModelClass,
     PyroJitGuideWarmup,
@@ -35,7 +35,6 @@ class PERTURBO(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
         self,
         mdata: AnnOrMuData,
         control_guides: list | None = None,
-        load_sparse_tensors: bool = False,
         dispersion_smoothing: str = "none",
         smoothing_factor: float = 0.3,
         **model_kwargs,
@@ -68,8 +67,6 @@ class PERTURBO(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
             REGISTRY_KEYS.BATCH_KEY: np.int64,
             REGISTRY_KEYS.INDICES_KEY: np.int64,
         }
-
-        self.load_sparse_tensors = load_sparse_tensors
 
         n_extra_continuous_covs = 0
         if "n_extra_continuous_covs" in self.summary_stats:
@@ -374,6 +371,7 @@ class PERTURBO(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
         batch_size: int = 1024,
         early_stopping: bool = False,
         lr: float | None = 0.005,
+        load_sparse_tensor: bool = False,
         training_plan: PyroTrainingPlan = PyroTrainingPlan,
         plan_kwargs: dict | None = None,
         data_splitter_kwargs: dict | None = None,
@@ -437,12 +435,13 @@ class PERTURBO(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
                 **data_splitter_kwargs,
             )
         else:
-            data_splitter = self._data_splitter_cls(
+            data_splitter = DataSplitter(
                 self.adata_manager,
                 train_size=train_size,
                 validation_size=validation_size,
                 shuffle_set_split=shuffle_set_split,
                 batch_size=batch_size,
+                load_sparse_tensor=load_sparse_tensor,
                 **data_splitter_kwargs,
             )
 
@@ -587,7 +586,6 @@ class PERTURBO(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
             indices=indices,
             batch_size=len(indices) if indices is not None else len(self.adata),
             data_and_attributes=self.data_and_attrs,
-            load_sparse_tensor=self.load_sparse_tensors,
         )
         return self.module._get_fn_args_from_batch(next(iter(loader)))
 

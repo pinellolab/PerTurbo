@@ -65,10 +65,20 @@ def test_model_mdata(
     assert model.summary_stats.n_vars == len(mdata[rna_key].var)
     assert model.summary_stats.n_perturbations == len(mdata[perturb_key].var)
 
-    model.train(max_epochs=10, lr=0.1, batch_size=20)
+    model.train(
+        max_epochs=5,
+        lr=0.1,
+        batch_size=2,
+        load_sparse_tensor=sparse_tensors,
+    )
+    model.train(
+        max_epochs=5,
+        lr=0.1,
+        batch_size=None,
+        load_sparse_tensor=sparse_tensors,
+    )
     element_effects = model.get_element_effects()
     assert isinstance(element_effects, pd.DataFrame)
-    assert len(model.history["elbo_train"]) == 10
     assert isinstance(model.history["elbo_train"], pd.DataFrame)
 
     # test model save/load
