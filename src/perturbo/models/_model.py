@@ -492,48 +492,55 @@ class PERTURBO(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
         """
         element_ids = self.get_element_names()
         gene_ids = self.adata_manager.get_state_registry("X").column_names
-        for guide in self.module.guide:
-            if "element_effects" in guide.median():
-                loc_values, scale_values = guide._get_loc_and_scale("element_effects")
-                # loc_values, loc_plus_scale_values = guide.quantiles([0.5, 0.841])["element_effects"]
-                # scale_values = loc_plus_scale_values - loc_values
-        # loc_values, scale_values = self.module.guide._get_loc_and_scale("element_effects")
 
-        if hasattr(self.module, "element_by_gene_idx"):
-            # loc/scale_values are the nonzero elements of a sparse matrix of elements by genes
-            i, j = self.module.element_by_gene_idx.detach().cpu().numpy().astype(int)
-
-            # pert_ids = self.adata_manager.get_state_registry("perturbations").column_names
-            element_effects = pd.DataFrame(
-                {
-                    "loc": loc_values.detach().cpu().numpy(),
-                    "scale": scale_values.detach().cpu().numpy(),
-                    "element": [element_ids[idx] for idx in i],
-                    "gene": [gene_ids[idx] for idx in j],
-                }
+        def make_long_df(mat, value_name):
+            return (
+                pd.DataFrame(data=mat, index=element_ids, columns=gene_ids)
+                .melt(var_name="gene", value_name=value_name, ignore_index=False)
+                .reset_index(names="element")
             )
+
+        # Check if all element effects are factorized and raise an error if so
+        if "element_effects" not in self.module.guide.median():
+            logger.warning("All element effects are factorized. Using 'get_factorized_element_effects' instead.")
+            pert_factors, pert_loadings = self.get_factorized_element_effects()
+            element_effects = make_long_df(pert_factors.T @ pert_loadings, "loc")
+            element_effects["scale"] = np.nan
         else:
-            # loc/scale_values are dense matrices of elements by genes
+            for guide in self.module.guide:
+                if "element_effects" in guide.median():
+                    loc_values, scale_values = guide._get_loc_and_scale("element_effects")
+                    # loc_values, loc_plus_scale_values = guide.quantiles([0.5, 0.841])["element_effects"]
+                    # scale_values = loc_plus_scale_values - loc_values
+            # loc_values, scale_values = self.module.guide._get_loc_and_scale("element_effects")
 
-            def make_long_df(mat, value_name):
-                return (
-                    pd.DataFrame(data=mat, index=element_ids, columns=gene_ids)
-                    .melt(var_name="gene", value_name=value_name, ignore_index=False)
-                    .reset_index(names="element")
+            if hasattr(self.module, "element_by_gene_idx"):
+                # loc/scale_values are the nonzero elements of a sparse matrix of elements by genes
+                i, j = self.module.element_by_gene_idx.detach().cpu().numpy().astype(int)
+
+                # pert_ids = self.adata_manager.get_state_registry("perturbations").column_names
+                element_effects = pd.DataFrame(
+                    {
+                        "loc": loc_values.detach().cpu().numpy(),
+                        "scale": scale_values.detach().cpu().numpy(),
+                        "element": [element_ids[idx] for idx in i],
+                        "gene": [gene_ids[idx] for idx in j],
+                    }
                 )
+            else:
+                # loc/scale_values are dense matrices of elements by genes
 
-            element_effects = pd.merge(
-                make_long_df(loc_values.detach().cpu().numpy(), "loc"),
-                make_long_df(scale_values.detach().cpu().numpy(), "scale"),
-            )
+                element_effects = pd.merge(
+                    make_long_df(loc_values.detach().cpu().numpy(), "loc"),
+                    make_long_df(scale_values.detach().cpu().numpy(), "scale"),
+                )
 
         element_effects = element_effects.assign(
             z_value=lambda x: x["loc"] / x["scale"],
             q_value=lambda x: chi2.sf(x["z_value"] * x["z_value"], df=1),
-            # is_target=lambda x: x["element"].str.split("_", expand=True)[0] == x["gene"],
         )
 
-        return element_effects.sort_values("z_value")
+        return element_effects
 
     def get_map_labels(self, indices: list | None = None) -> np.ndarray:
         """
@@ -610,6 +617,22 @@ class PERTURBO(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
     #         return_observed=return_observed,
     #     )
     #     return samples
+
+    def get_factorized_element_effects(self):
+        element_ids = self.get_element_names()
+        gene_ids = self.adata_manager.get_state_registry("X").column_names
+
+        medians = self.module.guide.median()
+        if "pert_factors" not in medians or "pert_loadings" not in medians:
+            raise RuntimeError("No perturbation factors found. Use get_element_effects instead")
+
+        pert_factors_2d = medians["pert_factors"].squeeze(-1).detach().cpu().numpy()
+        assert pert_factors_2d.shape == (self.module.n_pert_factors, self.module.n_elements)
+        pert_factors_df = pd.DataFrame(pert_factors_2d, columns=element_ids)
+        pert_loadings_2d = medians["pert_loadings"].squeeze(-2).detach().cpu().numpy()
+        assert pert_loadings_2d.shape == (self.module.n_pert_factors, self.module.n_genes)
+        pert_loadings_df = pd.DataFrame(pert_loadings_2d, columns=gene_ids)
+        return pert_factors_df, pert_loadings_df
 
 
 def estimate_nb_params(
