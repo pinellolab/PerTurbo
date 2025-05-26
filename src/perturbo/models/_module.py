@@ -33,15 +33,12 @@ class PerTurboPyroModule(PyroBaseModuleClass):
         log_gene_dispersion_init: torch.Tensor | None = None,
         guide_by_element: torch.Tensor | None = None,
         gene_by_element: torch.Tensor | None = None,
-        # guide_noise: bool = False,
         likelihood: Literal["nb", "lnnb"] = "nb",
         effect_prior_dist: Literal["cauchy", "normal_mixture", "normal", "laplace"] = "laplace",
         n_factors: int | None = None,
         n_pert_factors: int | None = None,
-        # use_interactions: bool = False,
         efficiency_mode: Literal["mixture", "scaled"] = "scaled",
-        # dispersion_effects: bool = False,
-        sparse_local_effects=False,
+        sparse_local_effects: bool = False,
         fit_guide_efficacy: bool = True,
         prior_param_dict: Mapping[str, torch.Tensor] | None = None,
         **module_kwargs,
@@ -51,29 +48,45 @@ class PerTurboPyroModule(PyroBaseModuleClass):
 
         Parameters
         ----------
-        guide_by_element:
+        n_cells : int or None
+            Number of cells in the dataset. Provided by model constructor.
+        n_genes : int or None
+            Number of genes in the dataset. Provided by model constructor.
+        n_perturbations : int or None
+            Number of perturbations (typically CRISPR gRNAs). Provided by model constructor.
+        n_elements : int or None
+            Number of targeted elements (typically genomic targets of gRNAs). Provided by model constructor.
+        n_cont_covariates : int or None
+            Number of continuous covariates. Provided by model constructor.
+        n_batches : int or None
+            Number of batches. Provided by model constructor.
+        log_gene_mean_init : torch.Tensor or None
+            Initial values for log gene means. Provided by model constructor.
+        log_gene_dispersion_init : torch.Tensor or None
+            Initial values for log gene dispersions. Provided by model constructor.
+        guide_by_element : torch.Tensor or None
             Binary array encoding which element(s) are targeted by each guide.
-        gene_by_element:
+        gene_by_element : torch.Tensor or None
             Binary array encoding which element(s) may target each gene *a priori*.
-        likelihood:
+        likelihood : Literal["nb", "lnnb"]
             Observation likelihood, either NegativeBinomial ("nb") or LogNormalNegativeBinomial ("lnnb").
-        effect_prior_dist:
-            Effect size prior, either Cauchy or NormalMixture ("soft" spike & slab)
-        n_factors:
-            Number of cell-specific latent factors
-        n_pert_factors:
-            Number of perturbation-specific latent factors
-        use_interactions:
-            If using cell factors, allow interactions between perturbations and cell factors
-        efficiency_mode:
-            Guide efficiency is fraction of cells perturbed ("mixture") or linear scaling of effect size ("scaled").
-            "Mixture" mode currently requires (at most) one guide per cell.
-        dispersion_effects:
-            Allow for different gene-level dispersion by batch?
-        prior_params:
-            dict containing hyperparameter names and tensors to set prior values
-        merge_guides_mode:
-            "shared" treats ("partial") across guides targeting same element?
+        effect_prior_dist : Literal["cauchy", "normal_mixture", "normal", "laplace"]
+            Effect size prior, either Cauchy, NormalMixture ("soft" spike & slab), Normal, or Laplace.
+        n_factors : int or None
+            EXPERIMENTAL: Number of cell-specific latent factors.
+        n_pert_factors : int or None
+            EXPERIMENTAL: Number of perturbation-specific latent factors.
+        efficiency_mode : Literal["mixture", "scaled"]
+            Guide efficiency is fraction of cells perturbed ("mixture") or fractional scaling of max per-element effect size ("scaled").
+            "Mixture" mode currently requires at most one guide observation per cell.
+        sparse_local_effects : bool
+            EXPERIMENTAL: If True, use sparse PyTorch matrix for local effects.
+        fit_guide_efficacy : bool
+            If True, fit guide efficacy. If False, assume guide efficacy = 1.
+        prior_param_dict : Mapping[str, torch.Tensor] or None
+            Dict containing hyperparameter names and tensors to set prior values.
+        module_kwargs : dict
+            Additional keyword arguments (unused).
         """
         super().__init__()
         # set user-defined options for model behavior
@@ -87,10 +100,8 @@ class PerTurboPyroModule(PyroBaseModuleClass):
         self.n_factors = n_factors
         self.n_pert_factors = n_pert_factors
         self.effect_prior_dist = effect_prior_dist
-        # self.use_interactions = use_interactions
         self.efficiency_mode = efficiency_mode
         self.local_effects = sparse_local_effects
-        # self.guide_noise = guide_noise
 
         # copy data summary stats
         self.n_cells = n_cells
@@ -115,6 +126,7 @@ class PerTurboPyroModule(PyroBaseModuleClass):
 
         self.n_batches = n_batches
 
+        # Sites to approximate with Delta distribution instead of default Normal distribution.
         self.delta_sites = []
         # self.delta_sites = ["cell_factors"]
         # self.delta_sites = ["cell_factors", "cell_loadings", "pert_factors", "pert_loadings"]
@@ -213,7 +225,7 @@ class PerTurboPyroModule(PyroBaseModuleClass):
                 self.register_buffer(k, v)
 
     @staticmethod
-    def _get_fn_args_from_batch(tensor_dict):
+    def _get_fn_args_from_batch(tensor_dict: dict) -> tuple[tuple[torch.Tensor], dict]:
         fit_size_factor_covariate = False
 
         if fit_size_factor_covariate:
@@ -231,7 +243,7 @@ class PerTurboPyroModule(PyroBaseModuleClass):
         # return indices and then the rest of the tensors
         return (tensor_dict[REGISTRY_KEYS.INDICES_KEY].squeeze(),), tensor_dict
 
-    def create_plates(self, idx, **tensor_dict):
+    def create_plates(self, idx: torch.Tensor, **tensor_dict) -> tuple:
         # dims = self.infer_data_dims(idx, **tensor_dict)
         return (
             pyro.plate("Cells", self.n_cells, dim=-2, subsample=idx),
@@ -246,7 +258,21 @@ class PerTurboPyroModule(PyroBaseModuleClass):
             pyro.plate("Pert_factors", self.n_pert_factors, dim=-3),
         )
 
-    def model(self, idx, **tensor_dict):
+    def model(self, idx: torch.Tensor, **tensor_dict) -> None:
+        """
+        The probabilistic model definition for perturbo.
+
+        Parameters
+        ----------
+        idx : torch.Tensor
+            Indices for subsampling cells.
+        tensor_dict : dict
+            Dictionary containing all required tensors for the model.
+
+        Returns
+        -------
+        None
+        """
         pyro.module("perturbo", self)
         (
             cell_plate,
@@ -255,7 +281,7 @@ class PerTurboPyroModule(PyroBaseModuleClass):
             batch_plate,
             gene_plate,
             cont_covariate_plate,
-            element_effects_plate,  # sparse mode
+            element_effects_plate,
             guide_plate_sparse,
             cell_factor_plate,
             pert_factor_plate,
@@ -485,5 +511,5 @@ class PerTurboPyroModule(PyroBaseModuleClass):
                     raise NotImplementedError(f"'{self.likelihood}' likelihood not implemented")
 
     @property
-    def guide(self):
+    def guide(self) -> AutoGuideList:
         return self._guide
