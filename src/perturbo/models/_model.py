@@ -184,7 +184,7 @@ class PERTURBO(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
         size_factor_key: str | None = None,
         gene_mean_key: str | None = None,  # not used, supported for legacy reasons
         continuous_covariates_keys: str | None = None,
-        # categorical_covariates_keys: str | None = None, # not currently supported
+        categorical_covariates_keys: str | None = None,  #  not used, supported for legacy reasons
         modalities: dict[str, str] | None = None,
         **kwargs,
     ):

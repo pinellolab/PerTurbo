@@ -39,11 +39,10 @@ def test_model_mdata(
     pyro.clear_param_store()
     perturbo.PERTURBO.setup_mudata(
         mdata,
-        # size_factor_key="lib_size",
+        library_size_key="lib_size",
         batch_key="batch_id",
         guide_element_uns_key="elements" if use_guide_by_element else None,
         rna_element_uns_key="elements" if use_gene_by_element else None,
-        categorical_covariates_keys=["lib_size"],
         guide_by_element_key=guide_by_element_key if use_guide_by_element else None,
         gene_by_element_key=gene_by_element_key if use_gene_by_element else None,
         modalities={
