@@ -116,15 +116,13 @@ class PerTurboPyroModule(PyroBaseModuleClass):
         self.n_cells = n_cells
         self.n_genes = n_genes
         self.n_perturbations = n_perturbations
-        self.n_cont_covariates = 1  # include (inferred) size factor as covariate always
+        self.n_cont_covariates = 1  # include size factor as covariate always
         self.on_load_kwargs = {
             "max_epochs": 1,  # fixes new bug from ipywidgets loading bar on model load
         }
 
-        if self.n_pert_factors and self.local_effects:
-            assert not self.fit_guide_efficacy, (
-                "fit_guide_efficacy must be false if using n_pert_factors and gene_by_element"
-            )
+        if self.n_pert_factors:
+            assert not self.fit_guide_efficacy, "fit_guide_efficacy must be False if using n_pert_factors"
 
         self.discrete_sites = []
         if efficiency_mode == "mixture":
@@ -560,7 +558,6 @@ class PerTurboPyroModule(PyroBaseModuleClass):
                 )
                 covariate_effects = cont_covariates @ cont_covariate_effect_size
 
-            # nb_log_mean_ctrl = gene_base_log_mean + size_factor + batch_effects + covariate_effects
             nb_log_mean_ctrl = (
                 gene_base_log_mean + size_factor + batch_effects + covariate_effects + cell_factor_effects
             )
