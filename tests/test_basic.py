@@ -36,7 +36,10 @@ def test_model_mdata(
 ):
     """Check that we can register our MuData object with our model and perform training"""
     if use_gene_by_element and not use_guide_by_element:
-        pytest.skip("gene_by_element without guide_by_element test not implemented!")
+        pytest.skip("gene_by_element without guide_by_element not implemented!")
+
+    if n_pert_factors and fit_guide_efficacy:
+        pytest.skip("cannot fit guide efficacy if using n_pert_factors!")
 
     pyro.clear_param_store()
     perturbo.PERTURBO.setup_mudata(

@@ -121,6 +121,11 @@ class PerTurboPyroModule(PyroBaseModuleClass):
             "max_epochs": 1,  # fixes new bug from ipywidgets loading bar on model load
         }
 
+        if self.n_pert_factors and self.local_effects:
+            assert not self.fit_guide_efficacy, (
+                "fit_guide_efficacy must be false if using n_pert_factors and gene_by_element"
+            )
+
         self.discrete_sites = []
         if efficiency_mode == "mixture":
             self.discrete_sites.append("perturbed")
@@ -403,8 +408,6 @@ class PerTurboPyroModule(PyroBaseModuleClass):
                     guide_efficiency = pyro.sample(
                         "guide_efficacy", dist.Beta(self.logit_efficacy_alpha, self.logit_efficacy_beta)
                     )
-        else:
-            guide_efficiency = self.one.expand((self.n_perturbations, self.n_genes))
 
         # elif self.local_effects:
         #     with guide_plate_sparse:
@@ -488,7 +491,9 @@ class PerTurboPyroModule(PyroBaseModuleClass):
         #         guide_effects = pyro.deterministic("guide_effects", guide_effects)
 
         # Account for guide efficiency/efficacy
-        if self.efficiency_mode == "scaled":
+        if not self.fit_guide_efficacy:
+            mean_perturbation_effect = guides_observed @ guide_effects
+        elif self.efficiency_mode == "scaled":
             # Ensure dense for matmul (should only trigger if using factors with sparse cis effects)
             if guide_efficiency.is_sparse and not guide_effects.is_sparse:
                 guide_efficiency = guide_efficiency.to_dense()
