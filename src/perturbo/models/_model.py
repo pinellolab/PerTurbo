@@ -12,7 +12,7 @@ from scipy.sparse import issparse
 from scipy.stats import chi2
 from scvi._types import AnnOrMuData
 from scvi.data import AnnDataManager, fields
-from scvi.dataloaders import AnnDataLoader, DeviceBackedDataSplitter
+from scvi.dataloaders import AnnDataLoader, DataSplitter, DeviceBackedDataSplitter
 from scvi.model.base import (
     BaseModelClass,
     PyroJitGuideWarmup,
@@ -34,12 +34,27 @@ class PERTURBO(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
     def __init__(
         self,
         mdata: AnnOrMuData,
-        control_guides=None,
-        load_sparse_tensors=False,
-        dispersion_smoothing="none",
-        smoothing_factor=0.3,
+        control_guides: list | None = None,
+        dispersion_smoothing: str = "none",
+        smoothing_factor: float = 0.3,
         **model_kwargs,
     ):
+        """
+        Initialize the PERTURBO model.
+
+        Parameters
+        ----------
+        mdata : AnnOrMuData
+            MuData or AnnData object containing the data.
+        control_guides : list or None
+            List of control guide indices (optional, only used for setting initial values).
+        dispersion_smoothing : str
+            Smoothing method for dispersion estimation ("none", "linear", "isotonic").
+        smoothing_factor : float
+            Smoothing factor for dispersion smoothing.
+        model_kwargs : dict
+            Additional keyword arguments for the model.
+        """
         super().__init__(mdata)
 
         # data fields that will be loaded/mini-batched into the module
@@ -50,8 +65,6 @@ class PERTURBO(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
             REGISTRY_KEYS.BATCH_KEY: np.int64,
             REGISTRY_KEYS.INDICES_KEY: np.int64,
         }
-
-        self.load_sparse_tensors = load_sparse_tensors
 
         n_extra_continuous_covs = 0
         if "n_extra_continuous_covs" in self.summary_stats:
@@ -121,7 +134,20 @@ class PERTURBO(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
 
         logger.info("The model has been initialized")
 
-    def read_matrix_from_registry(self, registry_key):
+    def read_matrix_from_registry(self, registry_key: str) -> torch.Tensor:
+        """
+        Reads a matrix from the AnnDataManager registry and converts it to a torch.Tensor.
+
+        Parameters
+        ----------
+        registry_key : str
+            Key to retrieve the matrix from the registry.
+
+        Returns
+        -------
+        torch.Tensor
+            The matrix as a torch tensor.
+        """
         data = self.adata_manager.get_from_registry(registry_key)
         if isinstance(data, DataFrame):
             data = data.values
@@ -151,44 +177,45 @@ class PERTURBO(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
         guide_by_element_key: str | None = None,
         library_size_key: str | None = None,
         size_factor_key: str | None = None,
-        gene_mean_key: str | None = None,
+        gene_mean_key: str | None = None,  # not used, supported for legacy reasons
         continuous_covariates_keys: str | None = None,
-        categorical_covariates_keys: str | None = None,
+        categorical_covariates_keys: str | None = None,  #  not used, supported for legacy reasons
         modalities: dict[str, str] | None = None,
         **kwargs,
     ):
-        """Registers data from a MuData object with the model.
+        """
+        Registers data from a MuData object with the model.
 
         Parameters
         ----------
-        mdata
+        mdata : MuData
             A MuData object containing the perturbations and observational data.
-        rna_layer
-            The key of the MuData modality containing the RNA counts
-        perturbation_layer
-            The key of the MuData modality containing the perturbations
-        batch_key
-            Key within the RNA AnnData .obs corresponding to the experimental batch
-        gene_by_element_key
-            .varm key within the RNA AnnData object containing a mask of which genes can be affected by which genetic elements
-        guide_by_element_key
-            .varm key within the perturbation AnnData object containing which perturbations target which genetic elements
-        rna_element_uns_key
-            .uns key within the RNA AnnData object containing names of perturbed elements (if using GENE_BY_ELEMENT_KEY),
-            otherwise automatically inferred from column names if .varm object is a DataFrame
-        guide_element_uns_key
-            .uns key within the perturbation AnnData object containing names of perturbed elements
-            (if using GUIDE_BY_ELEMENT_KEY), otherwise automatically inferred from column names if .varm object is a DataFrame
-        library_size_key
-            .obs key within the RNA AnnData object containing raw (not log-scaled) library size factors for each sample
-        size_factor_key
-            .obs key within the RNA AnnData object containing library size factors for each sample (e.g. log-library size)
-        continuous_covariates_keys
-            list of .obs keys within the RNA AnnData object containing other continuous covariates to be "regressed out"
-        modalities
-            A dict containing these same setup arguments
-        kwargs
-            Additional keyword arguments
+        rna_layer : str or None
+            The key of the MuData modality containing the RNA counts.
+        perturbation_layer : str or None
+            The key of the MuData modality containing the perturbations.
+        batch_key : str or None
+            Key within the RNA AnnData .obs corresponding to the experimental batch.
+        gene_by_element_key : str or None
+            .varm key within the RNA AnnData object containing a mask of which genes can be affected by which genetic elements.
+        rna_element_uns_key : str or None
+            .uns key within the RNA AnnData object containing names of perturbed elements.
+        guide_element_uns_key : str or None
+            .uns key within the perturbation AnnData object containing names of perturbed elements.
+        guide_by_element_key : str or None
+            .varm key within the perturbation AnnData object containing which perturbations target which genetic elements.
+        library_size_key : str or None
+            .obs key within the RNA AnnData object containing raw library size factors for each sample.
+        size_factor_key : str or None
+            .obs key within the RNA AnnData object containing library size factors for each sample.
+        gene_mean_key : str or None
+            .var key for gene mean (legacy, for simulator).
+        continuous_covariates_keys : str or None
+            List of .obs keys within the RNA AnnData object containing other continuous covariates.
+        modalities : dict[str, str] or None
+            A dict containing these same setup arguments.
+        kwargs : dict
+            Additional keyword arguments.
         """
         setup_method_args = cls._get_setup_method_args(**locals())
 
@@ -238,6 +265,32 @@ class PERTURBO(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
             batch_key,
             mod_key=modalities.rna_layer,
         )
+
+        # Check continuous covariates for potential issues
+        obs_df = mdata[modalities.rna_layer].obs
+        if continuous_covariates_keys is not None:
+            for cov in continuous_covariates_keys:
+                values = obs_df[cov].values
+                unique_vals = np.unique(values)
+                std = np.std(values)
+                is_all_int = np.all(np.equal(np.mod(values, 1), 0))
+                is_all_same = len(unique_vals) == 1
+                is_binary = np.array_equal(unique_vals, [0, 1]) or np.array_equal(unique_vals, [1, 0])
+
+                if is_all_same:
+                    logger.warning(
+                        f"Continuous covariate '{cov}' has the same value for all observations. "
+                        "Consider removing this covariate."
+                    )
+                elif is_all_int and len(unique_vals) > 1 and not is_binary:
+                    logger.warning(
+                        f"Continuous covariate '{cov}' contains only discrete counts. "
+                        "Consider applying log1p transform followed by z-scoring."
+                    )
+                elif std > 10 or std < 0.1:
+                    logger.warning(
+                        f"Continuous covariate '{cov}' has standard deviation {std:.3g}. Consider z-scoring."
+                    )
 
         covariates_field = fields.MuDataNumericalJointObsField(
             REGISTRY_KEYS.CONT_COVS_KEY,
@@ -316,6 +369,7 @@ class PERTURBO(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
         batch_size: int = 1024,
         early_stopping: bool = False,
         lr: float | None = 0.005,
+        load_sparse_tensor: bool = "auto",
         training_plan: PyroTrainingPlan = PyroTrainingPlan,
         plan_kwargs: dict | None = None,
         data_splitter_kwargs: dict | None = None,
@@ -326,36 +380,40 @@ class PERTURBO(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
 
         Parameters
         ----------
-        max_epochs
-            Number of passes through the dataset. If `None`, defaults to
-            `np.min([round((20000 / n_cells) * 400), 400])`
-        %(param_use_gpu)s
-        %(param_accelerator)s
-        %(param_device)s
-        train_size
-            Size of training set in the range [0.0, 1.0].
-        validation_size
-            Size of the test set. If `None`, defaults to 1 - `train_size`. If
-            `train_size + validation_size < 1`, the remaining cells belong to a test set.
-        shuffle_set_split
-            Whether to shuffle indices before splitting. If `False`, the val, train, and test set are split in the
-            sequential order of the data according to `validation_size` and `train_size` percentages.
-        batch_size
-            Minibatch size to use during training. If `None`, no minibatching occurs and all
-            data is copied to device (e.g., GPU).
-        early_stopping
-            Perform early stopping. Additional arguments can be passed in `**kwargs`.
-            See :class:`~scvi.train.Trainer` for further options.
-        lr
-            Optimiser learning rate (default optimiser is :class:`~pyro.optim.ClippedAdam`).
-            Specifying optimiser via plan_kwargs overrides this choice of lr.
-        training_plan
-            Training plan :class:`~scvi.train.PyroTrainingPlan`.
-        plan_kwargs
-            Keyword args for :class:`~scvi.train.PyroTrainingPlan`. Keyword arguments passed to
-            `train()` will overwrite values present in `plan_kwargs`, when appropriate.
-        **trainer_kwargs
-            Other keyword args for :class:`~scvi.train.Trainer`.
+        max_epochs : int
+            Number of passes through the dataset.
+        accelerator : str
+            Accelerator type ("cpu", "gpu", etc.).
+        device : int or str
+            Device identifier.
+        train_size : float
+            Size of training set in the range [0.0, 1.0]. All cells by default.
+        validation_size : float or None
+            Size of the validation set. Zero cells by default.
+        shuffle_set_split : bool
+            Whether to shuffle indices before splitting.
+        batch_size : int
+            Minibatch size to use during training.
+        early_stopping : bool
+            Perform early stopping.
+        lr : float or None
+            Optimizer learning rate.
+        load_sparse_tensor : bool | "auto"
+            Whether to transfer data to GPU as sparse tensors (may speed up GPU transfer).
+            On by default for "gpu" accelerator, otherwise off.
+        training_plan : type
+            Training plan class.
+        plan_kwargs : dict or None
+            Keyword args for the training plan.
+        data_splitter_kwargs : dict or None
+            Keyword args for the data splitter.
+        trainer_kwargs : dict
+            Other keyword args for the Trainer.
+
+        Returns
+        -------
+        Any
+            The result of the training runner.
         """
         plan_kwargs = plan_kwargs if plan_kwargs is not None else {}
         if len(self.module.discrete_sites) > 0:
@@ -366,7 +424,8 @@ class PERTURBO(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
             data_splitter_kwargs = {}
         if "data_and_attributes" not in data_splitter_kwargs:
             data_splitter_kwargs["data_and_attributes"] = self.data_and_attrs
-
+        if load_sparse_tensor == "auto":
+            load_sparse_tensor = accelerator == "gpu"
         if batch_size is None:
             # use data splitter which moves data to GPU once
             data_splitter = DeviceBackedDataSplitter(
@@ -378,12 +437,13 @@ class PERTURBO(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
                 **data_splitter_kwargs,
             )
         else:
-            data_splitter = self._data_splitter_cls(
+            data_splitter = DataSplitter(
                 self.adata_manager,
                 train_size=train_size,
                 validation_size=validation_size,
                 shuffle_set_split=shuffle_set_split,
                 batch_size=batch_size,
+                load_sparse_tensor=load_sparse_tensor,
                 **data_splitter_kwargs,
             )
 
@@ -407,61 +467,96 @@ class PERTURBO(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
         )
         return runner()
 
-    def get_element_names(self):
+    def get_element_names(self) -> list:
+        """
+        Returns the names of the targeted elements.
+
+        Returns
+        -------
+        list
+            List of element names.
+        """
         if REGISTRY_KEYS.GUIDE_BY_ELEMENT_KEY in self.adata_manager.data_registry:
             element_ids = self.adata_manager.get_state_registry(REGISTRY_KEYS.GUIDE_BY_ELEMENT_KEY).column_names
         else:
             element_ids = self.adata_manager.get_state_registry(REGISTRY_KEYS.PERTURBATION_KEY).column_names
         return element_ids
 
-    def get_element_effects(self):
-        """Return a DataFrame summary of the effects for targeted elements on each gene."""
+    def get_element_effects(self) -> pd.DataFrame:
+        """
+        Return a DataFrame summary of the effects for targeted elements on each gene.
+
+        Returns
+        -------
+        pd.DataFrame
+            DataFrame with columns for effect location, scale, element, gene, z-value, and q-value.
+        """
         element_ids = self.get_element_names()
         gene_ids = self.adata_manager.get_state_registry("X").column_names
-        for guide in self.module.guide:
-            if "element_effects" in guide.median():
-                loc_values, scale_values = guide._get_loc_and_scale("element_effects")
-                # loc_values, loc_plus_scale_values = guide.quantiles([0.5, 0.841])["element_effects"]
-                # scale_values = loc_plus_scale_values - loc_values
-        # loc_values, scale_values = self.module.guide._get_loc_and_scale("element_effects")
 
-        if hasattr(self.module, "element_by_gene_idx"):
-            # loc/scale_values are the nonzero elements of a sparse matrix of elements by genes
-            i, j = self.module.element_by_gene_idx.detach().cpu().numpy().astype(int)
-
-            # pert_ids = self.adata_manager.get_state_registry("perturbations").column_names
-            element_effects = pd.DataFrame(
-                {
-                    "loc": loc_values.detach().cpu().numpy(),
-                    "scale": scale_values.detach().cpu().numpy(),
-                    "element": [element_ids[idx] for idx in i],
-                    "gene": [gene_ids[idx] for idx in j],
-                }
+        def make_long_df(mat, value_name):
+            return (
+                pd.DataFrame(data=mat, index=element_ids, columns=gene_ids)
+                .melt(var_name="gene", value_name=value_name, ignore_index=False)
+                .reset_index(names="element")
             )
+
+        # Check if all element effects are factorized and raise an error if so
+        if "element_effects" not in self.module.guide.median():
+            logger.warning("All element effects are factorized. Using 'get_factorized_element_effects' instead.")
+            pert_factors, pert_loadings = self.get_factorized_element_effects()
+            element_effects = make_long_df(pert_factors.T @ pert_loadings, "loc")
+            element_effects["scale"] = np.nan
         else:
-            # loc/scale_values are dense matrices of elements by genes
+            for guide in self.module.guide:
+                if "element_effects" in guide.median():
+                    loc_values, scale_values = guide._get_loc_and_scale("element_effects")
+                    # loc_values, loc_plus_scale_values = guide.quantiles([0.5, 0.841])["element_effects"]
+                    # scale_values = loc_plus_scale_values - loc_values
+            # loc_values, scale_values = self.module.guide._get_loc_and_scale("element_effects")
 
-            def make_long_df(mat, value_name):
-                return (
-                    pd.DataFrame(data=mat, index=element_ids, columns=gene_ids)
-                    .melt(var_name="gene", value_name=value_name, ignore_index=False)
-                    .reset_index(names="element")
+            if hasattr(self.module, "element_by_gene_idx"):
+                # loc/scale_values are the nonzero elements of a sparse matrix of elements by genes
+                i, j = self.module.element_by_gene_idx.detach().cpu().numpy().astype(int)
+
+                # pert_ids = self.adata_manager.get_state_registry("perturbations").column_names
+                element_effects = pd.DataFrame(
+                    {
+                        "loc": loc_values.detach().cpu().numpy(),
+                        "scale": scale_values.detach().cpu().numpy(),
+                        "element": [element_ids[idx] for idx in i],
+                        "gene": [gene_ids[idx] for idx in j],
+                    }
                 )
+            else:
+                # loc/scale_values are dense matrices of elements by genes
 
-            element_effects = pd.merge(
-                make_long_df(loc_values.detach().cpu().numpy(), "loc"),
-                make_long_df(scale_values.detach().cpu().numpy(), "scale"),
-            )
+                element_effects = pd.merge(
+                    make_long_df(loc_values.detach().cpu().numpy(), "loc"),
+                    make_long_df(scale_values.detach().cpu().numpy(), "scale"),
+                )
 
         element_effects = element_effects.assign(
             z_value=lambda x: x["loc"] / x["scale"],
             q_value=lambda x: chi2.sf(x["z_value"] * x["z_value"], df=1),
-            # is_target=lambda x: x["element"].str.split("_", expand=True)[0] == x["gene"],
         )
 
-        return element_effects.sort_values("z_value")
+        return element_effects
 
-    def get_map_labels(self, indices: list | None = None):
+    def get_map_labels(self, indices: list | None = None) -> np.ndarray:
+        """
+        Get MAP (maximum a posteriori) labels for the discrete latent variable "perturbed".
+
+        Parameters
+        ----------
+        indices : list or None
+            Indices of the data subset to use.
+
+        Returns
+        -------
+        np.ndarray
+            Array of MAP labels.
+        """
         args, kwargs = self._get_data_subset(indices)
         self.module.guide(*args, **kwargs)
         guide_trace = poutine.trace(self.module.guide).get_trace(*args, **kwargs)  # record the globals
@@ -474,13 +569,25 @@ class PERTURBO(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
         map_labels = serving_model_trace.nodes["perturbed"]["value"].squeeze().cpu().numpy()
         return map_labels
 
-    def _get_data_subset(self, indices: list | None = None):
+    def _get_data_subset(self, indices: list | None = None) -> tuple:
+        """
+        Get a data subset for inference.
+
+        Parameters
+        ----------
+        indices : list or None
+            Indices of the data subset.
+
+        Returns
+        -------
+        tuple
+            Tuple of (args, kwargs) for the model.
+        """
         loader = AnnDataLoader(
             adata_manager=self.adata_manager,
             indices=indices,
             batch_size=len(indices) if indices is not None else len(self.adata),
             data_and_attributes=self.data_and_attrs,
-            load_sparse_tensor=self.load_sparse_tensors,
         )
         return self.module._get_fn_args_from_batch(next(iter(loader)))
 
@@ -511,12 +618,40 @@ class PERTURBO(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
     #     )
     #     return samples
 
+    def get_factorized_element_effects(self):
+        element_ids = self.get_element_names()
+        gene_ids = self.adata_manager.get_state_registry("X").column_names
 
-def estimate_nb_params(X, smoothing="isotonic"):
+        medians = self.module.guide.median()
+        if "pert_factors" not in medians or "pert_loadings" not in medians:
+            raise RuntimeError("No perturbation factors found. Use get_element_effects instead")
+
+        pert_factors_2d = medians["pert_factors"].squeeze(-1).detach().cpu().numpy()
+        assert pert_factors_2d.shape == (self.module.n_pert_factors, self.module.n_elements)
+        pert_factors_df = pd.DataFrame(pert_factors_2d, columns=element_ids)
+        pert_loadings_2d = medians["pert_loadings"].squeeze(-2).detach().cpu().numpy()
+        assert pert_loadings_2d.shape == (self.module.n_pert_factors, self.module.n_genes)
+        pert_loadings_df = pd.DataFrame(pert_loadings_2d, columns=gene_ids)
+        return pert_factors_df, pert_loadings_df
+
+
+def estimate_nb_params(
+    X: np.ndarray | sp.spmatrix, smoothing: str = "isotonic"
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """
     Estimate NB mean and dispersion (MoM) for each gene (column) in count matrix X.
 
-    With optional smoothing: 'linear', 'quadratic', or 'isotonic' (monotonic).
+    Parameters
+    ----------
+    X : np.ndarray or scipy.sparse.spmatrix
+        Count matrix (cells x genes).
+    smoothing : str
+        Smoothing method: 'linear', 'quadratic', or 'isotonic'.
+
+    Returns
+    -------
+    tuple of np.ndarray
+        log_means, log_disp, log_disp_smoothed
     """
     if sp.issparse(X):
         means = np.array(X.mean(axis=0)).flatten()
