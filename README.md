@@ -2,7 +2,7 @@
 
 # 🏎️ PerTurbo: Fast analysis of single-cell perturbation studies
 
-**PerTurbo** is a scalable analysis tool for Perturb-seq and similar large single-cell CRISPR screens (e.g. CROP-seq, ECCITE-seq). PerTurbo performs a Bayesian differential expression analysis on the raw count data which accounts for the sparsity of single-cell data and the variability in targeting efficiency across CRISPR sgRNA constructs ("guides"). Under the hood, PerTurbo uses PyTorch and Pyro for GPU-accelerated stochastic variational inference to achieve scalability to millions of cells and thousands of perturbations in both low- and high-MOI screens.
+**PerTurbo** is a scalable Bayesian analysis tool for Perturb-seq and similar large single-cell CRISPR screens (e.g. CROP-seq, ECCITE-seq). PerTurbo performs count-based regression to estimate perturbation effects on each gene based on a hierarchical statistical model which accounts for the sparsity of single cell RNA-seq data and variability in efficiency between different CRISPR sgRNA constructs ("guides"). Under the hood, PerTurbo relies on PyTorch and Pyro to perform GPU-accelerated stochastic variational inference, which unlocks fast and robust transcriptome-wide analyses of millions of cells and thousands of perturbations in both low- and high-MOI screens.
 
 ## Installation
 
