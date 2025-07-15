@@ -37,9 +37,9 @@ class PerTurboPyroModule(PyroBaseModuleClass):
         effect_prior_dist: Literal["cauchy", "normal_mixture", "normal", "laplace"] = "laplace",
         n_factors: int | None = None,
         n_pert_factors: int | None = None,
-        efficiency_mode: Literal["mixture", "scaled"] = "scaled",
+        efficiency_mode: Literal["mixture", "scaled", "perfect"] = "scaled",
         sparse_effect_tensors: bool | Literal["auto"] = "auto",
-        fit_guide_efficacy: bool = True,
+        fit_guide_efficacy: bool = True,  # deprecated, use efficiency_mode == "perfect" instead
         prior_param_dict: Mapping[str, torch.Tensor] | None = None,
         **module_kwargs,
     ) -> None:
@@ -103,6 +103,10 @@ class PerTurboPyroModule(PyroBaseModuleClass):
         self.efficiency_mode = efficiency_mode
         self.local_effects = gene_by_element is not None
 
+        if efficiency_mode == "perfect":
+            self.fit_guide_efficacy = False
+            self.efficiency_mode = "scaled"
+
         if sparse_effect_tensors == "auto":
             if gene_by_element is not None:
                 sparsity = 1.0 - (gene_by_element.count_nonzero().item() / gene_by_element.numel())
@@ -121,8 +125,10 @@ class PerTurboPyroModule(PyroBaseModuleClass):
             "max_epochs": 1,  # fixes new bug from ipywidgets loading bar on model load
         }
 
-        if self.n_pert_factors:
-            assert not self.fit_guide_efficacy, "fit_guide_efficacy must be False if using n_pert_factors"
+        if self.n_pert_factors and self.fit_guide_efficacy:
+            raise NotImplementedError(
+                "Cannot currently fit guide efficacy if using n_pert_factors -- please set n_pert_factors=None or efficiency_mode='perfect'"
+            )
 
         self.discrete_sites = []
         if efficiency_mode == "mixture":

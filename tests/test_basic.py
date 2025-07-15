@@ -17,10 +17,9 @@ def test_package_has_version():
     assert perturbo.__version__ is not None
 
 
-@pytest.mark.parametrize("efficiency_mode", ["mixture", "scaled"])
+@pytest.mark.parametrize("efficiency_mode", ["mixture", "scaled", "perfect"])
 @pytest.mark.parametrize("use_guide_by_element", [True, False])
 @pytest.mark.parametrize("use_gene_by_element", [True, False])
-@pytest.mark.parametrize("fit_guide_efficacy", [True, False])
 @pytest.mark.parametrize("sparse_tensors", [True, False])
 # @pytest.mark.parametrize("n_factors", [None, 2])
 @pytest.mark.parametrize("n_pert_factors", [None, 2])
@@ -30,7 +29,6 @@ def test_model_mdata(
     efficiency_mode,
     use_guide_by_element,
     use_gene_by_element,
-    fit_guide_efficacy,
     sparse_tensors,
     n_pert_factors,
 ):
@@ -38,7 +36,7 @@ def test_model_mdata(
     if use_gene_by_element and not use_guide_by_element:
         pytest.skip("gene_by_element without guide_by_element not implemented!")
 
-    if n_pert_factors and fit_guide_efficacy:
+    if n_pert_factors and efficiency_mode != "perfect":
         pytest.skip("cannot fit guide efficacy if using n_pert_factors!")
 
     pyro.clear_param_store()
@@ -61,7 +59,6 @@ def test_model_mdata(
         mdata,
         n_pert_factors=n_pert_factors,
         efficiency_mode=efficiency_mode,
-        fit_guide_efficacy=fit_guide_efficacy,
         sparse_effect_tensors=sparse_tensors,
     )
     assert model.summary_stats.n_cells == len(mdata)
