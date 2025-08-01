@@ -37,6 +37,7 @@ class PERTURBO(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
         control_guides: list | None = None,
         dispersion_smoothing: str = "none",
         smoothing_factor: float = 0.3,
+        init_max_cells: int = 10_000,
         **model_kwargs,
     ):
         """
@@ -52,6 +53,8 @@ class PERTURBO(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
             Smoothing method for dispersion estimation ("none", "linear", "isotonic").
         smoothing_factor : float
             Smoothing factor for dispersion smoothing.
+        init_max_cells : int
+            Maximum number of cells to use for initialization (for large datasets).
         model_kwargs : dict
             Additional keyword arguments for the model.
         """
@@ -86,16 +89,23 @@ class PERTURBO(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
         if REGISTRY_KEYS.GENE_BY_ELEMENT_KEY in self.adata_manager.data_registry:
             gene_by_element = self.read_matrix_from_registry(REGISTRY_KEYS.GENE_BY_ELEMENT_KEY)
 
-        epsilon = 1e-3
         X = self.adata_manager.get_from_registry(REGISTRY_KEYS.X_KEY)
         grna_counts = self.adata_manager.get_from_registry(REGISTRY_KEYS.PERTURBATION_KEY)
 
         if control_guides is not None:
             if issparse(grna_counts):
-                control_guide_idx = grna_counts[:, control_guides].X.sum(axis=1).A1 > 0
+                control_guide_idx = grna_counts[:, control_guides].sum(axis=1).A1 > 0
             else:
-                control_guide_idx = grna_counts[:, control_guides].X.sum(axis=1) > 0
+                control_guide_idx = grna_counts[:, control_guides].sum(axis=1) > 0
             X = X[control_guide_idx, :]
+
+        if X.shape[0] > init_max_cells:
+            logger.warning(
+                f"Initializing with {X.shape[0]} cells, but init_max_cells is set to {init_max_cells}. "
+                "Using a random subset of cells for initialization."
+            )
+            cell_idx = np.random.choice(X.shape[0], size=init_max_cells, replace=False)
+            X = X[cell_idx, :]
 
         log_means, log_disp, log_disp_smoothed = estimate_nb_params(X, smoothing=dispersion_smoothing)
         log_disp_smoothed = np.where(np.isfinite(log_disp_smoothed), log_disp_smoothed, 0)
@@ -247,9 +257,10 @@ class PERTURBO(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
         # add gene mean estimate (legacy, for simulator)
         gene_mean_key = "_gene_mean"
         rna_adata = mdata[modalities.rna_layer]
-        mean_counts = np.mean(rna_adata.X, axis=0)
-        if isinstance(mean_counts, np.matrix):  # occurs when summing sparse array
-            mean_counts = mean_counts.A1
+        if issparse(rna_adata.X):
+            mean_counts = rna_adata.X.mean(axis=0).A1
+        else:
+            mean_counts = np.mean(rna_adata.X, axis=0)
         rna_adata.var["_gene_mean"] = mean_counts
 
         # add indices to enable pyro subsampling of local vars
@@ -369,7 +380,7 @@ class PERTURBO(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
         batch_size: int = 1024,
         early_stopping: bool = False,
         lr: float | None = 0.005,
-        load_sparse_tensor: bool = "auto",
+        load_sparse_tensor: bool = False,
         training_plan: PyroTrainingPlan = PyroTrainingPlan,
         plan_kwargs: dict | None = None,
         data_splitter_kwargs: dict | None = None,
@@ -627,16 +638,24 @@ class PERTURBO(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
             raise RuntimeError("No perturbation factors found. Use get_element_effects instead")
 
         pert_factors_2d = medians["pert_factors"].squeeze(-1).detach().cpu().numpy()
-        assert pert_factors_2d.shape == (self.module.n_pert_factors, self.module.n_elements)
+        assert pert_factors_2d.shape == (
+            self.module.n_pert_factors,
+            self.module.n_elements,
+        )
         pert_factors_df = pd.DataFrame(pert_factors_2d, columns=element_ids)
         pert_loadings_2d = medians["pert_loadings"].squeeze(-2).detach().cpu().numpy()
-        assert pert_loadings_2d.shape == (self.module.n_pert_factors, self.module.n_genes)
+        assert pert_loadings_2d.shape == (
+            self.module.n_pert_factors,
+            self.module.n_genes,
+        )
         pert_loadings_df = pd.DataFrame(pert_loadings_2d, columns=gene_ids)
         return pert_factors_df, pert_loadings_df
 
 
 def estimate_nb_params(
-    X: np.ndarray | sp.spmatrix, smoothing: str = "isotonic"
+    X: np.ndarray | sp.spmatrix,
+    smoothing: str = "isotonic",
+    epsilon=1e-4,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """
     Estimate NB mean and dispersion (MoM) for each gene (column) in count matrix X.
@@ -666,8 +685,8 @@ def estimate_nb_params(
     dispersions[~np.isfinite(dispersions)] = np.nan
     dispersions[dispersions <= 0] = np.nan
 
-    log_means = np.log(means)
-    log_disp = np.log(dispersions)
+    log_means = np.log(means + epsilon)
+    log_disp = np.log(dispersions + epsilon)
 
     valid_mask = np.isfinite(log_means) & np.isfinite(log_disp)
     x_valid = log_means[valid_mask]

@@ -6,6 +6,7 @@ import pyro
 import pyro.distributions as dist
 import torch
 from pyro import poutine
+
 from pyro.infer.autoguide import AutoDelta, AutoGuideList, AutoNormal, init_to_median
 from scvi.module.base import PyroBaseModuleClass
 
@@ -180,23 +181,17 @@ class PerTurboPyroModule(PyroBaseModuleClass):
         ## register hyperparameters as buffers so they get automatically moved to GPU by scvi-tools
 
         if self.local_effects:
-            if self.sparse_tensors:
-                self.register_buffer("element_by_gene", gene_by_element.T.to_sparse_coo())
-            else:
-                self.register_buffer("element_by_gene", gene_by_element.T.to_sparse_coo())
+            self.register_buffer("element_by_gene", gene_by_element.T.to_sparse_coo())
 
         # guide_by_element encoding
         if self.sparse_tensors:
             assert gene_by_element.shape[1] == self.n_elements
-            self.register_buffer("element_by_gene_idx", gene_by_element.T.to_sparse_coo().indices())
-            self.register_buffer("guide_by_gene_idx", (guide_by_element @ gene_by_element.T).to_sparse_coo().indices())
-
-            assert gene_by_element.shape[1] == self.n_elements
-            self.register_buffer("element_by_gene_idx", gene_by_element.T.to_sparse_coo().indices())
-            self.register_buffer("guide_by_gene_idx", (guide_by_element @ gene_by_element.T).to_sparse_coo().indices())
+            self.register_buffer("element_by_gene_idx", self.element_by_gene.indices())
+            self.register_buffer(
+                "guide_by_gene_idx", (self.guide_by_element @ self.element_by_gene).to_sparse_coo().indices()
+            )
             self.n_element_effects = self.element_by_gene_idx.shape[1]
             self.n_guide_effects = self.guide_by_gene_idx.shape[1]
-
         else:
             self.n_element_effects = self.n_guide_effects = 1  # for setting plate sizes
 
@@ -394,8 +389,9 @@ class PerTurboPyroModule(PyroBaseModuleClass):
             if self.sparse_tensors:
                 with guide_effects_plate:
                     guide_efficiency_values = pyro.sample(
-                        "guide_efficacy", dist.Beta(self.logit_efficacy_alpha, self.logit_efficacy_beta)
-                    )
+                        "guide_efficacy",
+                        dist.Kumaraswamy(self.logit_efficacy_alpha, self.logit_efficacy_beta),
+                    )  # equivalent to Beta if alpha or beta = 1
                     guide_efficiency = torch.sparse_coo_tensor(
                         self.guide_by_gene_idx,
                         guide_efficiency_values,
@@ -404,8 +400,12 @@ class PerTurboPyroModule(PyroBaseModuleClass):
             else:
                 with guide_plate, gene_plate:
                     guide_efficiency = pyro.sample(
-                        "guide_efficacy", dist.Beta(self.logit_efficacy_alpha, self.logit_efficacy_beta)
-                    )
+                        "guide_efficacy",
+                        dist.Kumaraswamy(self.logit_efficacy_alpha, self.logit_efficacy_beta),
+                    )  # equivalent to Beta if alpha or beta = 1
+        else:
+            guide_efficiency = self.one.expand(self.n_perturbations, self.n_genes)
+            # guide_efficiency = torch.ones((self.n_perturbations, self.n_genes))
 
         # elif self.local_effects:
         #     with guide_plate_sparse:
@@ -489,29 +489,36 @@ class PerTurboPyroModule(PyroBaseModuleClass):
         #         guide_effects = pyro.deterministic("guide_effects", guide_effects)
 
         # Account for guide efficiency/efficacy
-        if not self.fit_guide_efficacy:
-            mean_perturbation_effect = guides_observed @ guide_effects
-        elif self.efficiency_mode == "scaled":
+        # if not self.fit_guide_efficacy:
+        #     mean_perturbation_effect = guides_observed @ guide_effects
+        if self.efficiency_mode == "scaled" and self.fit_guide_efficacy:
             # Ensure dense for matmul (should only trigger if using factors with sparse cis effects)
             if guide_efficiency.is_sparse and not guide_effects.is_sparse:
                 guide_efficiency = guide_efficiency.to_dense()
             mean_perturbation_effect = guides_observed @ (guide_efficiency * guide_effects)
-
-        elif self.efficiency_mode == "mixture":
-            pert_prob = guides_observed @ guide_efficiency
-            # assert pert_prob.shape[0] == self.n_cells
-            # assert (pert_prob.shape[1] == 1) or (pert_prob.shape[1] == self.n_genes)
-            with cell_plate, gene_plate:
-                perturbed = pyro.sample("perturbed", dist.Bernoulli(pert_prob), infer={"enumerate": "parallel"})
-            mean_perturbation_effect = perturbed * (guides_observed @ guide_effects)
-        elif self.efficiency_mode == "mixture_high_moi":  # for simulation only!
-            pert_prob = guide_efficiency.expand((self.n_cells, -1, -1)).transpose(-3, -2)
-            assert pert_prob.shape == (self.n_perturbations, self.n_cells, 1)
-            with cell_plate:
-                perturbed = pyro.sample("perturbed", dist.Bernoulli(pert_prob)).squeeze(-1).T
-            mean_perturbation_effect = perturbed * guides_observed @ guide_effects
         else:
-            raise Exception("efficiency_mode must be either 'scaled' or 'mixture'")
+            mean_perturbation_effect = guides_observed @ guide_effects
+
+        if (
+            self.efficiency_mode == "mixture" or self.efficiency_mode == "mixture_high_moi"
+        ) and self.fit_guide_efficacy:
+            self.likelihood = "nb_mixture"
+
+        # elif self.efficiency_mode == "mixture":
+        #     pert_prob = guides_observed @ guide_efficiency
+        #     # assert pert_prob.shape[0] == self.n_cells
+        #     # assert (pert_prob.shape[1] == 1) or (pert_prob.shape[1] == self.n_genes)
+        #     with cell_plate, gene_plate:
+        #         perturbed = pyro.sample("perturbed", dist.Bernoulli(pert_prob), infer={"enumerate": "parallel"})
+        #     mean_perturbation_effect = perturbed * (guides_observed @ guide_effects)
+        # elif self.efficiency_mode == "mixture_high_moi":  # for simulation only!
+        #     pert_prob = guide_efficiency.expand((self.n_cells, -1, -1)).transpose(-3, -2)
+        #     assert pert_prob.shape == (self.n_perturbations, self.n_cells, 1)
+        #     with cell_plate:
+        #         perturbed = pyro.sample("perturbed", dist.Bernoulli(pert_prob)).squeeze(-1).T
+        #     mean_perturbation_effect = perturbed * guides_observed @ guide_effects
+        # else:
+        # raise Exception("efficiency_mode must be either 'scaled' or 'mixture'")
 
         # if self.use_crispr_factor:
         #     log_guide_counts = torch.log2(1 + guides_observed.sum(dim=-1, keepdim=True))
@@ -592,6 +599,28 @@ class PerTurboPyroModule(PyroBaseModuleClass):
                         ),
                         obs=observations,
                     )
+                elif self.likelihood == "nb_mixture":
+                    # Compute mixture logits (probability of being perturbed)
+                    mixture_pi = guides_observed @ guide_efficiency
+                    # Mixture components: control and perturbed
+                    mixture_probs = torch.stack([1 - mixture_pi, mixture_pi], dim=-1)
+                    logits = torch.stack(
+                        [nb_log_mean_ctrl - nb_log_dispersion, nb_log_mean - nb_log_dispersion], dim=-1
+                    )
+                    total_count = torch.stack([nb_log_dispersion.exp(), nb_log_dispersion.exp()], dim=-1)
+                    mixture_dist = dist.MixtureSameFamily(
+                        dist.Categorical(probs=mixture_probs),
+                        dist.NegativeBinomial(
+                            logits=logits,
+                            total_count=total_count,
+                        ),
+                    )
+                    return pyro.sample(
+                        "obs",
+                        mixture_dist,
+                        obs=observations,
+                    )
+
                 else:
                     raise NotImplementedError(f"'{self.likelihood}' likelihood not implemented")
 
