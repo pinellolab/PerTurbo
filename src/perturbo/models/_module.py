@@ -126,8 +126,8 @@ class PerTurboPyroModule(PyroBaseModuleClass):
             assert not self.fit_guide_efficacy, "fit_guide_efficacy must be False if using n_pert_factors"
 
         self.discrete_sites = []
-        if efficiency_mode == "mixture":
-            self.discrete_sites.append("perturbed")
+        # if efficiency_mode == "mixture":
+        # self.discrete_sites.append("perturbed")
 
         # validate guide -> element mapping or use identity matrix as default
         if guide_by_element is None:
@@ -148,7 +148,7 @@ class PerTurboPyroModule(PyroBaseModuleClass):
         self.n_batches = n_batches
 
         # Sites to approximate with Delta distribution instead of default Normal distribution.
-        self.delta_sites = []
+        self.delta_sites = ["guide_efficacy"]
         # self.delta_sites = ["cell_factors"]
         # self.delta_sites = ["cell_factors", "cell_loadings", "pert_factors", "pert_loadings"]
 
