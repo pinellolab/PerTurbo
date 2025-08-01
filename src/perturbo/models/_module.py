@@ -148,7 +148,8 @@ class PerTurboPyroModule(PyroBaseModuleClass):
         self.n_batches = n_batches
 
         # Sites to approximate with Delta distribution instead of default Normal distribution.
-        self.delta_sites = ["guide_efficacy"]
+        # self.delta_sites = ["guide_efficacy"]
+        self.delta_sites = []
         # self.delta_sites = ["cell_factors"]
         # self.delta_sites = ["cell_factors", "cell_loadings", "pert_factors", "pert_loadings"]
 
