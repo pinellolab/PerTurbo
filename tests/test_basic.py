@@ -59,7 +59,6 @@ def test_model_mdata(
 
     model = perturbo.PERTURBO(
         mdata,
-        # control_guides=["guide0"],
         control_guides=[0],
         n_pert_factors=n_pert_factors,
         efficiency_mode=efficiency_mode,
