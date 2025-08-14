@@ -34,7 +34,7 @@ class PERTURBO(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
     def __init__(
         self,
         mdata: AnnOrMuData,
-        control_guides: list | None = None,
+        control_guides: list[int] | list[bool] | None = None,
         dispersion_smoothing: str = "none",
         smoothing_factor: float = 0.3,
         **model_kwargs,
@@ -92,9 +92,9 @@ class PERTURBO(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
 
         if control_guides is not None:
             if issparse(grna_counts):
-                control_guide_idx = grna_counts[:, control_guides].X.sum(axis=1).A1 > 0
+                control_guide_idx = grna_counts[:, control_guides].sum(axis=1).A1 > 0
             else:
-                control_guide_idx = grna_counts[:, control_guides].X.sum(axis=1) > 0
+                control_guide_idx = grna_counts[:, control_guides].sum(axis=1) > 0
             X = X[control_guide_idx, :]
 
         log_means, log_disp, log_disp_smoothed = estimate_nb_params(X, smoothing=dispersion_smoothing)
