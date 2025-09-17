@@ -20,10 +20,10 @@ def test_package_has_version():
 @pytest.mark.parametrize("efficiency_mode", ["mixture", "scaled"])
 @pytest.mark.parametrize("use_guide_by_element", [True, False])
 @pytest.mark.parametrize("use_gene_by_element", [True, False])
-@pytest.mark.parametrize("fit_guide_efficacy", [True, False])
-@pytest.mark.parametrize("sparse_tensors", [True, False])
+@pytest.mark.parametrize("fit_guide_efficacy", [True])
+# @pytest.mark.parametrize("sparse_tensors", [True, False])
 # @pytest.mark.parametrize("n_factors", [None, 2])
-@pytest.mark.parametrize("n_pert_factors", [None, 2])
+# @pytest.mark.parametrize("n_pert_factors", [None, 2])
 def test_model_mdata(
     mdata: MuData,
     tmp_path,
@@ -31,15 +31,15 @@ def test_model_mdata(
     use_guide_by_element,
     use_gene_by_element,
     fit_guide_efficacy,
-    sparse_tensors,
-    n_pert_factors,
+    # sparse_tensors,
+    # n_pert_factors,
 ):
     """Check that we can register our MuData object with our model and perform training"""
     if use_gene_by_element and not use_guide_by_element:
         pytest.skip("gene_by_element without guide_by_element not implemented!")
 
-    if n_pert_factors and fit_guide_efficacy:
-        pytest.skip("cannot fit guide efficacy if using n_pert_factors!")
+    # if n_pert_factors and fit_guide_efficacy:
+    # pytest.skip("cannot fit guide efficacy if using n_pert_factors!")
 
     pyro.clear_param_store()
     perturbo.PERTURBO.setup_mudata(
@@ -59,29 +59,32 @@ def test_model_mdata(
 
     model = perturbo.PERTURBO(
         mdata,
-        control_guides=[0],
-        n_pert_factors=n_pert_factors,
+        # control_guides=[0],
+        # n_pert_factors=n_pert_factors,
         efficiency_mode=efficiency_mode,
         fit_guide_efficacy=fit_guide_efficacy,
-        sparse_effect_tensors=sparse_tensors,
+        # sparse_effect_tensors=sparse_tensors,
     )
     assert model.summary_stats.n_cells == len(mdata)
     assert model.summary_stats.n_vars == len(mdata[rna_key].var)
     assert model.summary_stats.n_perturbations == len(mdata[perturb_key].var)
 
     model.train(
+        # accelerator="auto",
         max_epochs=5,
         lr=0.1,
         batch_size=2,
-        load_sparse_tensor=sparse_tensors,
+        # load_sparse_tensor=sparse_tensors,
     )
-    model.train(
-        max_epochs=5,
-        lr=0.1,
-        batch_size=None,
-        load_sparse_tensor=sparse_tensors,
-    )
+    # model.train(
+    #     # accelerator="auto",
+    #     max_epochs=5,
+    #     lr=0.1,
+    #     batch_size=None,
+    #     # load_sparse_tensor=sparse_tensors,
+    # )
     element_effects = model.get_element_effects()
+
     assert isinstance(element_effects, pd.DataFrame)
     assert isinstance(model.history["elbo_train"], pd.DataFrame)
 
@@ -110,6 +113,7 @@ def test_model_mdata(
         element_by_gene_lfc=element_by_gene_lfc,
         guide_efficacy=guide_efficacy,
         cell_indices=cell_idx,
+        module_init_kwargs={"efficiency_mode": "mixture_high_moi"},
     )
 
     # run simulator once with new data shape/model

@@ -494,32 +494,34 @@ class PERTURBO(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
         element_ids = self.get_element_names()
         gene_ids = self.adata_manager.get_state_registry("X").column_names
 
-        def make_long_df(mat, value_name):
-            return (
-                pd.DataFrame(data=mat, index=element_ids, columns=gene_ids)
-                .melt(var_name="gene", value_name=value_name, ignore_index=False)
-                .reset_index(names="element")
+        def fast_long_df(mat, value_name):
+            # mat: (n_elements, n_genes)
+            n_elements, n_genes = mat.shape
+            # Use numpy broadcasting for fast construction
+            df = pd.DataFrame(
+                {
+                    "element": np.repeat(element_ids, n_genes),
+                    "gene": np.tile(gene_ids, n_elements),
+                    value_name: mat.ravel(),
+                }
             )
+            return df
 
         # Check if all element effects are factorized and raise an error if so
         if "element_effects" not in self.module.guide.median():
             logger.warning("All element effects are factorized. Using 'get_factorized_element_effects' instead.")
             pert_factors, pert_loadings = self.get_factorized_element_effects()
-            element_effects = make_long_df(pert_factors.T @ pert_loadings, "loc")
+            element_effects = fast_long_df((pert_factors.T @ pert_loadings).values, "loc")
             element_effects["scale"] = np.nan
         else:
             for guide in self.module.guide:
                 if "element_effects" in guide.median():
                     loc_values, scale_values = guide._get_loc_and_scale("element_effects")
-                    # loc_values, loc_plus_scale_values = guide.quantiles([0.5, 0.841])["element_effects"]
-                    # scale_values = loc_plus_scale_values - loc_values
             # loc_values, scale_values = self.module.guide._get_loc_and_scale("element_effects")
 
             if hasattr(self.module, "element_by_gene_idx"):
                 # loc/scale_values are the nonzero elements of a sparse matrix of elements by genes
                 i, j = self.module.element_by_gene_idx.detach().cpu().numpy().astype(int)
-
-                # pert_ids = self.adata_manager.get_state_registry("perturbations").column_names
                 element_effects = pd.DataFrame(
                     {
                         "loc": loc_values.detach().cpu().numpy(),
@@ -530,11 +532,8 @@ class PERTURBO(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
                 )
             else:
                 # loc/scale_values are dense matrices of elements by genes
-
-                element_effects = pd.merge(
-                    make_long_df(loc_values.detach().cpu().numpy(), "loc"),
-                    make_long_df(scale_values.detach().cpu().numpy(), "scale"),
-                )
+                element_effects = fast_long_df(loc_values.detach().cpu().numpy(), "loc")
+                element_effects["scale"] = scale_values.detach().cpu().numpy().ravel()
 
         element_effects = element_effects.assign(
             z_value=lambda x: x["loc"] / x["scale"],
