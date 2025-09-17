@@ -40,6 +40,7 @@ class PerTurboPyroModule(PyroBaseModuleClass):
         efficiency_mode: Literal["mixture", "scaled"] = "scaled",
         sparse_effect_tensors: bool | Literal["auto"] = "auto",
         fit_guide_efficacy: bool = True,
+        fit_size_factor: bool = False,
         prior_param_dict: Mapping[str, torch.Tensor] | None = None,
         **module_kwargs,
     ) -> None:
@@ -125,8 +126,6 @@ class PerTurboPyroModule(PyroBaseModuleClass):
             assert not self.fit_guide_efficacy, "fit_guide_efficacy must be False if using n_pert_factors"
 
         self.discrete_sites = []
-        if efficiency_mode == "mixture":
-            self.discrete_sites.append("perturbed")
 
         # validate guide -> element mapping or use identity matrix as default
         if guide_by_element is None:
@@ -220,6 +219,7 @@ class PerTurboPyroModule(PyroBaseModuleClass):
         self.register_buffer("logit_efficacy_alpha", torch.tensor(5.0))
         self.register_buffer("logit_efficacy_beta", torch.tensor(1.0))
         self.register_buffer("has_guide_prior", torch.tensor(0.9))
+        self.fit_size_factor = fit_size_factor
 
         ##  element effect size hyperparams
 
@@ -275,7 +275,7 @@ class PerTurboPyroModule(PyroBaseModuleClass):
             tensor_dict[REGISTRY_KEYS.PERTURBATION_KEY] = Y.to_dense()
 
         # return indices and then the rest of the tensors
-        return (tensor_dict[REGISTRY_KEYS.INDICES_KEY].squeeze(),), tensor_dict
+        return (tensor_dict[REGISTRY_KEYS.INDICES_KEY].squeeze(-1),), tensor_dict
 
     def create_plates(self, idx: torch.Tensor, **tensor_dict) -> tuple:
         # dims = self.infer_data_dims(idx, **tensor_dict)
@@ -325,6 +325,11 @@ class PerTurboPyroModule(PyroBaseModuleClass):
         size_factor = tensor_dict[REGISTRY_KEYS.SIZE_FACTOR_KEY]
         guides_observed = tensor_dict[REGISTRY_KEYS.PERTURBATION_KEY]
         cont_covariates = tensor_dict[REGISTRY_KEYS.CONT_COVS_KEY]
+        n_cells_batch = guides_observed.shape[0]
+
+        if self.fit_size_factor:
+            with cell_plate:
+                size_factor = pyro.sample("size_factor", dist.Normal(size_factor, 0.1))
 
         # Effect size priors
         if self.effect_prior_dist == "normal_mixture":
@@ -406,7 +411,8 @@ class PerTurboPyroModule(PyroBaseModuleClass):
                     guide_efficiency = pyro.sample(
                         "guide_efficacy", dist.Beta(self.logit_efficacy_alpha, self.logit_efficacy_beta)
                     )
-
+        else:
+            guide_efficiency = self.one.expand(self.n_perturbations, self.n_genes)
         # elif self.local_effects:
         #     with guide_plate_sparse:
         #         guide_efficacy_sparse = pyro.sample(
@@ -477,6 +483,10 @@ class PerTurboPyroModule(PyroBaseModuleClass):
         # else:
         #     element_effects = element_factor_effects + element_local_effects
         guide_effects = self.guide_by_element @ element_effects
+        if self.efficiency_mode != "mixture_high_moi":
+            assert guide_effects.shape[-1] == self.n_genes and guide_effects.shape[-2] == self.n_perturbations, (
+                f"Guide effects shape: {guide_effects.shape}, expected (..., {self.n_perturbations}, {self.n_genes})"
+            )
 
         # # compute/sample guide effects as function of element effects
         # with guide_plate, gene_plate:
@@ -489,26 +499,23 @@ class PerTurboPyroModule(PyroBaseModuleClass):
         #         guide_effects = pyro.deterministic("guide_effects", guide_effects)
 
         # Account for guide efficiency/efficacy
-        if not self.fit_guide_efficacy:
-            mean_perturbation_effect = guides_observed @ guide_effects
-        elif self.efficiency_mode == "scaled":
+        if self.efficiency_mode == "scaled":
             # Ensure dense for matmul (should only trigger if using factors with sparse cis effects)
             if guide_efficiency.is_sparse and not guide_effects.is_sparse:
                 guide_efficiency = guide_efficiency.to_dense()
             mean_perturbation_effect = guides_observed @ (guide_efficiency * guide_effects)
 
         elif self.efficiency_mode == "mixture":
-            pert_prob = guides_observed @ guide_efficiency
-            # assert pert_prob.shape[0] == self.n_cells
-            # assert (pert_prob.shape[1] == 1) or (pert_prob.shape[1] == self.n_genes)
-            with cell_plate, gene_plate:
-                perturbed = pyro.sample("perturbed", dist.Bernoulli(pert_prob), infer={"enumerate": "parallel"})
-            mean_perturbation_effect = perturbed * (guides_observed @ guide_effects)
-        elif self.efficiency_mode == "mixture_high_moi":  # for simulation only!
-            pert_prob = guide_efficiency.expand((self.n_cells, -1, -1)).transpose(-3, -2)
-            assert pert_prob.shape == (self.n_perturbations, self.n_cells, 1)
-            with cell_plate:
-                perturbed = pyro.sample("perturbed", dist.Bernoulli(pert_prob)).squeeze(-1).T
+            pert_prob = guides_observed @ guide_efficiency  # sum of efficiency values in each cell
+            assert pert_prob.shape[-1] == self.n_genes and pert_prob.shape[-2] == n_cells_batch, (
+                f"Pert prob shape: {pert_prob.shape}, expected (..., {n_cells_batch}, {self.n_genes})"
+            )
+            mean_perturbation_effect = guides_observed @ guide_effects
+        elif self.efficiency_mode == "mixture_high_moi":  # for simulation only! assumes one
+            pert_prob = guide_efficiency.expand((n_cells_batch, -1, -1)).transpose(-3, -2)
+            # assert pert_prob.shape == (self.n_perturbations, self.n_cells, 1)
+            # with cell_plate:
+            perturbed = pyro.sample("perturbed", dist.Bernoulli(pert_prob)).squeeze(-1).T
             mean_perturbation_effect = perturbed * guides_observed @ guide_effects
         else:
             raise Exception("efficiency_mode must be either 'scaled' or 'mixture'")
@@ -572,28 +579,57 @@ class PerTurboPyroModule(PyroBaseModuleClass):
             # Sample read counts from distributions
             with cell_plate:
                 observations = tensor_dict.get(REGISTRY_KEYS.X_KEY)
-                if self.likelihood == "lnnb":
-                    return pyro.sample(
-                        "obs",
-                        LogNormalNegativeBinomial(
-                            logits=nb_log_mean - nb_log_dispersion - multiplicative_noise**2 / 2,
-                            total_count=nb_log_dispersion.exp(),
+                if self.efficiency_mode == "mixture":
+                    # Build a two-component mixture over the observation distribution:
+                    # component 0 = control (no perturbation), component 1 = perturbed.
+                    # mixture probs shape: (n_cells_batch, n_genes, 2)
+                    mix_probs = torch.stack([1.0 - pert_prob, pert_prob], dim=-1)
+
+                    # component means: shape (n_cells_batch, n_genes, 2)
+                    comp_nb_log_mean = torch.stack([nb_log_mean_ctrl, nb_log_mean], dim=-1)
+
+                    # expand dispersion/total_count to match component batch shape
+                    # nb_log_dispersion has shape (n_genes,)
+                    total_count = nb_log_dispersion.exp().unsqueeze(0).unsqueeze(-1)
+                    total_count = total_count.expand(comp_nb_log_mean.shape)
+
+                    # component logits = comp_nb_log_mean - dispersion
+                    comp_logits = comp_nb_log_mean - nb_log_dispersion.unsqueeze(0).unsqueeze(-1)
+
+                    if self.likelihood == "lnnb":
+                        # For lnnb, components are LogNormalNegativeBinomial
+                        comp_dist = LogNormalNegativeBinomial(
+                            logits=comp_logits - multiplicative_noise**2 / 2,
+                            total_count=total_count,
                             multiplicative_noise_scale=multiplicative_noise,
                             num_quad_points=self.lnnb_quad_points,
-                        ),
-                        obs=observations,
-                    )
-                elif self.likelihood == "nb":
-                    return pyro.sample(
-                        "obs",
-                        dist.NegativeBinomial(
-                            logits=nb_log_mean - nb_log_dispersion,
-                            total_count=nb_log_dispersion.exp(),
-                        ),
-                        obs=observations,
-                    )
+                        )
+                    else:
+                        comp_dist = dist.NegativeBinomial(logits=comp_logits, total_count=total_count)
+
+                    mixture_dist = dist.MixtureSameFamily(dist.Categorical(probs=mix_probs), comp_dist)
+                    return pyro.sample("obs", mixture_dist, obs=observations)
                 else:
-                    raise NotImplementedError(f"'{self.likelihood}' likelihood not implemented")
+                    if self.likelihood == "lnnb":
+                        return pyro.sample(
+                            "obs",
+                            LogNormalNegativeBinomial(
+                                logits=nb_log_mean - nb_log_dispersion - multiplicative_noise**2 / 2,
+                                total_count=nb_log_dispersion.exp(),
+                                multiplicative_noise_scale=multiplicative_noise,
+                                num_quad_points=self.lnnb_quad_points,
+                            ),
+                            obs=observations,
+                        )
+                    elif self.likelihood == "nb":
+                        return pyro.sample(
+                            "obs",
+                            dist.NegativeBinomial(
+                                logits=nb_log_mean - nb_log_dispersion,
+                                total_count=nb_log_dispersion.exp(),
+                            ),
+                            obs=observations,
+                        )
 
     @property
     def guide(self) -> AutoGuideList:
