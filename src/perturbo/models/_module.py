@@ -262,12 +262,12 @@ class PerTurboPyroModule(PyroBaseModuleClass):
             tensor_dict[REGISTRY_KEYS.CONT_COVS_KEY] = size_factor
 
         X = tensor_dict[REGISTRY_KEYS.X_KEY]
-        if X is not None and (X.layout == torch.sparse_csc or X.layout == torch.sparse_csr or X.is_sparse):
+        if X is not None and (X.layout == torch.sparse_csr or X.layout == torch.sparse_coo or X.is_sparse):
             tensor_dict[REGISTRY_KEYS.X_KEY] = X.to_dense()
 
-        # Y = tensor_dict[REGISTRY_KEYS.PERTURBATION_KEY]
-        # if Y is not None and (Y.layout == torch.sparse_csc or Y.layout == torch.sparse_csr or Y.is_sparse):
-        #     tensor_dict[REGISTRY_KEYS.PERTURBATION_KEY] = Y.to_dense()
+        Y = tensor_dict[REGISTRY_KEYS.PERTURBATION_KEY]
+        if Y is not None and (Y.layout == torch.sparse_csr):
+            tensor_dict[REGISTRY_KEYS.PERTURBATION_KEY] = Y.to_sparse_coo()
 
         # return indices and then the rest of the tensors
         return (tensor_dict[REGISTRY_KEYS.INDICES_KEY].squeeze(-1),), tensor_dict
@@ -503,6 +503,8 @@ class PerTurboPyroModule(PyroBaseModuleClass):
 
         elif self.efficiency_mode == "mixture":
             pert_prob = guides_observed @ guide_efficiency  # sum of efficiency values in each cell
+            if self.sparse_tensors:
+                pert_prob = pert_prob.to_dense()
             assert pert_prob.shape[-1] == self.n_genes and pert_prob.shape[-2] == n_cells_batch, (
                 f"Pert prob shape: {pert_prob.shape}, expected (..., {n_cells_batch}, {self.n_genes})"
             )
@@ -580,7 +582,7 @@ class PerTurboPyroModule(PyroBaseModuleClass):
                     # Build a two-component mixture over the observation distribution:
                     # component 0 = control (no perturbation), component 1 = perturbed.
                     # mixture probs shape: (n_cells_batch, n_genes, 2)
-                    mix_probs = torch.stack([1.0 - pert_prob, pert_prob], dim=-1)
+                    mix_probs = torch.stack([self.one - pert_prob, pert_prob], dim=-1)
 
                     # component means: shape (n_cells_batch, n_genes, 2)
                     comp_nb_log_mean = torch.stack([nb_log_mean_ctrl, nb_log_mean], dim=-1)
