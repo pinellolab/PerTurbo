@@ -265,9 +265,9 @@ class PerTurboPyroModule(PyroBaseModuleClass):
         if X is not None and (X.layout == torch.sparse_csc or X.layout == torch.sparse_csr or X.is_sparse):
             tensor_dict[REGISTRY_KEYS.X_KEY] = X.to_dense()
 
-        Y = tensor_dict[REGISTRY_KEYS.PERTURBATION_KEY]
-        if Y is not None and (Y.layout == torch.sparse_csc or Y.layout == torch.sparse_csr or Y.is_sparse):
-            tensor_dict[REGISTRY_KEYS.PERTURBATION_KEY] = Y.to_dense()
+        # Y = tensor_dict[REGISTRY_KEYS.PERTURBATION_KEY]
+        # if Y is not None and (Y.layout == torch.sparse_csc or Y.layout == torch.sparse_csr or Y.is_sparse):
+        #     tensor_dict[REGISTRY_KEYS.PERTURBATION_KEY] = Y.to_dense()
 
         # return indices and then the rest of the tensors
         return (tensor_dict[REGISTRY_KEYS.INDICES_KEY].squeeze(-1),), tensor_dict
