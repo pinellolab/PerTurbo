@@ -134,10 +134,10 @@ class PerTurboPyroModule(PyroBaseModuleClass):
             assert n_elements is not None, "n_elements must be specified if not equal to n_guides"
         self.n_elements = guide_by_element.shape[1]
 
-        if self.sparse_tensors:
-            self.register_buffer("guide_by_element", guide_by_element.to_sparse_coo())
-        else:
-            self.register_buffer("guide_by_element", guide_by_element)
+        # if self.sparse_tensors:
+        self.register_buffer("guide_by_element", guide_by_element.to_sparse_coo())
+        # else:
+        # self.register_buffer("guide_by_element", guide_by_element)
         # self.register_buffer("guide_by_element", guide_by_element)
 
         if n_cont_covariates is not None:
@@ -179,10 +179,10 @@ class PerTurboPyroModule(PyroBaseModuleClass):
         ## register hyperparameters as buffers so they get automatically moved to GPU by scvi-tools
 
         if self.local_effects:
-            if self.sparse_tensors:
-                self.register_buffer("element_by_gene", gene_by_element.T.to_sparse_coo())
-            else:
-                self.register_buffer("element_by_gene", gene_by_element.T.to_sparse_coo())
+            # if self.sparse_tensors:
+            #     self.register_buffer("element_by_gene", gene_by_element.T.to_sparse_coo())
+            # else:
+            self.register_buffer("element_by_gene", gene_by_element.T.to_sparse_coo())
 
         # guide_by_element encoding
         if self.sparse_tensors:
