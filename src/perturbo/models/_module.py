@@ -38,7 +38,7 @@ class PerTurboPyroModule(PyroBaseModuleClass):
         n_factors: int | None = None,
         n_pert_factors: int | None = None,
         efficiency_mode: Literal["mixture", "scaled"] = "scaled",
-        sparse_effect_tensors: bool | Literal["auto"] = "auto",
+        sparse_effect_tensors: bool | Literal["auto"] = True,
         fit_guide_efficacy: bool = True,
         fit_size_factor: bool = False,
         prior_param_dict: Mapping[str, torch.Tensor] | None = None,

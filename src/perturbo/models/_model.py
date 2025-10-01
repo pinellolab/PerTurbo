@@ -369,7 +369,7 @@ class PERTURBO(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
         batch_size: int = 1024,
         early_stopping: bool = False,
         lr: float | None = 0.005,
-        load_sparse_tensor: bool = "auto",
+        load_sparse_tensor: bool = False,
         training_plan: PyroTrainingPlan = PyroTrainingPlan,
         plan_kwargs: dict | None = None,
         data_splitter_kwargs: dict | None = None,
@@ -424,8 +424,9 @@ class PERTURBO(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
             data_splitter_kwargs = {}
         if "data_and_attributes" not in data_splitter_kwargs:
             data_splitter_kwargs["data_and_attributes"] = self.data_and_attrs
-        if load_sparse_tensor == "auto":
-            load_sparse_tensor = accelerator == "gpu"
+        # if load_sparse_tensor == "auto":
+        # load_sparse_tensor = accelerator == "gpu"
+        # load_sparse_tensor
         if batch_size is None:
             # use data splitter which moves data to GPU once
             data_splitter = DeviceBackedDataSplitter(
