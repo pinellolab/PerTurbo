@@ -498,6 +498,8 @@ class PERTURBO(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
             # mat: (n_elements, n_genes)
             n_elements, n_genes = mat.shape
             # Use numpy broadcasting for fast construction
+            assert n_elements == len(element_ids), f"Expected {len(element_ids)} elements, but got {n_elements}"
+            assert n_genes == len(gene_ids), f"Expected {len(gene_ids)} genes, but got {n_genes}"
             df = pd.DataFrame(
                 {
                     "element": np.repeat(element_ids, n_genes),

@@ -189,13 +189,8 @@ class PerTurboPyroModule(PyroBaseModuleClass):
             assert gene_by_element.shape[1] == self.n_elements
             self.register_buffer("element_by_gene_idx", gene_by_element.T.to_sparse_coo().indices())
             self.register_buffer("guide_by_gene_idx", (guide_by_element @ gene_by_element.T).to_sparse_coo().indices())
-
-            assert gene_by_element.shape[1] == self.n_elements
-            self.register_buffer("element_by_gene_idx", gene_by_element.T.to_sparse_coo().indices())
-            self.register_buffer("guide_by_gene_idx", (guide_by_element @ gene_by_element.T).to_sparse_coo().indices())
             self.n_element_effects = self.element_by_gene_idx.shape[1]
             self.n_guide_effects = self.guide_by_gene_idx.shape[1]
-
         else:
             self.n_element_effects = self.n_guide_effects = 1  # for setting plate sizes
 
@@ -482,8 +477,9 @@ class PerTurboPyroModule(PyroBaseModuleClass):
         #     )
         # else:
         #     element_effects = element_factor_effects + element_local_effects
-        guide_effects = self.guide_by_element @ element_effects
+
         if self.efficiency_mode != "mixture_high_moi":
+            guide_effects = self.guide_by_element @ element_effects
             assert guide_effects.shape[-1] == self.n_genes and guide_effects.shape[-2] == self.n_perturbations, (
                 f"Guide effects shape: {guide_effects.shape}, expected (..., {self.n_perturbations}, {self.n_genes})"
             )
@@ -501,17 +497,18 @@ class PerTurboPyroModule(PyroBaseModuleClass):
         # Account for guide efficiency/efficacy
         if self.efficiency_mode == "scaled":
             # Ensure dense for matmul (should only trigger if using factors with sparse cis effects)
-            if guide_efficiency.is_sparse and not guide_effects.is_sparse:
-                guide_efficiency = guide_efficiency.to_dense()
-            mean_perturbation_effect = guides_observed @ (guide_efficiency * guide_effects)
+            # if guide_efficiency.is_sparse and not guide_effects.is_sparse:
+            #     guide_efficiency = guide_efficiency.to_dense()
+            mean_perturbation_effect = guides_observed @ (guide_efficiency * (self.guide_by_element @ element_effects))
 
         elif self.efficiency_mode == "mixture":
             pert_prob = guides_observed @ guide_efficiency  # sum of efficiency values in each cell
             assert pert_prob.shape[-1] == self.n_genes and pert_prob.shape[-2] == n_cells_batch, (
                 f"Pert prob shape: {pert_prob.shape}, expected (..., {n_cells_batch}, {self.n_genes})"
             )
-            mean_perturbation_effect = guides_observed @ guide_effects
+            mean_perturbation_effect = guides_observed @ self.guide_by_element @ element_effects
         elif self.efficiency_mode == "mixture_high_moi":  # for simulation only! assumes one
+            guide_effects = self.guide_by_element @ element_effects
             pert_prob = guide_efficiency.expand((n_cells_batch, -1, -1)).transpose(-3, -2)
             # assert pert_prob.shape == (self.n_perturbations, self.n_cells, 1)
             # with cell_plate:
