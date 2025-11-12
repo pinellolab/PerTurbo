@@ -97,12 +97,19 @@ class PERTURBO(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
                 control_guide_idx = grna_counts[:, control_guides].sum(axis=1) > 0
             X = X[control_guide_idx, :]
 
-        log_means, log_disp, log_disp_smoothed = estimate_nb_params(X, smoothing=dispersion_smoothing)
-        log_disp_smoothed = np.where(np.isfinite(log_disp_smoothed), log_disp_smoothed, 0)
-        log_disp = np.where(np.isfinite(log_disp), log_disp, log_disp_smoothed)
-        if dispersion_smoothing != "none":
-            log_disp_smoothed = smoothing_factor * log_disp_smoothed + (1 - smoothing_factor) * log_disp
-        log_means = np.clip(log_means, a_min=np.log(1 / X.shape[0]), a_max=None)
+        n_cells_for_init = X.shape[0]
+        if n_cells_for_init == 0:
+            print("Warning: No cells with control guides found for initializing dispersion parameters.")
+            log_means = np.zeros(self.summary_stats.n_vars, dtype=np.float32)
+            log_disp_smoothed = np.ones(self.summary_stats.n_vars, dtype=np.float32)
+        else:
+            # run estimate_nb_params(X) safely
+            log_means, log_disp, log_disp_smoothed = estimate_nb_params(X, smoothing=dispersion_smoothing)
+            log_disp_smoothed = np.where(np.isfinite(log_disp_smoothed), log_disp_smoothed, 0)
+            log_disp = np.where(np.isfinite(log_disp), log_disp, log_disp_smoothed)
+            if dispersion_smoothing != "none":
+                log_disp_smoothed = smoothing_factor * log_disp_smoothed + (1 - smoothing_factor) * log_disp
+            log_means = np.clip(log_means, a_min=np.log(1 / X.shape[0]), a_max=None)
 
         # if control_guides is not None and "n_factors" in model_kwargs and guide_by_element is not None:
         #     # control_guides, _ = torch.max(guide_by_element[:, control_elements], dim=-1)
@@ -665,7 +672,7 @@ def estimate_nb_params(
     dispersions[~np.isfinite(dispersions)] = np.nan
     dispersions[dispersions <= 0] = np.nan
 
-    log_means = np.log(means)
+    log_means = np.log(means + 1 / X.shape[0])  # avoid log(0)
     log_disp = np.log(dispersions)
 
     valid_mask = np.isfinite(log_means) & np.isfinite(log_disp)
