@@ -37,7 +37,7 @@ class PerTurboPyroModule(PyroBaseModuleClass):
         effect_prior_dist: Literal["cauchy", "normal_mixture", "normal", "laplace"] = "laplace",
         n_factors: int | None = None,
         n_pert_factors: int | None = None,
-        efficiency_mode: Literal["mixture", "scaled"] = "scaled",
+        efficiency_mode: Literal["mixture", "scaled", "mixture_high_moi"] | None = "scaled",
         sparse_effect_tensors: bool | Literal["auto"] = "auto",
         fit_guide_efficacy: bool = True,
         fit_size_factor: bool = False,
@@ -103,6 +103,10 @@ class PerTurboPyroModule(PyroBaseModuleClass):
         self.effect_prior_dist = effect_prior_dist
         self.efficiency_mode = efficiency_mode
         self.local_effects = gene_by_element is not None
+
+        if self.efficiency_mode is None:
+            self.efficiency_mode = "scaled"
+            self.fit_guide_efficacy = False
 
         if sparse_effect_tensors == "auto":
             if gene_by_element is not None:
@@ -207,13 +211,13 @@ class PerTurboPyroModule(PyroBaseModuleClass):
         self.register_buffer("gene_mean_prior_loc", log_gene_mean_init)
         self.register_buffer("gene_disp_prior_loc", log_gene_dispersion_init)
 
-        self.register_buffer("gene_mean_prior_scale", torch.tensor(3.0))
-        self.register_buffer("gene_disp_prior_scale", torch.tensor(3.0))
+        self.register_buffer("gene_mean_prior_scale", torch.tensor(0.2))
+        self.register_buffer("gene_disp_prior_scale", torch.tensor(0.2))
 
         # batch/covariate hyperparams
-        self.register_buffer("batch_effect_prior_scale", torch.tensor(1.0))
-        self.register_buffer("covariate_prior_sigma", torch.tensor(1.0))
-        self.register_buffer("covariate_disp_prior_sigma", torch.tensor(1.0))
+        self.register_buffer("batch_effect_prior_scale", torch.tensor(0.2))
+        self.register_buffer("covariate_prior_sigma", torch.tensor(0.2))
+        self.register_buffer("covariate_disp_prior_sigma", torch.tensor(0.1))
 
         # efficiency hyperparams
         self.register_buffer("logit_efficacy_alpha", torch.tensor(5.0))
@@ -606,7 +610,6 @@ class PerTurboPyroModule(PyroBaseModuleClass):
                         )
                     else:
                         comp_dist = dist.NegativeBinomial(logits=comp_logits, total_count=total_count)
-
                     mixture_dist = dist.MixtureSameFamily(dist.Categorical(probs=mix_probs), comp_dist)
                     return pyro.sample("obs", mixture_dist, obs=observations)
                 else:
