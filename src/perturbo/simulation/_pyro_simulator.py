@@ -1,4 +1,5 @@
 import numpy as np
+import pandas as pd
 import torch
 from mudata import AnnData, MuData
 from pyro.poutine import condition
@@ -10,7 +11,11 @@ from perturbo.models._module import PerTurboPyroModule
 
 
 def simulate_data_from_trained_model(
-    model: PERTURBO,
+    model: PERTURBO | None,
+    module: PerTurboPyroModule | None,
+    cont_covariates: torch.Tensor | np.ndarray,
+    batch_indices: torch.Tensor | np.ndarray,
+    size_factors: torch.Tensor | np.ndarray,
     guide_obs: torch.Tensor | np.ndarray,
     guide_by_element: torch.Tensor | np.ndarray,
     element_by_gene_lfc: torch.Tensor | np.ndarray,
@@ -20,6 +25,12 @@ def simulate_data_from_trained_model(
     module_init_kwargs: dict | None = None,
     gene_indices: torch.Tensor | np.ndarray = None,
     cell_indices: torch.Tensor | np.ndarray = None,
+    rna_key: str | None = None,
+    grna_key: str | None = None,
+    guide_by_element_key: str | None = None,
+    gene_by_element_key: str = "lfc",
+    rna_obs: pd.DataFrame | None = None,
+    rna_var: pd.DataFrame | None = None,
     param_values: dict | None = None,
     accelerator: str = "auto",
     device: int | str = "auto",
@@ -61,6 +72,9 @@ def simulate_data_from_trained_model(
     np.ndarray
         Simulated counts (n_cells x n_genes)
     """
+
+    assert model is not None or module is not None, "Either a trained model or module must be provided"
+
     # part 1: get parameters for simulations from module and user
     _, _, device = parse_device_args(
         accelerator=accelerator, devices=device, return_device="torch", validate_single_device=True
@@ -74,14 +88,46 @@ def simulate_data_from_trained_model(
     guide_sites_to_discard = ["element_effects", "guide_efficacy", "guide_effects", "perturbed"]
     cell_latents = ["cell_factors"]
 
-    # get data args for a subset of cells
-    if cell_indices is None:
-        if n_cells != model.module.n_cells:
-            cell_indices = np.random.randint(model.module.n_cells, size=n_cells)
-        else:
-            cell_indices = np.arange(model.module.n_cells)
+    if model is not None:
+        module = model.module
+        # get data args for a subset of cells
+        if cell_indices is None:
+            if n_cells != module.n_cells:
+                cell_indices = np.random.randint(module.n_cells, size=n_cells)
+            else:
+                cell_indices = np.arange(module.n_cells)
 
-    (idx,), kwargs = _get_data_subset(model, cell_indices)
+        (idx,), kwargs = _get_data_subset(model, cell_indices)
+    else:
+        # Default kwargs
+        kwargs = {}
+
+        if cell_indices is None:
+            cell_indices = np.arange(n_cells)
+        idx = torch.tensor(cell_indices, dtype=torch.long, device=device)
+
+        if size_factors is not None:
+            assert size_factors.shape[0] == n_cells, "Size factors must match number of cells"
+            kwargs[REGISTRY_KEYS.SIZE_FACTOR_KEY] = torch.tensor(size_factors, dtype=torch.float32, device=device)
+        else:
+            kwargs[REGISTRY_KEYS.SIZE_FACTOR_KEY] = torch.zeros(n_cells, dtype=torch.float32, device=device)
+
+        if batch_indices is not None:
+            assert batch_indices.shape[0] == n_cells, "Batch indices must match number of cells"
+            kwargs[REGISTRY_KEYS.BATCH_KEY] = torch.tensor(batch_indices, dtype=torch.long, device=device)
+            n_batches = batch_indices.max().item() + 1
+        else:
+            kwargs[REGISTRY_KEYS.BATCH_KEY] = torch.zeros(n_cells, dtype=torch.long, device=device)
+            n_batches = 1
+
+        if cont_covariates is not None:
+            assert cont_covariates.shape[0] == n_cells, "Number of cells in cont_covariates must match n_cells"
+            kwargs[REGISTRY_KEYS.CONT_COVARIATES_KEY] = torch.tensor(
+                cont_covariates, dtype=torch.float32, device=device
+            )
+            n_cont_covariates = cont_covariates.shape[1]
+        else:
+            n_cont_covariates = 0
 
     # new cell indices should just be 1 to n_samples for subsampling purposes
     args = (torch.arange(n_cells).to(device=device),)
@@ -101,24 +147,20 @@ def simulate_data_from_trained_model(
     guide_by_element = torch.tensor(guide_by_element, dtype=torch.float32, device=device)
 
     if gene_indices is None:
-        n_genes_new = model.module.n_genes
+        n_genes_new = module.n_genes
         gene_indices = slice(n_genes_new)
     else:
         gene_indices_tensor = torch.tensor(gene_indices, dtype=torch.long).to(device)
         n_genes_new = gene_indices.shape[0]
 
     # get MAP values for latents from guide then override with any user-provided values
-    latent_vars = {k: v.to(device) for k, v in model.module.guide.median().items() if k not in guide_sites_to_discard}
+    latent_vars = {k: v.to(device) for k, v in module.guide.median().items() if k not in guide_sites_to_discard}
 
     latent_vars["log_gene_mean"] += np.log(read_depth_adjust_factor)
     for param_name, param_value in latent_vars.items():
         if param_name in cell_latents:
             latent_vars[param_name] = param_value[..., idx, :]
-        elif (
-            len(param_value.shape) > 0
-            and param_value.shape[-1] == model.module.n_genes
-            and n_genes_new != model.module.n_genes
-        ):
+        elif len(param_value.shape) > 0 and param_value.shape[-1] == module.n_genes and n_genes_new != module.n_genes:
             # subset gene indices for gene-specific latents
             latent_vars[param_name] = param_value[..., gene_indices_tensor]
 
@@ -137,14 +179,12 @@ def simulate_data_from_trained_model(
         latent_vars.update(param_values)
 
     module_kwargs = {
-        "n_batches": model.module.n_batches,
-        "n_cont_covariates": model.module.n_cont_covariates - 1,  # size factor auto included
-        "n_factors": model.module.n_factors,
-        # "dispersion_effects": model.module.dispersion_effects,
-        "likelihood": model.module.likelihood,
-        "effect_prior_dist": model.module.effect_prior_dist,
-        # "use_interactions": model.module.use_interactions,
-        "efficiency_mode": model.module.efficiency_mode,
+        "n_batches": module.n_batches,
+        "n_cont_covariates": module.n_cont_covariates - 1,  # size factor auto included
+        # "n_factors": module.n_factors,
+        "likelihood": module.likelihood,
+        "effect_prior_dist": module.effect_prior_dist,
+        "efficiency_mode": module.efficiency_mode,
     }
 
     if module_init_kwargs is not None:
@@ -166,18 +206,33 @@ def simulate_data_from_trained_model(
     sampled_counts = conditioned_model(*args, **kwargs).squeeze().detach().cpu().numpy()
 
     # Create an AnnData object to return
-    data_registry = model.adata_manager.data_registry
-    rna_key = data_registry[REGISTRY_KEYS.X_KEY].mod_key
-    grna_key = data_registry[REGISTRY_KEYS.PERTURBATION_KEY].mod_key
-    guide_by_element_key = (
-        data_registry[REGISTRY_KEYS.GUIDE_BY_ELEMENT_KEY].attr_key
-        if REGISTRY_KEYS.GUIDE_BY_ELEMENT_KEY in data_registry
-        else "targeted_elements"
-    )
-    gene_by_element_key = "lfc"  # create new field with gnee_by_element info
+    if model is not None:
+        data_registry = model.adata_manager.data_registry
+        rna_key = data_registry[REGISTRY_KEYS.X_KEY].mod_key
+        grna_key = data_registry[REGISTRY_KEYS.PERTURBATION_KEY].mod_key
+        guide_by_element_key = (
+            data_registry[REGISTRY_KEYS.GUIDE_BY_ELEMENT_KEY].attr_key
+            if REGISTRY_KEYS.GUIDE_BY_ELEMENT_KEY in data_registry
+            else "targeted_elements"
+        )
+    else:
+        rna_key = "rna" if rna_key is None else rna_key
+        grna_key = "grna" if grna_key is None else grna_key
+        guide_by_element_key = "targeted_elements" if guide_by_element_key is None else guide_by_element_key
 
-    obs_new = model.adata[rna_key].obs.iloc[cell_indices, :].reset_index()
-    var_new = model.adata[rna_key].var.iloc[gene_indices, :]
+    if model is not None:
+        obs_new = model.adata[rna_key].obs.iloc[cell_indices, :].reset_index()
+        var_new = model.adata[rna_key].var.iloc[gene_indices, :]
+    else:
+        if rna_obs is not None:
+            obs_new = rna_obs.iloc[cell_indices, :].reset_index()
+        else:
+            obs_new = None
+        if rna_var is not None:
+            var_new = rna_var.iloc[gene_indices, :]
+        else:
+            var_new = None
+
     rna_adata = AnnData(
         X=sampled_counts,
         obs=obs_new,
