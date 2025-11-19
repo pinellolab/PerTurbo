@@ -2,7 +2,7 @@ name: Build & Push CUDA Image (GHCR)
 
 on:
   push:
-    branches: [ main ]
+    # branches: [ main ]
     tags: [ 'v*' ]      # build on version tags, e.g. v1.2.3
   workflow_dispatch: {}  # allow manual runs
 
