@@ -1,10 +1,16 @@
 [![Tests][badge-tests]][link-tests]
 
+
+
 # 🏎️ PerTurbo: Fast analysis of single-cell perturbation studies
 
 **PerTurbo** is a fast statistical package for analyzing perturbation phenotypes from single cell CRISPR screens.
 
-For reproducibility, see []
+> [!Caution]
+> **Under Active Development**
+> 
+> The API and behavior of this package are not yet stable.  
+> Expect breaking changes between versions.
 
 <!-- [![Documentation][badge-docs]][link-docs] -->
 
