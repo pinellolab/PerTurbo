@@ -163,22 +163,7 @@ class PerTurboPyroModule(PyroBaseModuleClass):
         # if control_pcs is not None and n_factors is not None:
         #     init_values["cell_loadings"] = control_pcs
 
-        self._guide = AutoGuideList(self.model, create_plates=self.create_plates)
-
-        self._guide.append(
-            AutoNormal(
-                poutine.block(self.model, hide=self.delta_sites + self.discrete_sites),
-                init_loc_fn=lambda x: init_to_median(x, num_samples=100),
-            ),
-        )
-
-        if self.delta_sites:
-            self._guide.append(
-                AutoDelta(
-                    poutine.block(self.model, expose=self.delta_sites),
-                    init_loc_fn=lambda x: init_to_median(x, num_samples=100),
-                )
-            )
+        self._guide = self._guide_factory(self.model)
 
         ## register hyperparameters as buffers so they get automatically moved to GPU by scvi-tools
 
@@ -253,6 +238,25 @@ class PerTurboPyroModule(PyroBaseModuleClass):
                 assert isinstance(v, torch.Tensor) and k in buffer_keys
                 assert v.shape == self.get_buffer(k).shape
                 self.register_buffer(k, v)
+
+    def _guide_factory(self, model):
+        guide = AutoGuideList(model, create_plates=self.create_plates)
+
+        guide.append(
+            AutoNormal(
+                poutine.block(model, hide=self.delta_sites + self.discrete_sites),
+                init_loc_fn=lambda x: init_to_median(x, num_samples=100),
+            ),
+        )
+
+        if self.delta_sites:
+            guide.append(
+                AutoDelta(
+                    poutine.block(model, expose=self.delta_sites),
+                    init_loc_fn=lambda x: init_to_median(x, num_samples=100),
+                )
+            )
+        return guide
 
     @staticmethod
     def _get_fn_args_from_batch(tensor_dict: dict) -> tuple[tuple[torch.Tensor], dict]:

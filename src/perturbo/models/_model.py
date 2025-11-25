@@ -2,27 +2,25 @@ import logging
 
 import numpy as np
 import pandas as pd
+import pyro.optim as optim
 import scipy.sparse as sp
 import torch
 from mudata import AnnData, MuData
 from pandas import DataFrame
 from pyro import poutine
-from pyro.infer import TraceEnum_ELBO, infer_discrete
+from pyro.infer import SVI, Trace_ELBO, TraceEnum_ELBO, infer_discrete
 from scipy.sparse import issparse
 from scipy.stats import chi2
 from scvi._types import AnnOrMuData
 from scvi.data import AnnDataManager, fields
 from scvi.dataloaders import AnnDataLoader, DataSplitter, DeviceBackedDataSplitter
-from scvi.model.base import (
-    BaseModelClass,
-    PyroJitGuideWarmup,
-    PyroSampleMixin,
-    PyroSviTrainMixin,
-)
+from scvi.model._utils import parse_device_args
+from scvi.model.base import ArchesMixin, BaseModelClass, PyroJitGuideWarmup, PyroSampleMixin, PyroSviTrainMixin
 from scvi.train import PyroTrainingPlan
 from scvi.utils._docstrings import devices_dsp
 from sklearn.isotonic import IsotonicRegression
 from sklearn.linear_model import LinearRegression
+from tqdm.auto import trange
 
 from ._constants import REGISTRY_KEYS
 from ._module import PerTurboPyroModule
@@ -30,7 +28,7 @@ from ._module import PerTurboPyroModule
 logger = logging.getLogger(__name__)
 
 
-class PERTURBO(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
+class PERTURBO(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass, ArchesMixin):
     def __init__(
         self,
         mdata: AnnOrMuData,
@@ -166,10 +164,13 @@ class PERTURBO(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
     @classmethod
     def setup_anndata(
         cls,
-        adata: AnnData,
+        adata: AnnOrMuData,
         **kwargs,
     ):
-        raise NotImplementedError("MuData input required, use setup_mudata.")
+        if isinstance(adata, AnnData):
+            raise NotImplementedError("MuData input required, use setup_mudata.")
+        else:
+            cls.setup_mudata(adata, **kwargs)
 
     @classmethod
     def setup_mudata(
@@ -363,6 +364,90 @@ class PERTURBO(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
         )
         adata_manager.register_fields(mdata, **kwargs)
         cls.register_manager(adata_manager)
+
+    def pretrain(
+        self,
+        indices,
+        max_epochs: int = 100,
+        accelerator: str = "cpu",
+        device: int | str = "auto",
+        batch_size: int = 1024,
+        # early_stopping: bool = False,
+        lr: float | None = 0.01,
+    ):
+        """
+        Pretrain the model on a subset of the data.
+
+        Parameters
+        ----------
+        indices : array-like
+            Indices of the subset of data to use for pretraining.
+        max_epochs : int
+            Number of passes through the dataset.
+        accelerator : str
+            Accelerator type ("cpu", "gpu", etc.).
+        device : int or str
+            Device identifier.
+        batch_size : int
+            Minibatch size to use during training.
+        early_stopping : bool
+            Perform early stopping.
+        lr : float or None
+            Optimizer learning rate.
+        """
+        _, _, device = parse_device_args(accelerator, device, return_device="torch", validate_single_device=True)
+        loader = AnnDataLoader(
+            adata_manager=self.adata_manager,
+            indices=indices,
+            batch_size=min(batch_size, len(indices)),
+            data_and_attributes=self.data_and_attrs,
+        )
+
+        if self.module.local_effects and self.module.sparse_tensors:
+            zero_element_effects = torch.zeros((self.module.n_element_effects), dtype=torch.float32, device=device)
+        else:
+            zero_element_effects = torch.zeros(
+                (self.module.n_elements, self.module.n_genes), dtype=torch.float32, device=device
+            )
+        pretrain_model = poutine.condition(
+            self.module.model,
+            data={"element_effects": zero_element_effects}
+            if self.module.local_effects and self.module.sparse_tensors
+            else {},
+        )
+        pretrain_guide = self.module._guide_factory(poutine.block(pretrain_model, hide=["element_effects"]))
+
+        svi = SVI(pretrain_model, pretrain_guide, optim.Adam({"lr": lr}), loss=Trace_ELBO(max_plate_nesting=2))
+        losses = []
+
+        t = trange(max_epochs, desc="SVI epochs", leave=True)
+        if len(loader) == 1:
+            batch = next(iter(loader))
+            args, kwargs = self.module._get_fn_args_from_batch(batch)
+            args = tuple(a.to(device) if isinstance(a, torch.Tensor) else a for a in args)
+            for k, v in kwargs.items():
+                if isinstance(v, torch.Tensor):
+                    kwargs[k] = v.to(device)
+
+            for _ in t:
+                loss = svi.step(*args, **kwargs)
+                losses.append(loss)
+                t.set_postfix(loss=loss)
+
+        else:
+            for _ in t:
+                batch_losses = []
+                for batch in loader:
+                    args, kwargs = self.module._get_fn_args_from_batch(batch)
+                    args = tuple(a.to(device) if isinstance(a, torch.Tensor) else a for a in args)
+                    for k, v in kwargs.items():
+                        if isinstance(v, torch.Tensor):
+                            kwargs[k] = v.to(device)
+                    loss = svi.step(*args, **kwargs)
+                    batch_losses.append(loss)
+                t.set_postfix(loss=np.mean(batch_losses))
+                losses.append(np.mean(batch_losses))
+        return losses
 
     @devices_dsp.dedent
     def train(
