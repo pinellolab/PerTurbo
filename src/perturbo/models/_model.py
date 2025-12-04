@@ -9,13 +9,13 @@ from mudata import AnnData, MuData
 from pandas import DataFrame
 from pyro import poutine
 from pyro.infer import SVI, Trace_ELBO, TraceEnum_ELBO, infer_discrete
-from scipy.sparse import issparse
+from scipy.sparse import coo_matrix, issparse
 from scipy.stats import chi2
 from scvi._types import AnnOrMuData
 from scvi.data import AnnDataManager, fields
 from scvi.dataloaders import AnnDataLoader, DataSplitter, DeviceBackedDataSplitter
 from scvi.model._utils import parse_device_args
-from scvi.model.base import ArchesMixin, BaseModelClass, PyroJitGuideWarmup, PyroSampleMixin, PyroSviTrainMixin
+from scvi.model.base import BaseModelClass, PyroJitGuideWarmup, PyroSampleMixin, PyroSviTrainMixin
 from scvi.train import PyroTrainingPlan
 from scvi.utils._docstrings import devices_dsp
 from sklearn.isotonic import IsotonicRegression
@@ -28,7 +28,7 @@ from ._module import PerTurboPyroModule
 logger = logging.getLogger(__name__)
 
 
-class PERTURBO(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass, ArchesMixin):
+class PERTURBO(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
     def __init__(
         self,
         mdata: AnnOrMuData,
@@ -94,6 +94,7 @@ class PERTURBO(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass, ArchesMixin):
             else:
                 control_guide_idx = grna_counts[:, control_guides].sum(axis=1) > 0
             X = X[control_guide_idx, :]
+        self.control_guides = control_guides
 
         n_cells_for_init = X.shape[0]
         if n_cells_for_init == 0:
@@ -367,8 +368,9 @@ class PERTURBO(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass, ArchesMixin):
 
     def pretrain(
         self,
-        indices,
         max_epochs: int = 100,
+        indices: list[int] | list[bool] | None = None,
+        num_particles: int = 1,
         accelerator: str = "cpu",
         device: int | str = "auto",
         batch_size: int = 1024,
@@ -396,6 +398,7 @@ class PERTURBO(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass, ArchesMixin):
             Optimizer learning rate.
         """
         _, _, device = parse_device_args(accelerator, device, return_device="torch", validate_single_device=True)
+
         loader = AnnDataLoader(
             adata_manager=self.adata_manager,
             indices=indices,
@@ -405,19 +408,38 @@ class PERTURBO(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass, ArchesMixin):
 
         if self.module.local_effects and self.module.sparse_tensors:
             zero_element_effects = torch.zeros((self.module.n_element_effects), dtype=torch.float32, device=device)
+            zero_guide_efficacy = torch.zeros((self.module.n_guide_effects), dtype=torch.float32, device=device)
         else:
             zero_element_effects = torch.zeros(
                 (self.module.n_elements, self.module.n_genes), dtype=torch.float32, device=device
             )
+            zero_guide_efficacy = torch.full(
+                (self.module.n_perturbations, self.module.n_genes), fill_value=0.5, dtype=torch.float32, device=device
+            )
+
+        self.module.to(device)
         pretrain_model = poutine.condition(
             self.module.model,
-            data={"element_effects": zero_element_effects}
-            if self.module.local_effects and self.module.sparse_tensors
-            else {},
+            data={
+                "element_effects": zero_element_effects,
+                "guide_efficacy": zero_guide_efficacy,
+            },
         )
-        pretrain_guide = self.module._guide_factory(poutine.block(pretrain_model, hide=["element_effects"]))
+        pretrain_guide = self.module._guide_factory(
+            poutine.block(self.module.model, hide=["element_effects", "guide_efficacy"]),
+            init_values={
+                "log_gene_mean": self.module.log_gene_mean_init.to(device),
+                "log_gene_dispersion": self.module.log_gene_dispersion_init.to(device),
+            },
+        )
 
-        svi = SVI(pretrain_model, pretrain_guide, optim.Adam({"lr": lr}), loss=Trace_ELBO(max_plate_nesting=2))
+        pretrain_guide.to(device)
+        svi = SVI(
+            pretrain_model,
+            pretrain_guide,
+            optim.Adam({"lr": lr}),
+            loss=Trace_ELBO(max_plate_nesting=3, num_particles=num_particles),
+        )
         losses = []
 
         t = trange(max_epochs, desc="SVI epochs", leave=True)
@@ -557,6 +579,7 @@ class PERTURBO(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass, ArchesMixin):
             devices=device,
             **trainer_kwargs,
         )
+
         return runner()
 
     def get_element_names(self) -> list:
@@ -574,7 +597,44 @@ class PERTURBO(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass, ArchesMixin):
             element_ids = self.adata_manager.get_state_registry(REGISTRY_KEYS.PERTURBATION_KEY).column_names
         return element_ids
 
-    def get_element_effects(self) -> pd.DataFrame:
+    def get_z_values(self) -> pd.DataFrame:
+        """
+        Return a DataFrame summary of the effects for targeted elements on each gene.
+
+        Returns
+        -------
+        pd.DataFrame
+            DataFrame with columns for effect location, scale, element, gene, z-value, and q-value.
+        """
+        element_ids = self.get_element_names()
+        gene_ids = self.adata_manager.get_state_registry("X").column_names
+
+        # Check if all element effects are factorized and raise an error if so
+        if "element_effects" not in self.module.guide.median():
+            raise NotImplementedError(
+                "All element effects are factorized. Use 'get_factorized_element_effects' instead."
+            )
+        else:
+            for guide in self.module.guide:
+                if "element_effects" in guide.median():
+                    loc_values, scale_values = guide._get_loc_and_scale("element_effects")
+                    z_values = loc_values / scale_values
+
+            # loc_values, scale_values = self.module.guide._get_loc_and_scale("element_effects")
+
+            if hasattr(self.module, "element_by_gene_idx"):
+                # loc/scale_values are the nonzero elements of a sparse matrix of elements by genes
+                i, j = self.module.element_by_gene_idx.detach().cpu().numpy().astype(int)
+                z_values_coo = coo_matrix(
+                    (z_values.detach().cpu().numpy(), (i, j)),
+                    shape=(len(element_ids), len(gene_ids)),
+                )
+                z_values_matrix = z_values_coo.to_csr()
+            else:
+                z_values_matrix = z_values.detach().cpu().numpy()
+        return pd.DataFrame(z_values_matrix, index=element_ids, columns=gene_ids)
+
+    def get_element_effects(self, return_long=True) -> pd.DataFrame:
         """
         Return a DataFrame summary of the effects for targeted elements on each gene.
 
