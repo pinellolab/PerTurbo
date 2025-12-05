@@ -43,3 +43,4 @@ docs/notebooks/*.pt
 /.hatch/
 
 src/perturbo/simulation/.ipynb_checkpoints/
+lightning_logs/

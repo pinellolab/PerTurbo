@@ -442,7 +442,6 @@ class PERTURBO(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
         )
         losses = []
 
-        t = trange(max_epochs, desc="SVI epochs", leave=True)
         if len(loader) == 1:
             batch = next(iter(loader))
             args, kwargs = self.module._get_fn_args_from_batch(batch)
@@ -451,12 +450,14 @@ class PERTURBO(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
                 if isinstance(v, torch.Tensor):
                     kwargs[k] = v.to(device)
 
+            t = trange(max_epochs, desc="SVI epochs", leave=True)
             for _ in t:
                 loss = svi.step(*args, **kwargs)
                 losses.append(loss)
                 t.set_postfix(loss=loss)
 
         else:
+            t = trange(max_epochs, desc="SVI epochs", leave=True)
             for _ in t:
                 batch_losses = []
                 for batch in loader:
@@ -482,6 +483,9 @@ class PERTURBO(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
         shuffle_set_split: bool = False,
         batch_size: int = 1024,
         early_stopping: bool = False,
+        pretrain: bool = False,
+        pretrain_kwargs=None,
+        pretrain_max_epochs: int | None = None,
         lr: float | None = 0.005,
         load_sparse_tensor: bool = "auto",
         training_plan: PyroTrainingPlan = PyroTrainingPlan,
@@ -529,6 +533,23 @@ class PERTURBO(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
         Any
             The result of the training runner.
         """
+        if pretrain:
+            if self.control_guides is None:
+                raise ValueError("Pretraining requires control_guides to be set during model initialization.")
+            control_indices = (
+                self.adata_manager.get_from_registry(REGISTRY_KEYS.PERTURBATION_KEY)[:, self.control_guides].sum(axis=1)
+                > 0
+            )
+            self.pretrain(
+                max_epochs=max_epochs if pretrain_max_epochs is None else pretrain_max_epochs,
+                indices=control_indices,
+                accelerator=accelerator,
+                device=device,
+                batch_size=batch_size,
+                lr=lr,
+                **(pretrain_kwargs if pretrain_kwargs is not None else {}),
+            )
+
         plan_kwargs = plan_kwargs if plan_kwargs is not None else {}
         if len(self.module.discrete_sites) > 0:
             plan_kwargs.update({"loss_fn": TraceEnum_ELBO(max_plate_nesting=3)})
