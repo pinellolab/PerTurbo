@@ -86,6 +86,7 @@ def empirical_pvals_from_null(
     real_z,
     two_sided: bool = True,
     bias_correction: bool = True,
+    winsor: float | None = None,
 ):
     """
     Compute empirical p-values from a pooled null of z-like statistics.
@@ -106,6 +107,8 @@ def empirical_pvals_from_null(
     pvals : pandas.Series or np.ndarray
         Empirical p-values aligned to real_z (Series preserves index).
     """
+    if winsor is not None:
+        raise NotImplementedError("winsorization not implemented for this function.")
     # Convert & clean
     null = pd.Series(null_z).astype(float).replace([np.inf, -np.inf], np.nan).dropna().values
     if null.size == 0:
@@ -151,17 +154,55 @@ def empirical_pvals_from_null(
     return p
 
 
+def compute_quantiles(adata, counts_col=None, gene_name_col="gene", n_quantiles=10):
+    if counts_col is None:
+        print("computing mean counts for quantile assignment and outputting to 'mean_expression' column")
+        mean_counts = adata.X.sum(axis=0) / adata.n_obs
+        if isinstance(mean_counts, np.matrix):
+            mean_counts = np.asarray(mean_counts).squeeze()
+        adata.var["mean_expression"] = mean_counts
+        counts_col = "mean_expression"
+
+    gene_df = adata.var.reset_index(names=[gene_name_col])
+    gene_df["mean_quantile"] = pd.qcut(gene_df[counts_col], n_quantiles, labels=False) + 1
+    decile_df = gene_df[[gene_name_col, "mean_quantile"]]
+    return decile_df
+
+
 def compute_empirical_pvals(
     data_real,
     data_shuffled,
     value_col="z_value",
+    adata=None,
+    adata_count_col=None,
     pval_adj_method=None,
     group_col=None,
     two_sided=True,
     bias_correction=True,
+    winsor: float | None = None,
+    method="default",
+    n_quantiles=None,
 ):
+    if method == "default":
+        pval_func = empirical_pvals_from_null
+    elif method == "tnull_fixed0":
+        pval_func = empirical_pvals_from_tnull_fixed0
+    else:
+        raise ValueError(f"Unknown method: {method}")
+
+    if n_quantiles is not None:
+        assert adata is not None, "adata must be provided when n_quantiles is specified."
+        expression_quantiles = compute_quantiles(
+            adata=adata,
+            counts_col=None,
+            n_quantiles=n_quantiles,
+        )
+        data_real = data_real.merge(expression_quantiles, left_on="gene", right_on="gene", how="left")
+        data_shuffled = data_shuffled.merge(expression_quantiles, left_on="gene", right_on="gene", how="left")
+        group_col = "mean_quantile"
+
     if group_col is None:
-        pvals = empirical_pvals_from_null(
+        pvals = pval_func(
             null_z=data_shuffled[value_col].values,
             real_z=data_real[value_col].values,
             two_sided=two_sided,
