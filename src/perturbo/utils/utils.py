@@ -108,8 +108,6 @@ def empirical_pvals_from_null(
     pvals : pandas.Series or np.ndarray
         Empirical p-values aligned to real_z (Series preserves index).
     """
-    if winsor is not None:
-        raise NotImplementedError("winsorization not implemented for this function.")
     # Convert & clean
     null = pd.Series(null_z).astype(float).replace([np.inf, -np.inf], np.nan).dropna().values
     if null.size == 0:
