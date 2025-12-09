@@ -9,6 +9,7 @@ def empirical_pvals_from_tnull_fixed0(
     two_sided: bool = True,
     winsor: float | None = None,
     return_params: bool = False,
+    **kwargs,
 ):
     """
     Fit a Student-t(df, scale) with location fixed at 0 to null z-values,
@@ -86,7 +87,7 @@ def empirical_pvals_from_null(
     real_z,
     two_sided: bool = True,
     bias_correction: bool = True,
-    winsor: float | None = None,
+    **kwargs,
 ):
     """
     Compute empirical p-values from a pooled null of z-like statistics.
@@ -207,6 +208,7 @@ def compute_empirical_pvals(
             real_z=data_real[value_col].values,
             two_sided=two_sided,
             bias_correction=bias_correction,
+            winsor=winsor,
         )
         if pval_adj_method is not None:
             rej, pval_adj, _, _ = multipletests(pvals, alpha=0.05, method=pval_adj_method)
@@ -215,11 +217,12 @@ def compute_empirical_pvals(
             return pvals
     else:
         pvals = data_real.groupby(group_col)[value_col].transform(
-            lambda x: empirical_pvals_from_null(
+            lambda x: pval_func(
                 null_z=data_shuffled.query(f"{group_col} == @x.name")[value_col],
                 real_z=x,
                 two_sided=two_sided,
                 bias_correction=bias_correction,
+                winsor=winsor,
             )
         )
         if pval_adj_method is not None:
