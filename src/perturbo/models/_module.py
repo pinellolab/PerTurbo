@@ -261,7 +261,7 @@ class PerTurboPyroModule(PyroBaseModuleClass):
                 assert v.shape == self.get_buffer(k).shape
                 self.register_buffer(k, v)
 
-    def _guide_factory(self, model, init_values=None, init_scale=0.1):
+    def _guide_factory(self, model, init_values=None, init_scale=0.05):
         guide = AutoGuideList(model, create_plates=self.create_plates)
         if init_values is None:
             init_values = {}
