@@ -32,10 +32,11 @@ class PerTurboPyroModule(PyroBaseModuleClass):
         n_batches: int | None = 1,
         log_gene_mean_init: torch.Tensor | None = None,
         log_gene_dispersion_init: torch.Tensor | None = None,
+        lfc_init: torch.Tensor | None = None,
         guide_by_element: torch.Tensor | None = None,
         gene_by_element: torch.Tensor | None = None,
         likelihood: Literal["nb", "lnnb"] = "nb",
-        effect_prior_dist: Literal["cauchy", "normal_mixture", "normal", "laplace"] = "laplace",
+        effect_prior_dist: Literal["cauchy", "normal_mixture", "normal", "laplace"] = "cauchy",
         n_factors: int | None = None,
         n_pert_factors: int | None = None,
         efficiency_mode: Literal["mixture", "scaled", "mixture_high_moi"] | None = "scaled",
@@ -152,6 +153,7 @@ class PerTurboPyroModule(PyroBaseModuleClass):
 
         # Sites to approximate with Delta distribution instead of default Normal distribution.
         self.delta_sites = []
+        # self.delta_sites = ["log_gene_mean", "log_gene_dispersion", "multiplicative_noise"]
         # self.delta_sites = ["cell_factors"]
         # self.delta_sites = ["cell_factors", "cell_loadings", "pert_factors", "pert_loadings"]
 
@@ -162,11 +164,6 @@ class PerTurboPyroModule(PyroBaseModuleClass):
         if log_gene_dispersion_init is None:
             log_gene_dispersion_init = torch.ones(self.n_genes)
         self.log_gene_dispersion_init = log_gene_dispersion_init
-
-        # if control_pcs is not None and n_factors is not None:
-        #     init_values["cell_loadings"] = control_pcs
-
-        self._guide = self._guide_factory(self.model)
 
         ## register hyperparameters as buffers so they get automatically moved to GPU by scvi-tools
 
@@ -234,8 +231,27 @@ class PerTurboPyroModule(PyroBaseModuleClass):
         self.register_buffer("pert_factor_prior_scale", torch.tensor(0.1))
         self.register_buffer("pert_loading_prior_scale", torch.tensor(1.0))
 
-        # for LogNormalNegativeBinomial likelihood hyperparams
-        # self.register_buffer("noise_prior_rate", torch.tensor(2.0))
+        # create guide with initial values
+        if lfc_init is None:
+            lfc_init = torch.zeros((self.n_elements, self.n_genes))
+
+        if self.local_effects and self.sparse_tensors:
+            if lfc_init.shape == (self.n_elements, self.n_genes):
+                lfc_init = lfc_init[self.element_by_gene_idx[0], self.element_by_gene_idx[1]]
+            assert lfc_init.shape != (self.n_element_effects,), (
+                f"lfc_init shape: {lfc_init.shape}, expected ({self.n_element_effects},)"
+            )
+        self.lfc_init = lfc_init
+
+        # self._guide = self._guide_factory(self.model)
+        # self._guide = self._guide_factory(
+        #     self.model,
+        #     init_values={
+        #         "log_gene_mean": self.log_gene_mean_init,
+        #         "log_gene_dispersion": self.log_gene_dispersion_init,
+        #         "element_effects": self.lfc_init,
+        #     },
+        # )
 
         # override with user-provided values from prior_param_dict
         if prior_param_dict is not None:
@@ -245,21 +261,22 @@ class PerTurboPyroModule(PyroBaseModuleClass):
                 assert v.shape == self.get_buffer(k).shape
                 self.register_buffer(k, v)
 
-    def _guide_factory(self, model, init_values=None):
+    def _guide_factory(self, model, init_values=None, init_scale=0.1):
         guide = AutoGuideList(model, create_plates=self.create_plates)
         if init_values is None:
             init_values = {}
-        # if init_values is None:
-        #     init_values = {
-        #         "log_gene_mean": self.log_gene_mean_init,
-        #         "log_gene_dispersion": self.log_gene_dispersion_init,
-        #     }
+            # init_values = {
+            #     "log_gene_mean": self.log_gene_mean_init,
+            #     "log_gene_dispersion": self.log_gene_dispersion_init,
+            #     "element_effects": self.lfc_init,
+            # }
         init_loc_fn = functools.partial(init_to_value, values=init_values, fallback=init_to_median(num_samples=100))
 
         guide.append(
             AutoNormal(
                 poutine.block(model, hide=self.delta_sites + self.discrete_sites),
                 init_loc_fn=init_loc_fn,
+                init_scale=init_scale,
             ),
         )
 
