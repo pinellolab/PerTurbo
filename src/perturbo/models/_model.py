@@ -1,5 +1,6 @@
 import logging
 
+import numba as nb
 import numpy as np
 import pandas as pd
 import pyro.optim as optim
@@ -9,7 +10,7 @@ from mudata import AnnData, MuData
 from pandas import DataFrame
 from pyro import poutine
 from pyro.infer import SVI, Trace_ELBO, TraceEnum_ELBO, infer_discrete
-from scipy.sparse import coo_matrix, issparse
+from scipy.sparse import coo_matrix, csc_matrix, issparse
 from scipy.stats import chi2
 from scvi._types import AnnOrMuData
 from scvi.data import AnnDataManager, fields
@@ -64,14 +65,6 @@ def compute_element_lfc_initialization(
         Log fold-change matrix (n_elements x n_genes). Entry [i, j] is the LFC
         of element i on gene j.
     """
-    # Convert inputs to numpy arrays if needed
-    if isinstance(guide_by_element, torch.Tensor):
-        guide_by_element = guide_by_element.detach().cpu().numpy()
-    if isinstance(guide_obs, sp.spmatrix):
-        guide_obs = guide_obs.toarray()
-    if isinstance(X, sp.spmatrix):
-        X = X.toarray()
-
     n_guides, n_elements = guide_by_element.shape
     n_genes = X.shape[1]
 
@@ -92,21 +85,19 @@ def compute_element_lfc_initialization(
     # guide_obs: (n_cells x n_guides)
     # guide_by_element: (n_guides x n_elements)
     # cells_by_element: (n_cells x n_elements) = guide_obs @ guide_by_element
-    cells_by_element = guide_obs @ guide_by_element  # (n_cells x n_elements)
-    cells_by_element = cells_by_element > 0  # Convert to boolean
+    if isinstance(guide_by_element, torch.Tensor):
+        guide_by_element = guide_by_element.cpu().numpy()
 
-    # Compute mean expression for each element
-    element_means = np.zeros((n_elements, n_genes), dtype=np.float32)
-    for elem_idx in range(n_elements):
-        elem_cell_mask = cells_by_element[:, elem_idx]
-        if elem_cell_mask.sum() > 0:
-            element_means[elem_idx, :] = X[elem_cell_mask, :].mean(axis=0)
-        else:
-            element_means[elem_idx, :] = 0.0
+    guide_obs = csc_matrix(guide_obs)
+    lfc = np.zeros((n_elements, n_genes), dtype=np.float32)
 
-    # Compute log fold-change with pseudocount
-    lfc = np.log((element_means + pseudocount) / (control_mean[np.newaxis, :] + pseudocount))
-
+    print("Computing element log fold-change initializations...")
+    for elem_idx in trange(n_elements):
+        element_guides = guide_by_element[:, elem_idx] != 0
+        guide_idx = guide_obs[:, element_guides].sum(axis=1).A1 != 0
+        if guide_idx.any():
+            element_mean = X[guide_idx, :].mean(axis=0)
+            lfc[elem_idx, :] = np.log((element_mean + pseudocount) / (control_mean + pseudocount))
     return lfc
 
 
