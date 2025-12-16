@@ -152,8 +152,8 @@ class PerTurboPyroModule(PyroBaseModuleClass):
         self.n_batches = n_batches
 
         # Sites to approximate with Delta distribution instead of default Normal distribution.
-        self.delta_sites = []
-        # self.delta_sites = ["log_gene_mean", "log_gene_dispersion", "multiplicative_noise"]
+        # self.delta_sites = []
+        self.delta_sites = ["log_gene_mean", "log_gene_dispersion", "multiplicative_noise"]
         # self.delta_sites = ["cell_factors"]
         # self.delta_sites = ["cell_factors", "cell_loadings", "pert_factors", "pert_loadings"]
 
@@ -196,10 +196,10 @@ class PerTurboPyroModule(PyroBaseModuleClass):
         self.register_buffer("gene_mean_prior_loc", torch.tensor(0.0))
         self.register_buffer("gene_disp_prior_loc", torch.tensor(1.0))
 
-        self.register_buffer("gene_mean_prior_scale", torch.tensor(2.0))
+        self.register_buffer("gene_mean_prior_scale", torch.tensor(3.0))
         self.register_buffer("gene_disp_prior_scale", torch.tensor(1.0))
 
-        self.register_buffer("noise_prior_loc", torch.tensor(-2.0))
+        self.register_buffer("noise_prior_loc", torch.tensor(-1.0))
         self.register_buffer("noise_prior_scale", torch.tensor(0.5))
 
         # batch/covariate hyperparams
@@ -216,7 +216,7 @@ class PerTurboPyroModule(PyroBaseModuleClass):
         ##  element effect size hyperparams
 
         # Normal/Laplace/Cauchy prior
-        effect_prior_scales = {"cauchy": 0.2, "laplace": 0.5, "normal": 1.0}
+        effect_prior_scales = {"cauchy": 0.1, "laplace": 0.5, "normal": 1.0}
         model_effect_prior_scale = effect_prior_scales[effect_prior_dist]
         self.register_buffer("element_effects_prior_scale", torch.tensor(model_effect_prior_scale))
         self.register_buffer("guide_effects_prior_scale", torch.tensor(model_effect_prior_scale))

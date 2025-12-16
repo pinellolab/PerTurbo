@@ -1,6 +1,105 @@
 import numpy as np
 import pandas as pd
+import anndata as ad
 from statsmodels.stats.multitest import multipletests
+from typing import Literal
+
+def compute_empirical_pvals(
+    data_real: pd.DataFrame,
+    data_shuffled: pd.DataFrame,
+    value_col: str ="z_value",
+    adata: ad.AnnData | None = None,
+    adata_count_col: str | None = None,
+    pval_adj_method: str | None = None,
+    group_col: str | None = None,
+    two_sided: bool = True,
+    bias_correction: bool = True,
+    winsor: float | None = None,
+    method: Literal["default", "tnull_fixed0"] = "default",
+    n_quantiles: int | None = None,
+):
+    """
+    Compute empirical p-values for real data based on null distribution from shuffled data.
+
+    Parameters
+    ----------
+    data_real : pd.DataFrame
+        DataFrame containing real test statistics.
+    data_shuffled : pd.DataFrame
+        DataFrame containing null test statistics.
+    value_col : str, default "z_value"
+        Column name for test statistics in both DataFrames.
+    adata : AnnData, optional
+        AnnData object for computing expression quantiles if n_quantiles is specified.
+    adata_count_col : str, optional
+        Column in adata.var to use for quantile computation.
+    pval_adj_method : str or None, optional
+        Method for multiple testing correction (e.g., 'fdr_bh'). If None,
+        no adjustment is performed.
+    group_col : str or None, optional
+        Column name to group by when computing p-values. If None, compute
+        p-values globally.
+    two_sided : bool, default True
+        If True, compute two-sided p-values; otherwise one-sided.
+    bias_correction : bool, default True
+        If True, apply bias correction in empirical p-value calculation.
+    winsor : float in (0,0.5) or None, optional
+        If specified, winsorize null statistics at these quantiles before fitting.
+    method : str, default "default"
+        Method for p-value computation. Options are "default" or "tnull_fixed0".
+    n_quantiles : int or None, optional
+        If specified, compute expression quantiles and use them as group_col.
+    """
+
+    if method == "default":
+        pval_func = empirical_pvals_from_null
+    elif method == "tnull_fixed0":
+        pval_func = empirical_pvals_from_tnull_fixed0
+    else:
+        raise ValueError(f"Unknown method: {method}")
+
+    if n_quantiles is not None:
+        assert adata is not None, "adata must be provided when n_quantiles is specified."
+        expression_quantiles = compute_quantiles(
+            adata=adata,
+            counts_col=None,
+            n_quantiles=n_quantiles,
+        )
+        data_real = data_real.merge(expression_quantiles, left_on="gene", right_on="gene", how="left")
+        data_shuffled = data_shuffled.merge(expression_quantiles, left_on="gene", right_on="gene", how="left")
+        group_col = "mean_quantile"
+
+    if group_col is None:
+        pvals = pval_func(
+            null_z=data_shuffled[value_col].values,
+            real_z=data_real[value_col].values,
+            two_sided=two_sided,
+            bias_correction=bias_correction,
+            winsor=winsor,
+        )
+        if pval_adj_method is not None:
+            rej, pval_adj, _, _ = multipletests(pvals, alpha=0.05, method=pval_adj_method)
+            return pval_adj
+        else:
+            return pvals
+    else:
+        pvals = data_real.groupby(group_col)[value_col].transform(
+            lambda x: pval_func(
+                null_z=data_shuffled.query(f"{group_col} == @x.name")[value_col],
+                real_z=x,
+                two_sided=two_sided,
+                bias_correction=bias_correction,
+                winsor=winsor,
+            )
+        )
+        if pval_adj_method is not None:
+            pval_df = data_real[[group_col]].assign(pval=pvals)
+            pval_adj = pval_df.groupby(group_col)["pval"].transform(
+                lambda x: multipletests(x, alpha=0.05, method=pval_adj_method)[1]
+            )
+            return pval_adj
+        else:
+            return pvals
 
 
 def empirical_pvals_from_tnull_fixed0(
@@ -168,66 +267,3 @@ def compute_quantiles(adata, counts_col=None, gene_name_col="gene", n_quantiles=
     return decile_df
 
 
-def compute_empirical_pvals(
-    data_real,
-    data_shuffled,
-    value_col="z_value",
-    adata=None,
-    adata_count_col=None,
-    pval_adj_method=None,
-    group_col=None,
-    two_sided=True,
-    bias_correction=True,
-    winsor: float | None = None,
-    method="default",
-    n_quantiles=None,
-):
-    if method == "default":
-        pval_func = empirical_pvals_from_null
-    elif method == "tnull_fixed0":
-        pval_func = empirical_pvals_from_tnull_fixed0
-    else:
-        raise ValueError(f"Unknown method: {method}")
-
-    if n_quantiles is not None:
-        assert adata is not None, "adata must be provided when n_quantiles is specified."
-        expression_quantiles = compute_quantiles(
-            adata=adata,
-            counts_col=None,
-            n_quantiles=n_quantiles,
-        )
-        data_real = data_real.merge(expression_quantiles, left_on="gene", right_on="gene", how="left")
-        data_shuffled = data_shuffled.merge(expression_quantiles, left_on="gene", right_on="gene", how="left")
-        group_col = "mean_quantile"
-
-    if group_col is None:
-        pvals = pval_func(
-            null_z=data_shuffled[value_col].values,
-            real_z=data_real[value_col].values,
-            two_sided=two_sided,
-            bias_correction=bias_correction,
-            winsor=winsor,
-        )
-        if pval_adj_method is not None:
-            rej, pval_adj, _, _ = multipletests(pvals, alpha=0.05, method=pval_adj_method)
-            return pval_adj
-        else:
-            return pvals
-    else:
-        pvals = data_real.groupby(group_col)[value_col].transform(
-            lambda x: pval_func(
-                null_z=data_shuffled.query(f"{group_col} == @x.name")[value_col],
-                real_z=x,
-                two_sided=two_sided,
-                bias_correction=bias_correction,
-                winsor=winsor,
-            )
-        )
-        if pval_adj_method is not None:
-            pval_df = data_real[[group_col]].assign(pval=pvals)
-            pval_adj = pval_df.groupby(group_col)["pval"].transform(
-                lambda x: multipletests(x, alpha=0.05, method=pval_adj_method)[1]
-            )
-            return pval_adj
-        else:
-            return pvals
