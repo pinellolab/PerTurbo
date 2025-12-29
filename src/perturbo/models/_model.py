@@ -10,7 +10,7 @@ from mudata import AnnData, MuData
 from pandas import DataFrame
 from pyro import poutine
 from pyro.infer import SVI, Trace_ELBO, TraceEnum_ELBO, infer_discrete
-from scipy.sparse import coo_matrix, csc_matrix, issparse
+from scipy.sparse import coo_matrix, csc_matrix, csr_matrix, issparse
 from scipy.stats import chi2
 from scvi._types import AnnOrMuData
 from scvi.data import AnnDataManager, fields
@@ -152,6 +152,9 @@ class PERTURBO(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
         if REGISTRY_KEYS.GUIDE_BY_ELEMENT_KEY in self.adata_manager.data_registry:
             n_elements = self.summary_stats.n_targeted_elements
             guide_by_element = self.read_matrix_from_registry(REGISTRY_KEYS.GUIDE_BY_ELEMENT_KEY)
+        else:
+            n_elements = self.summary_stats.n_perturbations
+            guide_by_element = torch.eye(self.summary_stats.n_perturbations)
 
         gene_by_element = None
         if REGISTRY_KEYS.GENE_BY_ELEMENT_KEY in self.adata_manager.data_registry:
