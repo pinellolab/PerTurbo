@@ -1,6 +1,5 @@
 import logging
 
-import numba as nb
 import numpy as np
 import pandas as pd
 import pyro.optim as optim
@@ -10,7 +9,7 @@ from mudata import AnnData, MuData
 from pandas import DataFrame
 from pyro import poutine
 from pyro.infer import SVI, Trace_ELBO, TraceEnum_ELBO, infer_discrete
-from scipy.sparse import coo_matrix, csc_matrix, csr_matrix, issparse
+from scipy.sparse import coo_matrix, csc_matrix, issparse
 from scipy.stats import chi2
 from scvi._types import AnnOrMuData
 from scvi.data import AnnDataManager, fields
@@ -106,8 +105,6 @@ class PERTURBO(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
         self,
         mdata: AnnOrMuData,
         control_guides: list[int] | list[bool] | None = None,
-        dispersion_smoothing: str = "none",
-        smoothing_factor: float = 0.3,
         **model_kwargs,
     ):
         """
@@ -147,7 +144,9 @@ class PERTURBO(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
             self.data_and_attrs.update({REGISTRY_KEYS.CAT_COVS_KEY: np.float32})
             n_cats_per_cov = self.adata_manager.get_state_registry(REGISTRY_KEYS.CAT_COVS_KEY).n_cats_per_key
 
+        self.control_guides = control_guides
         guide_by_element = None
+
         n_elements = None
         if REGISTRY_KEYS.GUIDE_BY_ELEMENT_KEY in self.adata_manager.data_registry:
             n_elements = self.summary_stats.n_targeted_elements
@@ -160,64 +159,6 @@ class PERTURBO(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
         if REGISTRY_KEYS.GENE_BY_ELEMENT_KEY in self.adata_manager.data_registry:
             gene_by_element = self.read_matrix_from_registry(REGISTRY_KEYS.GENE_BY_ELEMENT_KEY)
 
-        epsilon = 1e-3
-        X = self.adata_manager.get_from_registry(REGISTRY_KEYS.X_KEY)
-        grna_counts = self.adata_manager.get_from_registry(REGISTRY_KEYS.PERTURBATION_KEY)
-
-        if control_guides is not None:
-            if issparse(grna_counts):
-                control_guide_idx = grna_counts[:, control_guides].sum(axis=1).A1 > 0
-            else:
-                control_guide_idx = grna_counts[:, control_guides].sum(axis=1) > 0
-            X = X[control_guide_idx, :]
-        self.control_guides = control_guides
-
-        n_cells_for_init = X.shape[0]
-        if n_cells_for_init == 0:
-            print("Warning: No cells with control guides found for initializing dispersion parameters.")
-            log_means = np.zeros(self.summary_stats.n_vars, dtype=np.float32)
-            log_disp_smoothed = np.ones(self.summary_stats.n_vars, dtype=np.float32)
-        else:
-            # run estimate_nb_params(X) safely
-            log_means, log_disp, log_disp_smoothed = estimate_nb_params(X, smoothing=dispersion_smoothing)
-            log_disp_smoothed = np.where(np.isfinite(log_disp_smoothed), log_disp_smoothed, 0)
-            log_disp = np.where(np.isfinite(log_disp), log_disp, log_disp_smoothed)
-            if dispersion_smoothing != "none":
-                log_disp_smoothed = smoothing_factor * log_disp_smoothed + (1 - smoothing_factor) * log_disp
-            log_means = np.clip(log_means, a_min=np.log(1 / X.shape[0]), a_max=None)
-
-        # if control_guides is not None and "n_factors" in model_kwargs and guide_by_element is not None:
-        #     # control_guides, _ = torch.max(guide_by_element[:, control_elements], dim=-1)
-        #     control_mask = self.read_matrix_from_registry(REGISTRY_KEYS.PERTURBATION_KEY)[:, control_guides].sum(dim=-1)
-        #     rna_data = self.read_matrix_from_registry(REGISTRY_KEYS.X_KEY)[control_mask.bool(), :]
-        #     u, s, v = torch.pca_lowrank(torch.tensor(rna_data), q=model_kwargs["n_factors"])
-        #     model_kwargs["control_pcs"] = v.T.unsqueeze(dim=-2)
-        # print(v)
-
-        # Compute element LFC initialization if elements are present and not already in model_kwargs
-        element_lfc_init = None
-        if n_elements is not None and guide_by_element is not None and "element_effects_init" not in model_kwargs:
-            # Use full data for LFC computation (not filtered by control guides)
-            X_full = self.adata_manager.get_from_registry(REGISTRY_KEYS.X_KEY)
-            grna_counts_full = self.adata_manager.get_from_registry(REGISTRY_KEYS.PERTURBATION_KEY)
-
-            # Determine baseline indices: use control guides if available, else sample 1000 random cells
-            if control_guides is not None:
-                if issparse(grna_counts_full):
-                    control_indices = grna_counts_full[:, control_guides].sum(axis=1).A1 > 0
-                else:
-                    control_indices = grna_counts_full[:, control_guides].sum(axis=1) > 0
-            else:
-                control_indices = None
-
-            element_lfc_init = compute_element_lfc_initialization(
-                X=X_full,
-                guide_obs=grna_counts_full,
-                guide_by_element=guide_by_element,
-                control_indices=control_indices,
-                pseudocount=0.1,
-            )
-
         self.module = PerTurboPyroModule(
             n_cells=self.summary_stats.n_cells,
             n_batches=self.summary_stats.n_batch,
@@ -225,9 +166,9 @@ class PERTURBO(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
             n_genes=self.summary_stats.n_vars,
             n_cont_covariates=n_extra_continuous_covs,
             n_elements=n_elements,
-            log_gene_mean_init=torch.tensor(log_means, dtype=torch.float32),
-            log_gene_dispersion_init=torch.tensor(log_disp_smoothed, dtype=torch.float32),
-            lfc_init=torch.tensor(element_lfc_init, dtype=torch.float32) if element_lfc_init is not None else None,
+            # log_gene_mean_init=torch.tensor(log_means, dtype=torch.float32) if log_means is not None else None,
+            # log_gene_dispersion_init=torch.tensor(log_disp_smoothed, dtype=torch.float32) if log_disp_smoothed is not None else None,
+            # lfc_init=torch.tensor(element_lfc_init, dtype=torch.float32) if element_lfc_init is not None else None,
             guide_by_element=guide_by_element,
             gene_by_element=gene_by_element,
             # n_cats_per_cov=n_cats_per_cov,
@@ -500,6 +441,8 @@ class PERTURBO(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
         """
         _, _, device = parse_device_args(accelerator, device, return_device="torch", validate_single_device=True)
 
+        self.initialize_params()
+
         loader = AnnDataLoader(
             adata_manager=self.adata_manager,
             indices=indices,
@@ -527,8 +470,8 @@ class PERTURBO(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
             },
         )
         pretrain_init_values = {
-            "log_gene_mean": self.module.log_gene_mean_init.to(device),
-            "log_gene_dispersion": self.module.log_gene_dispersion_init.to(device),
+            "log_gene_mean": self.log_gene_mean_init.to(device),
+            "log_gene_dispersion": self.log_gene_dispersion_init.to(device),
         }
 
         pretrain_guide = self.module._guide_factory(
@@ -574,6 +517,95 @@ class PERTURBO(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
                 t.set_postfix(loss=np.mean(batch_losses))
                 losses.append(np.mean(batch_losses))
         return losses
+
+    def initialize_params(
+        self,
+        dispersion_smoothing: str = "none",
+        smoothing_factor: float = 0.3,
+    ):
+        guide_by_element = None
+        n_elements = None
+        if REGISTRY_KEYS.GUIDE_BY_ELEMENT_KEY in self.adata_manager.data_registry:
+            n_elements = self.summary_stats.n_targeted_elements
+            guide_by_element = self.read_matrix_from_registry(REGISTRY_KEYS.GUIDE_BY_ELEMENT_KEY)
+        else:
+            n_elements = self.summary_stats.n_perturbations
+            guide_by_element = torch.eye(self.summary_stats.n_perturbations)
+
+        X = self.adata_manager.get_from_registry(REGISTRY_KEYS.X_KEY)
+        grna_counts = self.adata_manager.get_from_registry(REGISTRY_KEYS.PERTURBATION_KEY)
+
+        log_means = None
+        log_disp_smoothed = None
+        element_lfc_init = None
+
+        if not self.is_trained:
+            if self.control_guides is not None:
+                control_guide_counts = grna_counts[:, self.control_guides].sum(axis=1)
+                if isinstance(control_guide_counts, np.matrix):  # occurs when summing sparse array
+                    control_guide_counts = control_guide_counts.A1
+                control_guide_idx = control_guide_counts > 0
+                X = X[control_guide_idx, :]
+
+            print("Estimating initial parameters...")
+            n_cells_for_init = X.shape[0]
+            if n_cells_for_init == 0:
+                print("Warning: No cells with control guides found for initializing dispersion parameters.")
+                log_means = np.zeros(self.summary_stats.n_vars, dtype=np.float32)
+                log_disp_smoothed = np.ones(self.summary_stats.n_vars, dtype=np.float32)
+            else:
+                # run estimate_nb_params(X) safely
+                log_means, log_disp, log_disp_smoothed = estimate_nb_params(X, smoothing=dispersion_smoothing)
+                log_disp_smoothed = np.where(np.isfinite(log_disp_smoothed), log_disp_smoothed, 0)
+                log_disp = np.where(np.isfinite(log_disp), log_disp_smoothed, log_disp)
+                if dispersion_smoothing != "none":
+                    log_disp_smoothed = smoothing_factor * log_disp_smoothed + (1 - smoothing_factor) * log_disp
+                log_means = np.clip(log_means, a_min=np.log(1 / X.shape[0]), a_max=None)
+
+            # Compute element LFC initialization if elements are present and not already in model_kwargs
+            element_lfc_init = None
+            if n_elements is not None and guide_by_element is not None:
+                # Use full data for LFC computation (not filtered by control guides)
+                X_full = self.adata_manager.get_from_registry(REGISTRY_KEYS.X_KEY)
+                grna_counts_full = self.adata_manager.get_from_registry(REGISTRY_KEYS.PERTURBATION_KEY)
+
+                # Determine baseline indices: use control guides if available, else sample 1000 random cells
+                if self.control_guides is not None:
+                    if issparse(grna_counts_full):
+                        control_indices = grna_counts_full[:, self.control_guides].sum(axis=1).A1 > 0
+                    else:
+                        control_indices = grna_counts_full[:, self.control_guides].sum(axis=1) > 0
+                else:
+                    control_indices = None
+
+                element_lfc_init = compute_element_lfc_initialization(
+                    X=X_full,
+                    guide_obs=grna_counts_full,
+                    guide_by_element=guide_by_element,
+                    control_indices=control_indices,
+                    pseudocount=0.1,
+                )
+
+        if log_means is None:
+            log_means = torch.zeros(self.module.n_genes)
+        self.log_gene_mean_init = log_means
+
+        if log_disp_smoothed is None:
+            log_disp_smoothed = torch.ones(self.module.n_genes)
+        self.log_gene_dispersion_init = log_disp_smoothed
+
+        if element_lfc_init is None:
+            element_lfc_init = torch.zeros((self.module.n_elements, self.module.n_genes))
+
+        if self.module.local_effects and self.module.sparse_tensors:
+            if element_lfc_init.shape == (self.module.n_elements, self.module.n_genes):
+                element_lfc_init = element_lfc_init[
+                    self.module.element_by_gene_idx[0], self.module.element_by_gene_idx[1]
+                ]
+            assert element_lfc_init.shape != (self.module.n_element_effects,), (
+                f"lfc_init shape: {element_lfc_init.shape}, expected ({self.module.n_element_effects},)"
+            )
+        self.lfc_init = element_lfc_init
 
     @devices_dsp.dedent
     def train(
@@ -635,12 +667,14 @@ class PERTURBO(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
         """
         _, _, torch_device = parse_device_args(accelerator, device, return_device="torch", validate_single_device=True)
 
+        self.initialize_params()
+
         if not hasattr(self.module, "_guide") or self.module._guide is None:
             self.module._guide = self.module._guide_factory(
                 self.module.model,
                 init_values={
-                    "log_gene_mean": self.module.log_gene_mean_init.to(torch_device),
-                    "log_gene_dispersion": self.module.log_gene_dispersion_init.to(torch_device),
+                    "log_gene_mean": self.log_gene_mean_init.to(torch_device),
+                    "log_gene_dispersion": self.log_gene_dispersion_init.to(torch_device),
                     "element_effects": self.module.lfc_init.to(torch_device),
                 },
             )
@@ -765,6 +799,11 @@ class PERTURBO(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
     def get_z_values(self, return_loc_scale=False) -> pd.DataFrame:
         """
         Return a DataFrame summary of the effects for targeted elements on each gene.
+
+        Parameters
+        ----------
+        return_loc_scale : bool
+            Whether to return location and scale values along with z-values.
 
         Returns
         -------
