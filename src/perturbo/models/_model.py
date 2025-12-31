@@ -588,11 +588,11 @@ class PERTURBO(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
 
         if log_means is None:
             log_means = torch.zeros(self.module.n_genes)
-        self.log_gene_mean_init = log_means
+        self.log_gene_mean_init = torch.tensor(log_means, dtype=torch.float32)
 
         if log_disp_smoothed is None:
             log_disp_smoothed = torch.ones(self.module.n_genes)
-        self.log_gene_dispersion_init = log_disp_smoothed
+        self.log_gene_dispersion_init = torch.tensor(log_disp_smoothed, dtype=torch.float32)
 
         if element_lfc_init is None:
             element_lfc_init = torch.zeros((self.module.n_elements, self.module.n_genes))
@@ -605,7 +605,7 @@ class PERTURBO(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
             assert element_lfc_init.shape != (self.module.n_element_effects,), (
                 f"lfc_init shape: {element_lfc_init.shape}, expected ({self.module.n_element_effects},)"
             )
-        self.lfc_init = element_lfc_init
+        self.lfc_init = torch.tensor(element_lfc_init, dtype=torch.float32)
 
     @devices_dsp.dedent
     def train(
