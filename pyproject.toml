@@ -19,7 +19,7 @@ authors = [{ name = "Logan Blaine" }]
 maintainers = [{ name = "Logan Blaine", email = "loganblaine@g.harvard.edu" }]
 dependencies = [
     "anndata>=0.10.9",
-    "scvi-tools>=1.2.2",
+    "scvi-tools>=1.4.1",
     "torch>=1.11.0",
     "pyro-ppl>=1.8.6",
     "mudata>=0.3.1",
