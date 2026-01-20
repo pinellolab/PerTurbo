@@ -15,7 +15,7 @@ from scvi._types import AnnOrMuData
 from scvi.data import AnnDataManager, fields
 from scvi.dataloaders import AnnDataLoader, DataSplitter, DeviceBackedDataSplitter
 from scvi.model._utils import parse_device_args
-from scvi.model.base import BaseModelClass, PyroJitGuideWarmup, PyroSampleMixin, PyroSviTrainMixin
+from scvi.model.base import BaseModelClass, PyroSampleMixin, PyroSviTrainMixin
 from scvi.train import PyroTrainingPlan
 from scvi.utils._docstrings import devices_dsp
 from sklearn.isotonic import IsotonicRegression
@@ -295,13 +295,6 @@ class PERTURBO(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
             log_cpm = np.log(library_size / 1e6)
             mdata[modalities.rna_layer].obs[size_factor_key] = log_cpm - log_cpm.mean()
 
-        # add gene mean estimate (legacy, for simulator)
-        gene_mean_key = "_gene_mean"
-        rna_adata = mdata[modalities.rna_layer]
-        mean_counts = np.mean(rna_adata.X, axis=0)
-        if isinstance(mean_counts, np.matrix):  # occurs when summing sparse array
-            mean_counts = mean_counts.A1
-        rna_adata.var["_gene_mean"] = mean_counts
 
         # add indices to enable pyro subsampling of local vars
         mdata[modalities.rna_layer].obs = mdata[modalities.rna_layer].obs.assign(_ind_x=lambda x: np.arange(len(x)))
@@ -623,6 +616,7 @@ class PERTURBO(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
         training_plan: PyroTrainingPlan = PyroTrainingPlan,
         plan_kwargs: dict | None = None,
         data_splitter_kwargs: dict | None = None,
+        skip_initialization: bool = False,
         **trainer_kwargs,
     ):
         """
@@ -667,7 +661,10 @@ class PERTURBO(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
         """
         _, _, torch_device = parse_device_args(accelerator, device, return_device="torch", validate_single_device=True)
 
-        self.initialize_params()
+        if not skip_initialization:
+            print("Initializing baseline parameters...")
+            self.initialize_params()
+            print("Done")
 
         if not hasattr(self.module, "_guide") or self.module._guide is None:
             self.module._guide = self.module._guide_factory(
@@ -767,7 +764,7 @@ class PERTURBO(PyroSviTrainMixin, PyroSampleMixin, BaseModelClass):
 
         if "callbacks" not in trainer_kwargs.keys():
             trainer_kwargs["callbacks"] = []
-        trainer_kwargs["callbacks"].append(PyroJitGuideWarmup())
+        # trainer_kwargs["callbacks"].append(PyroJitGuideWarmup())
 
         runner = self._train_runner_cls(
             self,

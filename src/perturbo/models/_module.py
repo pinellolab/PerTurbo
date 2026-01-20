@@ -36,7 +36,7 @@ class PerTurboPyroModule(PyroBaseModuleClass):
         guide_by_element: torch.Tensor | None = None,
         gene_by_element: torch.Tensor | None = None,
         likelihood: Literal["nb", "lnnb"] = "nb",
-        effect_prior_dist: Literal["cauchy", "normal_mixture", "normal", "laplace"] = "cauchy",
+        effect_prior_dist: Literal["cauchy", "normal_mixture", "normal", "laplace"] = "laplace",
         n_factors: int | None = None,
         n_pert_factors: int | None = None,
         efficiency_mode: Literal["mixture", "scaled", "mixture_high_moi"] | None = "scaled",
@@ -91,7 +91,7 @@ class PerTurboPyroModule(PyroBaseModuleClass):
         module_kwargs : dict
             Additional keyword arguments (unused).
         """
-        super().__init__()
+        super().__init__(on_load_kwargs={"skip_initialization": True, "batch_size": 1})
         # set user-defined options for model behavior
         # self.dispersion_effects = dispersion_effects
         for k in module_kwargs:
