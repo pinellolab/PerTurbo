@@ -8,6 +8,6 @@ RUN pip install --upgrade pip
 # The workflow will place PerTurbo/ alongside this Dockerfile
 COPY . /app/PerTurbo
 # (optional) avoid copying .git via .dockerignore
-RUN pip install /app/PerTurbo
+RUN pip install /app/PerTurbo "git+https://github.com/IGVF-DACC/seqspec.git"
 
 CMD ["python3"]
