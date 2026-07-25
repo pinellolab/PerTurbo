@@ -1,0 +1,292 @@
+"""Simulation helpers backed by perturbo fitted models."""
+
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Any
+
+import anndata as ad
+import jax
+import jax.numpy as jnp
+import mudata as md
+import numpy as np
+import numpyro.distributions as dist
+import pandas as pd
+
+from perturbo import core
+from perturbo.inference import PerTurboModel
+from perturbo.io import setup_mudata
+from perturbo.log_normal_negative_binomial import LogNormalNegativeBinomial
+
+
+def _resolve_cell_indices(model: PerTurboModel, n_cells: int, cell_indices: np.ndarray | None) -> np.ndarray:
+    if cell_indices is not None:
+        return np.asarray(cell_indices, dtype=np.int32)
+    source_n = model.adata[model.setup.rna_modality].n_obs
+    if n_cells == source_n:
+        return np.arange(source_n, dtype=np.int32)
+    rng = np.random.default_rng(0)
+    return rng.choice(source_n, size=n_cells, replace=True).astype(np.int32)
+
+
+def _resolve_gene_indices(model: PerTurboModel, gene_indices: np.ndarray | None) -> np.ndarray:
+    if gene_indices is not None:
+        return np.asarray(gene_indices, dtype=np.int32)
+    return np.arange(model.adata[model.setup.rna_modality].n_vars, dtype=np.int32)
+
+
+def _resolve_size_factors(model: PerTurboModel, cell_indices: np.ndarray, read_depth_adjust_factor: float) -> np.ndarray:
+    obs = model.adata[model.setup.rna_modality].obs.iloc[cell_indices]
+    if model.setup.size_factor_key is not None and model.setup.size_factor_key in obs.columns:
+        size_factor_raw = pd.to_numeric(obs[model.setup.size_factor_key], errors="coerce").to_numpy(dtype=np.float32)
+        if not np.all(np.isfinite(size_factor_raw)):
+            raise ValueError(
+                f"size_factor_key '{model.setup.size_factor_key}' contains non-finite values in simulated source cells."
+            )
+        if core._is_count_like(size_factor_raw):
+            raise ValueError(
+                f"size_factor_key '{model.setup.size_factor_key}' appears to contain integer counts. "
+                "Use library_size_key for count data, or provide real-valued size factors centered around zero."
+            )
+        size_factor = size_factor_raw.reshape(-1, 1)
+    elif model.setup.library_size_key is not None and model.setup.library_size_key in obs.columns:
+        library_size = np.asarray(obs[model.setup.library_size_key], dtype=np.float32)
+        log_lib = np.log1p(library_size.astype(np.float64, copy=False))
+        center = getattr(model, "library_size_center_log_mean", None)
+        if center is None:
+            center = float(np.mean(log_lib)) if log_lib.size > 0 else 0.0
+        size_factor = (log_lib - float(center)).astype(np.float32, copy=False)[:, None]
+    else:
+        size_factor = np.zeros((cell_indices.shape[0], 1), dtype=np.float32)
+    if read_depth_adjust_factor != 1.0:
+        size_factor = size_factor + np.log(float(read_depth_adjust_factor))
+    return size_factor
+
+
+def _resolve_covariates(model: PerTurboModel, cell_indices: np.ndarray) -> np.ndarray | None:
+    control_fit = model.control_fit
+    if control_fit is None or control_fit.covariate_coef is None:
+        return None
+    transform_state = getattr(model, "covariate_transform_state", None)
+    if transform_state is None:
+        return None
+    obs = model.adata[model.setup.rna_modality].obs.iloc[cell_indices]
+    covariates, _ = core.apply_covariate_transform(obs, transform_state)
+    return np.asarray(covariates, dtype=np.float32)
+
+
+def _sample_counts(
+    *,
+    model: PerTurboModel,
+    mu: np.ndarray,
+    gene_indices: np.ndarray,
+    seed: int = 0,
+) -> np.ndarray:
+    if model.control_fit is None:
+        raise RuntimeError("Model must be trained before simulation.")
+    control_fit = model.control_fit
+    theta = np.asarray(control_fit.theta)[gene_indices]
+    key = jax.random.PRNGKey(seed)
+    logits = jnp.asarray(mu - np.log(theta)[None, :], dtype=jnp.float32)
+    total_count = jnp.asarray(theta, dtype=jnp.float32)
+
+    if model.likelihood.lower() in {"negbin", "nb", "censored_nb"}:
+        dist_obj = dist.NegativeBinomialLogits(total_count=total_count, logits=logits)
+    elif model.likelihood.lower() in {"lnnb", "lognormal_nb"}:
+        noise_scale = np.asarray(control_fit.noise_scale)[gene_indices]
+        dist_obj = LogNormalNegativeBinomial(
+            total_count=total_count,
+            logits=logits,
+            multiplicative_noise_scale=jnp.asarray(noise_scale, dtype=jnp.float32),
+        )
+    elif model.likelihood.lower() == "mixture_nb":
+        if control_fit.pi_outlier is None or control_fit.theta_outlier is None:
+            raise ValueError("mixture_nb simulation requires outlier parameters from the control fit.")
+        theta_outlier = np.asarray(control_fit.theta_outlier)[gene_indices]
+        pi_outlier = np.asarray(control_fit.pi_outlier)[gene_indices]
+        outlier_shift = (
+            np.asarray(control_fit.outlier_mean_shift)[gene_indices]
+            if control_fit.outlier_mean_shift is not None
+            else np.zeros_like(theta_outlier)
+        )
+        logits_outlier = jnp.asarray(
+            mu + outlier_shift[None, :] - np.log(theta_outlier)[None, :],
+            dtype=jnp.float32,
+        )
+        component_distribution = dist.NegativeBinomialLogits(
+            logits=jnp.stack([logits, logits_outlier], axis=-1),
+            total_count=jnp.stack(
+                [
+                    jnp.broadcast_to(total_count, logits.shape),
+                    jnp.broadcast_to(jnp.asarray(theta_outlier, dtype=jnp.float32), logits.shape),
+                ],
+                axis=-1,
+            ),
+        )
+        mixing_distribution = dist.CategoricalProbs(
+            probs=jnp.stack(
+                [
+                    1.0 - jnp.asarray(pi_outlier, dtype=jnp.float32),
+                    jnp.asarray(pi_outlier, dtype=jnp.float32),
+                ],
+                axis=-1,
+            )
+        )
+        dist_obj = dist.MixtureSameFamily(mixing_distribution, component_distribution)
+    else:
+        raise ValueError(f"Unsupported likelihood for simulation: {model.likelihood}")
+
+    sampled = dist_obj.sample(key)
+    if model.likelihood.lower() == "censored_nb":
+        if control_fit.count_censoring_threshold is None:
+            raise ValueError("censored_nb simulation requires count_censoring_threshold from the control fit.")
+        threshold = jnp.asarray(np.asarray(control_fit.count_censoring_threshold)[gene_indices], dtype=sampled.dtype)
+        sampled = jnp.minimum(sampled, threshold[None, :])
+    return np.asarray(sampled, dtype=np.int32)
+
+
+def _sample_guide_random_effect_contribution(
+    *,
+    model: PerTurboModel,
+    guide_obs: np.ndarray,
+    gene_indices: np.ndarray,
+    seed: int = 1,
+) -> np.ndarray | None:
+    if not bool(getattr(model, "guide_random_effects", False)):
+        return None
+    if model.control_fit is None:
+        raise RuntimeError("Model must be trained before simulation.")
+    tau = model.control_fit.guide_random_effect_tau
+    if tau is None:
+        raise ValueError("guide-random-effects simulation requires guide_random_effect_tau from the control fit.")
+    tau_arr = np.asarray(tau, dtype=np.float32).reshape(-1)[gene_indices]
+    if not np.all(np.isfinite(tau_arr)) or np.any(tau_arr < 0.0):
+        raise ValueError("guide_random_effect_tau must be finite and non-negative for simulation.")
+    key = jax.random.PRNGKey(seed)
+    effects = jax.random.normal(
+        key,
+        shape=(int(guide_obs.shape[1]), int(tau_arr.shape[0])),
+        dtype=jnp.float32,
+    ) * jnp.asarray(tau_arr, dtype=jnp.float32)[None, :]
+    return np.asarray(guide_obs, dtype=np.float32) @ np.asarray(effects, dtype=np.float32)
+
+
+def simulate_data_from_trained_model(
+    model: PerTurboModel,
+    guide_obs: np.ndarray,
+    guide_by_element: np.ndarray,
+    element_by_gene_lfc: np.ndarray,
+    guide_efficacy: np.ndarray,
+    read_depth_adjust_factor: float = 1.0,
+    module_kwargs: dict[str, Any] | None = None,
+    module_init_kwargs: dict[str, Any] | None = None,
+    gene_indices: np.ndarray | None = None,
+    cell_indices: np.ndarray | None = None,
+    param_values: dict[str, Any] | None = None,
+    accelerator: str = "auto",
+    device: int | str = "auto",
+) -> md.MuData:
+    """Simulate a MuData object from a trained perturbo model.
+
+    This mirrors the public PerTurbo simulator signature, but it is stateless and
+    bundle-oriented rather than PyTorch-module-oriented.
+    """
+    del module_kwargs, module_init_kwargs, param_values, accelerator, device
+    if model.beta_fit is None or model.control_fit is None:
+        raise RuntimeError("Model must be trained or loaded before simulation.")
+
+    guide_obs_arr = np.asarray(guide_obs, dtype=np.float32)
+    guide_by_element_arr = np.asarray(guide_by_element, dtype=np.float32)
+    guide_eff_arr = np.asarray(guide_efficacy, dtype=np.float32).reshape(-1)
+    if guide_obs_arr.shape[1] != guide_by_element_arr.shape[0]:
+        raise ValueError("guide_obs columns must match guide_by_element rows.")
+    if guide_eff_arr.shape[0] != guide_obs_arr.shape[1]:
+        raise ValueError("guide_efficacy length must match guide_obs columns.")
+
+    gene_idx = _resolve_gene_indices(model, gene_indices)
+    cell_idx = _resolve_cell_indices(model, guide_obs_arr.shape[0], cell_indices)
+    lfc = np.asarray(element_by_gene_lfc, dtype=np.float32)[:, gene_idx]
+    weighted_guides = guide_obs_arr * guide_eff_arr[None, :]
+    element_scores = weighted_guides @ guide_by_element_arr
+
+    beta_0 = np.asarray(model.control_fit.beta_0, dtype=np.float32)[gene_idx]
+    mu = beta_0[None, :] + _resolve_size_factors(model, cell_idx, read_depth_adjust_factor)
+    covariates = _resolve_covariates(model, cell_idx)
+    if covariates is not None and model.control_fit.covariate_coef is not None:
+        cov_coef = np.asarray(model.control_fit.covariate_coef, dtype=np.float32)[:, gene_idx]
+        mu = mu + covariates @ cov_coef
+    mu = mu + element_scores @ lfc
+    guide_random_effect_contrib = _sample_guide_random_effect_contribution(
+        model=model,
+        guide_obs=guide_obs_arr,
+        gene_indices=gene_idx,
+    )
+    if guide_random_effect_contrib is not None:
+        mu = mu + guide_random_effect_contrib
+
+    counts = _sample_counts(model=model, mu=mu, gene_indices=gene_idx)
+
+    rna_source = model.adata[model.setup.rna_modality]
+    pert_source = model.adata[model.setup.perturbation_modality]
+    obs = rna_source.obs.iloc[cell_idx].copy()
+    var = rna_source.var.iloc[gene_idx].copy()
+    rna = ad.AnnData(X=counts, obs=obs, var=var)
+    rna.varm["lfc"] = np.asarray(element_by_gene_lfc, dtype=np.float32)[:, gene_idx].T
+    if model.setup.gene_by_element_key is not None:
+        rna.varm[model.setup.gene_by_element_key] = (
+            np.asarray(element_by_gene_lfc, dtype=np.float32)[:, gene_idx] != 0
+        ).T.astype(np.float32, copy=False)
+
+    pert_var_names = list(pert_source.var_names.astype(str))
+    if len(pert_var_names) != guide_obs_arr.shape[1]:
+        pert_var_names = [f"guide_{i}" for i in range(guide_obs_arr.shape[1])]
+    guide_var = pd.DataFrame(index=pert_var_names)
+    pert = ad.AnnData(X=guide_obs_arr.astype(np.float32), obs=obs.copy(), var=guide_var)
+    if model.setup.guide_by_element_key is not None:
+        pert.varm[model.setup.guide_by_element_key] = guide_by_element_arr
+    else:
+        pert.varm["element_targeted"] = guide_by_element_arr
+    if model.setup.guide_element_uns_key is not None:
+        element_names = model.element_names
+        if len(element_names) == guide_by_element_arr.shape[1]:
+            pert.uns[model.setup.guide_element_uns_key] = np.asarray(element_names, dtype=object)
+    pert.uns["guide_efficacy"] = guide_eff_arr
+
+    mdata = md.MuData(
+        {
+            model.setup.rna_modality: rna,
+            model.setup.perturbation_modality: pert,
+        }
+    )
+    setup_mudata(
+        mdata,
+        batch_key=model.setup.batch_key,
+        library_size_key=model.setup.library_size_key,
+        size_factor_key=model.setup.size_factor_key,
+        continuous_covariates_keys=model.setup.continuous_covariates_keys,
+        gene_by_element_key=model.setup.gene_by_element_key,
+        guide_by_element_key=model.setup.guide_by_element_key,
+        rna_element_uns_key=model.setup.rna_element_uns_key,
+        guide_element_uns_key=model.setup.guide_element_uns_key,
+        gene_name_key=model.setup.gene_name_key,
+        control_substring=model.setup.control_substring,
+        modalities={
+            "rna_layer": model.setup.rna_modality,
+            "perturbation_layer": model.setup.perturbation_modality,
+        },
+        perturbation_layer=model.setup.perturbation_layer,
+    )
+    return mdata
+
+
+def save_simulated_mudata(mdata: md.MuData, path: str | Path) -> Path:
+    out_path = Path(path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    mdata.write_h5mu(out_path)
+    return out_path
+
+
+__all__ = [
+    "save_simulated_mudata",
+    "simulate_data_from_trained_model",
+]

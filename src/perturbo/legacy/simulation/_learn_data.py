@@ -7,7 +7,7 @@ import pyro
 from mudata import MuData
 from scipy.stats import lognorm
 
-import perturbo
+from .. import models
 
 
 class Learn_Data:  # keep consistent with perturbo / pyro
@@ -129,7 +129,7 @@ class Learn_Data:  # keep consistent with perturbo / pyro
     ):
         """Get a model object (as in pyro) that could be trained."""
         # register data with perturbo
-        perturbo.models.PERTURBO.setup_mudata(
+        models.PERTURBO.setup_mudata(
             self.mdata_train,
             batch_key=self.batch_key,
             library_size_key=self.library_size_key,
@@ -140,7 +140,13 @@ class Learn_Data:  # keep consistent with perturbo / pyro
             rna_element_uns_key=self.rna_element_uns_key,  # <------------ what is this?
             modalities=self.modalities,
         )
-        model = perturbo.models.PERTURBO(self.mdata_train, likelihood=likelihood, effect_prior_dist=effect_prior_dist, efficiency_mode=efficiency_mode, n_factors=None)
+        model = models.PERTURBO(
+            self.mdata_train,
+            likelihood=likelihood,
+            effect_prior_dist=effect_prior_dist,
+            efficiency_mode=efficiency_mode,
+            n_factors=None,
+        )
 
         self.model = model
         return model

@@ -1,63 +1,87 @@
-[![Tests][badge-tests]][link-tests]
+# PerTurbo
 
-
-
-# 🏎️ PerTurbo: Fast analysis of single-cell perturbation studies
-
-**PerTurbo** is a fast statistical package for analyzing perturbation phenotypes from single cell CRISPR screens.
-
-> [!Caution]
-> **Under Active Development**
-> 
-> The API and behavior of this package are not yet stable.  
-> Expect breaking changes between versions.
-
-<!-- [![Documentation][badge-docs]][link-docs] -->
-
-[badge-tests]: https://img.shields.io/github/actions/workflow/status/pinellolab/perturbo/test.yaml?branch=main
-[link-tests]: https://github.com/pinellolab/perturbo/actions/workflows/test.yml
-<!-- [badge-docs]: https://img.shields.io/readthedocs/perturbo  -->
-
-<!-- ## Getting started -->
-
-<!-- Documentation suspended while private, check back soon :) -->
-
-<!-- Please refer to the [documentation][link-docs]. In particular, the -->
-
-<!-- -   [API documentation][link-api]. -->
+PerTurbo is a NumPyro/JAX implementation of Bayesian Perturb-seq analysis for
+low- and high-MOI single-cell CRISPR screens. Version 2 is the production
+successor to the experimental Cortado implementation.
 
 ## Installation
 
-You need to have Python 3.10 or newer installed on your system. If you don't have
-Python installed, we recommend installing [Miniforge](https://github.com/conda-forge/miniforge).
+PerTurbo requires Python 3.11 or newer.
 
-Official PyPI and conda releases are still in the works, but in the meantime you can install the developer version with one of the following options:
+```bash
+pip install perturbo
+# or, for development in this checkout
+uv sync --group test --group dev
+```
 
-1. **pip (easiest, recommended for end users)**
-The simplest way to install PerTurbo is using pip (ideally inside an isolated conda environment or virtualenv). Simply clone the git repo to your machine, enter the folder using your terminal, and then use `pip install -e .` to install the project and its dependencies.
+For a compatible NVIDIA/CUDA 12 environment, install `perturbo[cuda]`.
 
-2. **Hatch (slightly more complex, recommended for developers)**
-Hatch is a project/dependency managment tool which can create project-specific virtual environments, similar to Poetry or pip+virtualenv. First, install [Hatch](https://hatch.pypa.io/).  You may want to further configure where Hatch installs virtual environments, [see documentation](https://hatch.pypa.io/latest/config/hatch/#environments).
-Clone this git repo to your machine, enter the directory, and then run `hatch env create dev.`
-This will create a Hatch virtual environment in your configured directory with all the necessary project dependencies, plus Jupyter and some other development essentials for running the test notebooks in this repo.
+## Container image
 
-## Release notes
+Build the GPU-ready image locally with:
 
-See the [changelog][changelog].
+```bash
+docker build --tag perturbo:local .
+docker run --rm --gpus all perturbo:local --help
+```
 
-## Contact
+The image uses JAX's CUDA 12 pip wheels, so the host must provide the NVIDIA
+Container Toolkit and a Linux NVIDIA driver version 525 or newer. Do not set
+`LD_LIBRARY_PATH` in the container: JAX uses its pip-installed CUDA libraries.
+The established GitHub Actions recipe builds the `linux/amd64` image and
+publishes it to GHCR only for version tags (or an explicit manual dispatch).
 
-For questions and help requests, you can reach out to the author [here](https://loganblaine.com).
-<!-- For questions and help requests, you can reach out in the [scverse discourse][scverse-discourse]. -->
-If you found a bug, please use the [issue tracker][issue-tracker].
+## Quick start
 
-## Citation
+```python
+import perturbo
 
-> t.b.a
+perturbo.setup_mudata(
+    mdata,
+    modalities={"rna_layer": "rna", "perturbation_layer": "grna"},
+    guide_by_element_key="element_targeted",
+)
 
-[scverse-discourse]: https://discourse.scverse.org/
-[issue-tracker]: https://github.com/pinellolab/PerTurbo/issues
-[changelog]: https://perturbo.readthedocs.io/latest/changelog.html
-[link-docs]: https://perturbo.readthedocs.io
-[link-api]: https://perturbo.readthedocs.io/latest/api.html
-[link-pypi]: https://pypi.org/project/PerTurbo
+model = perturbo.PERTURBO(mdata, likelihood="nb", guide_random_effects=True)
+model.train(steps=2500, batch_size=1024, accelerator="gpu")
+model.save("perturbo_bundle", overwrite=True)
+```
+
+For reproducible file-based runs, use the CLI:
+
+```bash
+perturbo --input screen.h5mu --out-dir perturbo_outputs/run --modality-key rna \
+  --perturbation-modality-key grna --perturbation-element-varm-key element_targeted
+```
+
+The main Python entry points are `PERTURBO` / `PerTurboModel`, `fit_from_path`,
+`setup_mudata`, `fit_control`, `fit_perturbation_effects`, and the posterior
+table and trained-model simulation helpers.
+
+## Migrating from PyTorch PerTurbo and Cortado
+
+The deprecated PyTorch/Pyro implementation is available only through the
+optional `perturbo[legacy]` extra and `perturbo.legacy` namespace. It is not
+loaded by a normal PerTurbo import.
+
+| Previous surface | PerTurbo 2 surface |
+| --- | --- |
+| `cortado.PERTURBO` | `perturbo.PERTURBO` |
+| `cortado.CortadoModel` | `perturbo.PerTurboModel` |
+| `cortado` CLI | `perturbo` CLI |
+| PyTorch `perturbo.PERTURBO` | `perturbo.legacy.PERTURBO` |
+
+PerTurbo reads Cortado MuData registrations and fit bundles, warns once during
+the upgrade, and writes the v2 `_perturbo_setup` and bundle format thereafter.
+
+## Development
+
+```bash
+uv sync --group test --group dev
+uv run pytest
+uv build
+```
+
+The v2 production source was ported from Cortado commit `efc923e`. The Cortado
+repository remains the home for experiments, benchmarks, notebooks, apps, and
+paper analyses.

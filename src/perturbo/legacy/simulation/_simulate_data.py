@@ -11,7 +11,7 @@ from scipy.sparse import csr_matrix, eye, vstack
 from scipy.sparse import random as sparse_random
 from scipy.stats import lognorm
 
-from perturbo.models._module import LogNormalNegativeBinomial
+from perturbo.legacy.models._module import LogNormalNegativeBinomial
 
 
 class Simulate_Data:

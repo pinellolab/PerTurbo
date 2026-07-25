@@ -2,11 +2,14 @@ import logging
 
 import numpy as np
 import pandas as pd
-import pyro
 import pytest
 from mudata import MuData
 
-import perturbo
+pyro = pytest.importorskip("pyro")
+pytest.importorskip("scvi")
+pytest.importorskip("torch")
+
+import perturbo.legacy as perturbo
 
 from .conftest import gene_by_element_key, guide_by_element_key, perturb_key, rna_key
 

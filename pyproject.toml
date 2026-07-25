@@ -4,44 +4,52 @@ requires = ["hatchling"]
 
 [project]
 name = "perturbo"
-version = "0.0.1"
-description = "Estimating perturbation effects on single cell phenotypes using variational inference."
+version = "2.0.0"
+description = "Bayesian Perturb-seq analysis with NumPyro and JAX."
 readme = "README.md"
-requires-python = ">=3.10"
-classifiers = [
-    "Programming Language :: Python :: 3 :: Only",
-    "Programming Language :: Python :: 3.10",
-    "Programming Language :: Python :: 3.11",
-    "Programming Language :: Python :: 3.12",
-]
+requires-python = ">=3.11"
 license = { file = "LICENSE" }
 authors = [{ name = "Logan Blaine" }]
 maintainers = [{ name = "Logan Blaine", email = "loganblaine@g.harvard.edu" }]
+classifiers = [
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+]
 dependencies = [
-    "anndata>=0.10.9",
-    "scvi-tools>=1.1.2",
-    "torch>=1.11.0",
-    "pyro-ppl>=1.8.6",
-    "mudata>=0.3.1",
-    "pandas>=1.5.3",
+    "anndata>=0.12.13",
+    "hdf5plugin>=6.0.0",
+    "jax>=0.8.0",
+    "matplotlib>=3.8",
+    "mudata>=0.3.2",
+    "numpy>=2.0",
+    "numpyro>=0.20.1",
+    "pandas>=2.3.3",
+    "pyarrow>=15.0.0",
     "scipy>=1.11.4",
-    "matplotlib",
-    "numpy",
-    "seaborn",
-    "statsmodels",
-    # for debug logging (referenced from the issue template)
-    "session-info",
+    "tqdm>=4.66.0",
 ]
 
-optional-dependencies.dev = ["pre-commit", "twine>=4.0.2"]
+[project.scripts]
+perturbo = "perturbo.cli:main"
 
-optional-dependencies.doc = [
+[project.optional-dependencies]
+cuda = ["jax[cuda12]>=0.8.0"]
+legacy = [
+    "pyro-ppl>=1.8.6",
+    "scikit-learn>=1.0",
+    "scvi-tools>=1.4,<1.5",
+    # Lightning used by the historical scvi stack still imports pkg_resources,
+    # which was removed from setuptools 81.
+    "setuptools>=65,<81",
+    "statsmodels>=0.14",
+    "torch>=1.11.0",
+]
+docs = [
     "docutils>=0.8,!=0.18.*,!=0.19.*",
     "ipykernel",
     "ipython",
     "myst-nb>=1.1",
-    "pandas",
-    # Until pybtex >0.23.0 releases: https://bitbucket.org/pybtex-devs/pybtex/issues/169/
     "setuptools",
     "sphinx>=4",
     "sphinx-autodoc-typehints",
@@ -52,107 +60,44 @@ optional-dependencies.doc = [
     "sphinxext-opengraph",
 ]
 
-optional-dependencies.test = ["pytest", "coverage"]
+[project.urls]
+Documentation = "https://PerTurbo.readthedocs.io/"
+Homepage = "https://github.com/pinellolab/PerTurbo"
+Source = "https://github.com/pinellolab/PerTurbo"
 
-# https://docs.pypi.org/project_metadata/#project-urls
-urls.Documentation = "https://PerTurbo.readthedocs.io/"
-urls.Homepage = "https://github.com/pinellolab/PerTurbo"
-urls.Source = "https://github.com/pinellolab/PerTurbo"
+[dependency-groups]
+test = [
+    "coverage[toml]>=7.6",
+    "pytest>=8.3",
+]
+dev = [
+    "build>=1.2",
+    "pre-commit>=4.0",
+    "ruff>=0.8",
+    "twine>=6.0",
+]
 
-[tool.hatch.envs.default]
-installer = "uv"
-features = ["dev"]
-
-[tool.hatch.envs.docs]
-extra-features = ["doc"]
-scripts.build = "sphinx-build -M html docs docs/_build {args}"
-scripts.open = "python -m webbrowser -t docs/_build/html/index.html"
-scripts.clean = "git clean -fdX -- {args:docs}"
-
-[tool.hatch.envs.hatch-test]
-features = ["test"]
-
-
-[tool.black]
-include = '\.pyi?$'
-exclude = '''
-(
-  /(
-      \.eggs
-    | \.git
-    | \.hg
-    | \.mypy_cache
-    | \.tox
-    | \.venv
-    | _build
-    | buck-out
-    | build
-    | dist
-  )/
-)
-'''
+[tool.uv]
+package = true
 
 [tool.ruff]
 src = ["src"]
 line-length = 120
-lint.select = [
-    "B",      # flake8-bugbear
-    "BLE",    # flake8-blind-except
-    "C4",     # flake8-comprehensions
-    "D",      # pydocstyle
-    "E",      # Error detected by Pycodestyle
-    "F",      # Errors detected by Pyflakes
-    "I",      # isort
-    "RUF100", # Report unused noqa directives
-    "TID",    # flake8-tidy-imports
-    "UP",     # pyupgrade
-    "W",      # Warning detected by Pycodestyle
-]
-lint.ignore = [
-    "B008", # Errors from function calls in argument defaults. These are fine when the result is immutable.
-    "D100", # Missing docstring in public module
-    "D104", # Missing docstring in public package
-    "D105", # __magic__ methods are often self-explanatory, allow missing docstrings
-    "D107", # Missing docstring in __init__
-    # Disable one in each pair of mutually incompatible rules
-    "D203", # We don’t want a blank line before a class docstring
-    "D213", # <> We want docstrings to start immediately after the opening triple quote
-    "D400", # first line should end with a period [Bug: doesn’t work with single-line docstrings]
-    "D401", # First line should be in imperative mood; try rephrasing
-    "E501", # line too long -> we accept long comment lines; formatter gets rid of long code lines
-    "E731", # Do not assign a lambda expression, use a def -> lambda expression assignments are convenient
-    "E741", # allow I, O, l as variable names -> I is the identity matrix
-]
+extend-exclude = ["src/perturbo/legacy", "tests/legacy"]
 
-lint.per-file-ignores."*/__init__.py" = ["F401"]
-lint.per-file-ignores."docs/*" = ["I"]
-lint.per-file-ignores."tests/*" = ["D"]
-lint.pydocstyle.convention = "numpy"
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F"]
 
-extend-include = ["*.ipynb"]
+[tool.ruff.lint.per-file-ignores]
+"*/__init__.py" = ["F401"]
+"tests/*" = ["D"]
 
-[tool.ruff.format]
-docstring-code-format = true
-
-[tool.cruft]
-skip = [
-    "tests",
-    "src/**/__init__.py",
-    "src/**/basic.py",
-    "docs/api.md",
-    "docs/changelog.md",
-    "docs/references.bib",
-    "docs/references.md",
-    "docs/notebooks/example.ipynb",
-]
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+norecursedirs = ["tests/legacy"]
+xfail_strict = true
+addopts = ["--import-mode=importlib"]
 
 [tool.coverage.run]
 source = ["perturbo"]
 omit = ["**/test_*.py"]
-
-[tool.pytest.ini_options]
-testpaths = ["tests"]
-xfail_strict = true
-addopts = [
-    "--import-mode=importlib", # allow using test files with same name
-]

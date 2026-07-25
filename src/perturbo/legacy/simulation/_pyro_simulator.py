@@ -5,8 +5,8 @@ from pyro.poutine import condition
 from scvi.dataloaders import AnnDataLoader
 from scvi.model._utils import parse_device_args
 
-from perturbo.models._model import PERTURBO, REGISTRY_KEYS
-from perturbo.models._module import PerTurboPyroModule
+from perturbo.legacy.models._model import PERTURBO, REGISTRY_KEYS
+from perturbo.legacy.models._module import PerTurboPyroModule
 
 
 def simulate_data_from_trained_model(

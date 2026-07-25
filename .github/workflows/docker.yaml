@@ -2,23 +2,22 @@ name: Build & Push CUDA Image (GHCR)
 
 on:
   push:
-    # branches: [ main ]
-    tags: [ 'v*' ]      # build on version tags, e.g. v1.2.3
-  workflow_dispatch: {}  # allow manual runs
+    # Version tags are the intentional release boundary for container images.
+    tags: ["v*"]
+  workflow_dispatch: {}
 
 permissions:
   contents: read
-  packages: write   # REQUIRED for ghcr.io
+  packages: write
 
 jobs:
   build:
     runs-on: ubuntu-latest
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up QEMU (for cross-arch emulation)
+      - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
 
       - name: Set up Docker Buildx
@@ -31,22 +30,21 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Extract metadata (tags, labels)
+      - name: Extract metadata
         id: meta
         uses: docker/metadata-action@v5
         with:
           images: ghcr.io/${{ github.repository }}
           tags: |
-            type=ref,event=branch
             type=ref,event=tag
             type=sha
 
-      - name: Build & Push
+      - name: Build and push JAX CUDA image
         uses: docker/build-push-action@v6
         with:
           context: .
-          file: ./Dockerfile            # change if your Dockerfile path differs
-          platforms: linux/amd64        # most HPC nodes are amd64; add linux/arm64 if needed
+          file: ./Dockerfile
+          platforms: linux/amd64
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}

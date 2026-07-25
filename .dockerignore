@@ -1,0 +1,13 @@
+.git
+.venv
+.pytest_cache
+.ruff_cache
+__pycache__
+.test_outputs
+dist
+build
+docs
+tests
+*.h5ad
+*.h5mu
+*.ipynb

@@ -1,7 +1,7 @@
 import pytest
 from mudata import MuData
 
-from perturbo.simulation._support_functions import mudata_filtering
+from perturbo.legacy.simulation._support_functions import mudata_filtering
 
 from .conftest import gene_by_element_key, guide_by_element_key, perturb_key, rna_key
 

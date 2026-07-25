@@ -36,7 +36,7 @@ needs_sphinx = "4.0"
 
 html_context = {
     "display_github": True,  # Integrate GitHub
-    "github_user": "logan-blaine",
+    "github_user": "pinellolab",
     "github_repo": project_name,
     "github_version": "main",
     "conf_py_path": "/docs/",
@@ -96,6 +96,8 @@ intersphinx_mapping = {
     "anndata": ("https://anndata.readthedocs.io/en/stable/", None),
     "scanpy": ("https://scanpy.readthedocs.io/en/stable/", None),
     "numpy": ("https://numpy.org/doc/stable/", None),
+    "jax": ("https://jax.readthedocs.io/en/latest/", None),
+    "numpyro": ("https://num.pyro.ai/en/stable/", None),
 }
 
 # List of patterns, relative to source directory, that match files and

@@ -5,8 +5,6 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
-  schedule:
-    - cron: "0 5 1,15 * *"
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -14,47 +12,52 @@ concurrency:
 
 jobs:
   test:
-    runs-on: ${{ matrix.os }}
-    defaults:
-      run:
-        shell: bash -e {0} # -e to fail on error
-
+    runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        python: ["3.10", "3.11", "3.12"]
-        os: [ubuntu-latest]
-
+        python: ["3.11", "3.12"]
     env:
-      OS: ${{ matrix.os }}
-      PYTHON: ${{ matrix.python }}
-
+      JAX_PLATFORM_NAME: cpu
+      MPLBACKEND: Agg
     steps:
-      - uses: actions/checkout@v3
-      - name: Set up Python ${{ matrix.python }}
-        uses: actions/setup-python@v4
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python }}
-          cache: "pip"
-          cache-dependency-path: "**/pyproject.toml"
-
-      - name: Install test dependencies
-        run: |
-          python -m pip install --upgrade pip wheel
-      - name: Install dependencies
-        run: |
-          pip install ".[dev,test]"
-      - name: Test
-        env:
-          MPLBACKEND: agg
-          PLATFORM: ${{ matrix.os }}
-          DISPLAY: :42
-        run: |
-          coverage run -m pytest -v --color=yes
-      - name: Report coverage
-        run: |
-          coverage report
-      - name: Upload coverage
-        uses: codecov/codecov-action@v3
+      - uses: astral-sh/setup-uv@v5
         with:
-          token: ${{ secrets.CODECOV_TOKEN }}
+          enable-cache: true
+      - run: uv sync --locked --group test
+      - run: uv run pytest
+
+  clean-import:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - uses: astral-sh/setup-uv@v5
+      - run: uv venv /tmp/perturbo-base
+      - run: uv pip install --python /tmp/perturbo-base/bin/python .
+      - run: >-
+          /tmp/perturbo-base/bin/python -c
+          "import sys; import perturbo;
+          assert all(name not in sys.modules for name in ('torch', 'pyro', 'scvi'))"
+
+  legacy:
+    runs-on: ubuntu-latest
+    env:
+      JAX_PLATFORM_NAME: cpu
+      MPLBACKEND: Agg
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - run: uv sync --locked --group test --extra legacy
+      - run: uv run pytest tests/legacy
