@@ -24,5 +24,4 @@ RUN uv sync --locked --no-dev --extra cuda
 
 ENV PATH="/app/.venv/bin:$PATH"
 
-ENTRYPOINT ["perturbo"]
-CMD ["--help"]
+CMD ["perturbo", "--help"]
