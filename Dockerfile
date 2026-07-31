@@ -31,8 +31,37 @@ RUN uv sync --locked --no-dev --extra cuda
 # scripts (e.g. perturbo_v2_pipeline_adapter.py) fail with "command not found".
 # Symlinking into /usr/local/bin keeps bin/ injection intact while still making
 # `perturbo`/`python` resolve to the venv (which owns all the dependencies).
-RUN ln -sf /app/.venv/bin/perturbo /usr/local/bin/perturbo \
-    && ln -sf /app/.venv/bin/python /usr/local/bin/python \
-    && ln -sf /app/.venv/bin/python3 /usr/local/bin/python3
+#
+# ORDER MATTERS. uv points the venv at the base interpreter's *unversioned*
+# name -- .venv/bin/python -> /usr/local/bin/python3, .venv/bin/python3 ->
+# ./python -- so symlinking /usr/local/bin/python3 back at the venv closes a
+# cycle:
+#   /usr/local/bin/python3 -> .venv/bin/python3 -> .venv/bin/python -> /usr/local/bin/python3
+# Every entry point shebanged `#!/app/.venv/bin/python` then dies at exec() with
+# ELOOP ("too many levels of symbolic links") before Python ever starts: no
+# output, no traceback. Re-point the venv at the VERSIONED real binary
+# (/usr/local/bin/python3.11, which nothing below rewrites) so the unversioned
+# names can be repointed at the venv without forming a ring.
+RUN BASE_PYTHON="$(readlink -f /usr/local/bin/python3)" \
+    && echo "base interpreter: ${BASE_PYTHON}" \
+    && ln -sfn "${BASE_PYTHON}" /app/.venv/bin/python \
+    && ln -sfn python /app/.venv/bin/python3 \
+    && ln -sfn python /app/.venv/bin/python3.11 \
+    && ln -sfn /app/.venv/bin/perturbo /usr/local/bin/perturbo \
+    && ln -sfn /app/.venv/bin/python /usr/local/bin/python \
+    && ln -sfn /app/.venv/bin/python3 /usr/local/bin/python3
+
+# Fail the BUILD, not a downstream pipeline run, if the links above ever loop
+# again or the venv's site-packages stop being visible. `sys.prefix` must be the
+# venv (not the base prefix) -- that is what proves the /usr/local/bin hop kept
+# venv semantics rather than silently falling back to the bare interpreter.
+RUN set -eu \
+    && for exe in /usr/local/bin/python /usr/local/bin/python3 /app/.venv/bin/python; do \
+         readlink -f "$exe" >/dev/null || { echo "FATAL: $exe does not resolve (symlink loop?)"; exit 1; }; \
+       done \
+    && python -c 'import sys; assert sys.prefix == "/app/.venv", f"venv not active: sys.prefix={sys.prefix}"' \
+    && python -c 'import perturbo; print("perturbo", getattr(perturbo, "__version__", "?"))' \
+    && perturbo --help >/dev/null \
+    && echo "OK: entry points resolve and the venv is active"
 
 CMD ["perturbo", "--help"]
