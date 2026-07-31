@@ -82,6 +82,9 @@ jobs:
           # Default CMD is ["perturbo", "--help"].
           docker run --rm perturbo:ci
           docker run --rm perturbo:ci perturbo --help
+          # Nextflow's task wrapper shells out to `ps`; without it the task dies
+          # before the process script runs, which looks like a silent payload crash.
+          docker run --rm perturbo:ci ps -o pid,comm
           # How the pipeline's bin/*.py scripts (`#!/usr/bin/env python`) enter
           # Python. A venv symlink or wrapper at /usr/local/bin/python breaks
           # exactly this while leaving `perturbo` itself working.

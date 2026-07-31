@@ -10,8 +10,15 @@ ENV PIP_DISABLE_PIP_VERSION_CHECK=1 \
     PYTHONUNBUFFERED=1 \
     XLA_PYTHON_CLIENT_PREALLOCATE=false
 
+# procps supplies `ps`, which Nextflow's task wrapper shells out to in order to
+# collect task metrics. Without it the wrapper reports "Command 'ps' required by
+# nextflow to collect task metrics cannot be found" and the task dies BEFORE the
+# process script runs -- exit 1, empty stdout, no traceback, which reads exactly
+# like a silent crash in the payload. nf-core requires procps in every container
+# for this reason. python:3.11-slim omits it; the pytorch base image this
+# Dockerfile replaced happened to include it, so the loss went unnoticed.
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates \
+    && apt-get install -y --no-install-recommends ca-certificates procps \
     && rm -rf /var/lib/apt/lists/*
 
 # uv lives OUTSIDE /usr/local so the sync below (which prunes its target
@@ -51,6 +58,7 @@ RUN uv sync --locked --no-dev --no-editable --extra cuda
 # actually enter Python, and it is what the venv layouts kept breaking.
 RUN set -eu \
     && test ! -e /app/.venv || { echo "FATAL: a venv exists; deps must be in the system prefix"; exit 1; } \
+    && command -v ps >/dev/null || { echo "FATAL: no ps; Nextflow's task wrapper needs it"; exit 1; } \
     && python  -c 'import sys, perturbo; print("python  ->", sys.executable, "| perturbo", getattr(perturbo, "__version__", "?"))' \
     && python3 -c 'import perturbo' \
     && /usr/bin/env python  -c 'import perturbo' \
