@@ -72,22 +72,27 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      # Guards the ELOOP class of bug: uv points the venv at /usr/local/bin/python3,
-      # so symlinking that name back at the venv makes every entry point fail at
-      # exec() with "too many levels of symbolic links" -- silently, with no output.
-      # CPU-only checks; nothing here needs a GPU.
-      - name: Smoke test — entry points resolve and the venv is active
+      # The dependencies live in the image's system prefix, with no venv to
+      # activate -- see the Dockerfile for why every venv layout broke under
+      # Singularity/Nextflow. These checks pin that property down. CPU-only;
+      # nothing here needs a GPU.
+      - name: Smoke test — perturbo is importable from a bare PATH
         run: |
           set -euxo pipefail
           # Default CMD is ["perturbo", "--help"].
           docker run --rm perturbo:ci
           docker run --rm perturbo:ci perturbo --help
-          # Both interpreter names must resolve to a real binary, not a loop.
-          docker run --rm perturbo:ci readlink -f /usr/local/bin/python
-          docker run --rm perturbo:ci readlink -f /usr/local/bin/python3
-          # ...and must land in the venv, not the bare base interpreter.
-          docker run --rm perturbo:ci python  -c 'import sys; assert sys.prefix == "/app/.venv", sys.prefix'
-          docker run --rm perturbo:ci python3 -c 'import perturbo; print(perturbo.__file__)'
+          # How the pipeline's bin/*.py scripts (`#!/usr/bin/env python`) enter
+          # Python. A venv symlink or wrapper at /usr/local/bin/python breaks
+          # exactly this while leaving `perturbo` itself working.
+          docker run --rm perturbo:ci /usr/bin/env python  -c 'import perturbo'
+          docker run --rm perturbo:ci /usr/bin/env python3 -c 'import perturbo'
+          # ...and with PATH reduced to the bare minimum, as Singularity may hand it over.
+          docker run --rm --env PATH=/usr/local/bin:/usr/bin:/bin perturbo:ci \
+            /usr/bin/env python -c 'import perturbo, sys; print(sys.executable, sys.prefix)'
+          # A shebanged script is the case a shell wrapper would break with ENOEXEC.
+          docker run --rm perturbo:ci sh -c \
+            'printf "#!/usr/bin/env python\nimport perturbo\nprint(\"shebang ok\")\n" > /tmp/t.py && chmod +x /tmp/t.py && /tmp/t.py'
 
       - name: Push JAX CUDA image
         if: github.event_name != 'pull_request'
