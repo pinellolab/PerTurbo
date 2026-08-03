@@ -409,7 +409,11 @@ def main(argv: list[str] | None = None) -> None:
     _t0 = time.monotonic()
     data = _load_from_path_with_backing(args.input, backed=args.backed)
     _load_elapsed = time.monotonic() - _t0
-    _loaded_adata = data if hasattr(data, "n_obs") else next(iter(data.mod.values())) if hasattr(data, "mod") else data
+    _loaded_adata = (
+        data[args.modality_key]
+        if hasattr(data, "mod") and args.modality_key in data.mod
+        else next(iter(data.mod.values())) if hasattr(data, "mod") else data
+    )
     print(
         f"[perturbo] Input loaded in {_load_elapsed:.1f}s: "
         f"{getattr(_loaded_adata, 'n_obs', '?')} cells × {getattr(_loaded_adata, 'n_vars', '?')} genes"
