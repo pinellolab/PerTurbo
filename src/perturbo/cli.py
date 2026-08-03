@@ -61,6 +61,7 @@ def _beta_fit_arrays(beta_fit: BetaFit) -> dict[str, Any]:
         "posterior_scale": beta_fit.posterior_scale,
         "z_values": beta_fit.z_values,
         "losses": beta_fit.losses,
+        "dispersion_excess_inverse": beta_fit.dispersion_excess_inverse,
     }
 
 
@@ -73,6 +74,7 @@ def _guide_posterior_arrays(beta_fit: BetaFit) -> dict[str, Any]:
         "guide_relative_efficiency_scale": beta_fit.guide_relative_efficiency_scale,
         "guide_offset_mean": beta_fit.guide_offset_mean,
         "guide_offset_scale": beta_fit.guide_offset_scale,
+        "guide_dispersion_excess_inverse": beta_fit.guide_dispersion_excess_inverse,
     }
 
 
@@ -255,6 +257,14 @@ def main(argv: list[str] | None = None) -> None:
             "Enable guide-level random effects with hierarchical gene-wise shrinkage in stage-1, "
             "and carry that calibration into stage-2."
         ),
+    )
+    parser.add_argument(
+        "--fit-perturbation-dispersion", action="store_true",
+        help="Fit non-negative perturbation/guide-by-gene excess inverse dispersion in stage 2 (NB only).",
+    )
+    parser.add_argument(
+        "--perturbation-dispersion-prior-rate", type=float, default=10.0,
+        help="Rate of the exponential prior on stage-2 excess inverse dispersion.",
     )
     parser.add_argument(
         "--save-model-params",
@@ -543,6 +553,15 @@ def main(argv: list[str] | None = None) -> None:
         should_chunk = True
     elif n_analysis_cells is not None and n_analysis_cells > args.max_chunk_size:
         should_chunk = True
+    if (
+        should_chunk
+        and args.fit_perturbation_dispersion
+        and args.perturbation_modality_key is not None
+    ):
+        raise ValueError(
+            "High-MOI fitted perturbation dispersion is not yet compatible with CLI perturbation chunking; "
+            "increase --max-chunk-size or disable --perturbation-chunk-size."
+        )
         print(
             "[perturbo] Auto chunking enabled because the analysis dataset has "
             f"{n_analysis_cells} cells; chunk cell counts will be capped at "
@@ -676,6 +695,7 @@ def main(argv: list[str] | None = None) -> None:
         posterior_mean = np.zeros((n_perts, n_genes), dtype=np.float32)
         posterior_scale = np.zeros((n_perts, n_genes), dtype=np.float32)
         z_values = np.zeros((n_perts, n_genes), dtype=np.float32)
+        dispersion_excess_inverse = np.zeros((n_perts, n_genes), dtype=np.float32) if args.fit_perturbation_dispersion else None
         last_state = None
         for chunk_i, chunk_info in enumerate(chunks):
             chunk_names = chunk_info.pert_names
@@ -735,10 +755,14 @@ def main(argv: list[str] | None = None) -> None:
                 guide_effect_strategy=guide_effect_strategy,
                 guide_activity_mode=guide_activity_mode,
                 guide_random_effects=args.guide_random_effects,
+                fit_perturbation_dispersion=args.fit_perturbation_dispersion,
+                perturbation_dispersion_prior_rate=args.perturbation_dispersion_prior_rate,
             )
             posterior_mean[chunk_indices] = np.asarray(chunk_fit.posterior_mean)
             posterior_scale[chunk_indices] = np.asarray(chunk_fit.posterior_scale)
             z_values[chunk_indices] = np.asarray(chunk_fit.z_values)
+            if dispersion_excess_inverse is not None and chunk_fit.dispersion_excess_inverse is not None:
+                dispersion_excess_inverse[chunk_indices] = np.asarray(chunk_fit.dispersion_excess_inverse)
             last_state = chunk_fit.svi_result
             if chunk_fit.losses.size > 0:
                 chunk_losses.append(chunk_fit.losses)
@@ -770,6 +794,7 @@ def main(argv: list[str] | None = None) -> None:
             z_values=jnp.asarray(z_values),
             losses=jnp.concatenate(chunk_losses) if chunk_losses else jnp.array([]),
             svi_result=last_state,
+            dispersion_excess_inverse=None if dispersion_excess_inverse is None else jnp.asarray(dispersion_excess_inverse),
         )
         # full = PerTurboData(
         #     counts=jnp.empty((0, len(analysis_gene_names))),
@@ -827,6 +852,8 @@ def main(argv: list[str] | None = None) -> None:
             guide_effect_strategy=guide_effect_strategy,
             guide_activity_mode=guide_activity_mode,
             guide_random_effects=args.guide_random_effects,
+            fit_perturbation_dispersion=args.fit_perturbation_dispersion,
+            perturbation_dispersion_prior_rate=args.perturbation_dispersion_prior_rate,
         )
     if all_perturbation_names is None or analysis_gene_names is None:
         raise RuntimeError("Missing perturbation/gene names for element-level output.")
@@ -966,6 +993,8 @@ def main(argv: list[str] | None = None) -> None:
             "gene_outlier_threshold_floor": threshold_floor,
             "count_censoring_percentile": clip_percentile if _is_censored_model_name(args.likelihood) else None,
             "guide_random_effects": bool(args.guide_random_effects),
+            "fit_perturbation_dispersion": bool(args.fit_perturbation_dispersion),
+            "perturbation_dispersion_prior_rate": float(args.perturbation_dispersion_prior_rate),
             "fit_guide_efficacy": None,
             "library_size_center_log_mean": controls.library_size_center_log_mean,
             "setup": setup.to_json_dict(),

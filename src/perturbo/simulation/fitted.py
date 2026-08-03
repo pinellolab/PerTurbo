@@ -171,6 +171,32 @@ def _sample_guide_random_effect_contribution(
     return np.asarray(guide_obs, dtype=np.float32) @ np.asarray(effects, dtype=np.float32)
 
 
+def _resolve_perturbation_dispersion_theta(
+    *, model: PerTurboModel, guide_obs: np.ndarray, element_membership: np.ndarray, gene_indices: np.ndarray
+) -> np.ndarray | None:
+    """Apply element (low-MOI) or additive guide (high-MOI) inverse-dispersion shifts."""
+    if model.beta_fit is None or model.control_fit is None:
+        raise RuntimeError("Model must be trained before simulation.")
+    guide_excess = model.beta_fit.guide_dispersion_excess_inverse
+    element_excess = model.beta_fit.dispersion_excess_inverse
+    if guide_excess is not None:
+        weights = np.asarray(guide_obs, dtype=np.float32)
+        excess = np.asarray(guide_excess, dtype=np.float32)[:, gene_indices]
+        if weights.ndim != 2 or weights.shape[1] != excess.shape[0] or np.any(weights < 0):
+            raise ValueError("guide_obs must be non-negative with one column per fitted guide.")
+        total_excess = weights @ excess
+    elif element_excess is not None:
+        weights = np.asarray(element_membership, dtype=np.float32)
+        excess = np.asarray(element_excess, dtype=np.float32)[:, gene_indices]
+        if weights.ndim != 2 or weights.shape[1] != excess.shape[0] or np.any(weights < 0) or np.any(weights.sum(axis=1) > 1):
+            raise ValueError("Element-level fitted dispersion requires low-MOI one-hot element membership.")
+        total_excess = weights @ excess
+    else:
+        return None
+    base_inverse = np.reciprocal(np.asarray(model.control_fit.theta, dtype=np.float32)[gene_indices])
+    return np.reciprocal(base_inverse[None, :] + total_excess)
+
+
 def simulate_data_from_trained_model(
     model: PerTurboModel,
     guide_obs: np.ndarray,
@@ -224,7 +250,10 @@ def simulate_data_from_trained_model(
     if guide_random_effect_contrib is not None:
         mu = mu + guide_random_effect_contrib
 
-    counts = _sample_counts(model=model, mu=mu, gene_indices=gene_idx)
+    theta_override = _resolve_perturbation_dispersion_theta(
+        model=model, guide_obs=guide_obs_arr, element_membership=guide_obs_arr @ guide_by_element_arr, gene_indices=gene_idx
+    )
+    counts = _sample_counts(model=model, mu=mu, gene_indices=gene_idx, theta_override=theta_override)
 
     rna_source = model.adata[model.setup.rna_modality]
     pert_source = model.adata[model.setup.perturbation_modality]

@@ -133,6 +133,8 @@ class BetaFit:
     guide_relative_efficiency_scale: jnp.ndarray | None = None
     guide_offset_mean: jnp.ndarray | None = None
     guide_offset_scale: jnp.ndarray | None = None
+    dispersion_excess_inverse: jnp.ndarray | None = None
+    guide_dispersion_excess_inverse: jnp.ndarray | None = None
 
 
 @dataclass
@@ -2012,6 +2014,8 @@ def fit_perturbation_effects(
     guide_effect_strategy: str = "shared",
     guide_activity_mode: str = "always_on",
     guide_random_effects: bool = False,
+    fit_perturbation_dispersion: bool = False,
+    perturbation_dispersion_prior_rate: float = 10.0,
 ) -> BetaFit:
     print("[perturbo] Fitting perturbation effects...")
     counts = data.counts
@@ -2042,7 +2046,7 @@ def fit_perturbation_effects(
             "[perturbo] guide_random_effects enabled without guide mapping; using conservative stage-2 "
             "posterior scale inflation from stage-1 guide_random_effect_tau."
         )
-    use_guide_shared_model = guide_effect_strategy != "shared" or random_effects_in_model
+    use_guide_shared_model = guide_effect_strategy != "shared" or random_effects_in_model or (fit_perturbation_dispersion and has_guide_mapping)
     num_guides = int(data.guide_matrix.shape[1]) if data.guide_matrix is not None else None
     if minibatch_size is not None and minibatch_size > counts.shape[0]:
         print(
@@ -2057,6 +2061,19 @@ def fit_perturbation_effects(
         size_factors = compute_size_factors(counts)
 
     model_name_lower = model_name.lower()
+    if fit_perturbation_dispersion:
+        if model_name_lower not in {"negbin", "nb", "censored_nb", "censored_negbin"}:
+            raise ValueError("fit_perturbation_dispersion=True is currently supported only for negative-binomial likelihoods.")
+        if not np.isfinite(perturbation_dispersion_prior_rate) or perturbation_dispersion_prior_rate <= 0:
+            raise ValueError("perturbation_dispersion_prior_rate must be finite and > 0.")
+        if has_guide_mapping:
+            guide_array = np.asarray(data.guide_matrix)
+            if guide_array.ndim != 2 or np.any(~np.isfinite(guide_array)) or np.any(guide_array < 0):
+                raise ValueError("High-MOI guide_matrix must be a finite, non-negative 2D matrix.")
+        else:
+            pert_array = np.asarray(pert_id)
+            if pert_array.ndim not in {1, 2} or (pert_array.ndim == 2 and (np.any(pert_array < 0) or np.any(pert_array.sum(axis=1) > 1))):
+                raise ValueError("Element-level fitted dispersion requires low-MOI perturbation labels.")
     model_cls = _resolve_guide_shared_model(model_name) if use_guide_shared_model else _resolve_model(model_name)
     conditioned_data: dict[str, jnp.ndarray | None] = {}
     is_lognormal_model = model_name_lower in {"lognormal_nb", "lnnb"}
@@ -2107,6 +2124,7 @@ def fit_perturbation_effects(
         model_cls,
         data=conditioned_data,
     )
+    dispersion_kwargs = ({"fit_perturbation_dispersion": True, "perturbation_dispersion_prior_rate": perturbation_dispersion_prior_rate} if fit_perturbation_dispersion else {})
     init_values = {
         "beta": jnp.zeros((num_perts, num_genes)),
     }
@@ -2205,6 +2223,7 @@ def fit_perturbation_effects(
             guide_to_element=data.guide_to_element if use_guide_shared_model else None,
             guide_effect_strategy=guide_effect_strategy,
             guide_random_effects=random_effects_in_model,
+            **dispersion_kwargs,
             **count_censoring_kwargs,
         )
     else:
@@ -2230,6 +2249,7 @@ def fit_perturbation_effects(
             guide_to_element=data.guide_to_element if use_guide_shared_model else None,
             guide_effect_strategy=guide_effect_strategy,
             guide_random_effects=random_effects_in_model,
+            **dispersion_kwargs,
             **count_censoring_kwargs,
         )
 
@@ -2244,6 +2264,14 @@ def fit_perturbation_effects(
             )
         scale = jnp.sqrt(jnp.square(scale) + jnp.square(tau)[jnp.newaxis, :])
     z_values = loc / scale
+    dispersion_excess_inverse = None
+    guide_dispersion_excess_inverse = None
+    if fit_perturbation_dispersion:
+        posterior = auto_guide.median(result.params)
+        if has_guide_mapping:
+            guide_dispersion_excess_inverse = posterior["guide_dispersion_excess_inverse"]
+        else:
+            dispersion_excess_inverse = posterior["dispersion_excess_inverse"]
     guide_summary = _summarize_stage2_guide_posteriors(
         auto_guide,
         result.params,
@@ -2270,6 +2298,8 @@ def fit_perturbation_effects(
         guide_relative_efficiency_scale=guide_summary.get("guide_relative_efficiency_scale"),
         guide_offset_mean=guide_summary.get("guide_offset_mean"),
         guide_offset_scale=guide_summary.get("guide_offset_scale"),
+        dispersion_excess_inverse=dispersion_excess_inverse,
+        guide_dispersion_excess_inverse=guide_dispersion_excess_inverse,
     )
 
 

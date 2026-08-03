@@ -181,6 +181,8 @@ def BaseModel(
     skip_obs_sampling: bool = False,
     guide_effect_strategy: str = "shared",
     guide_random_effects: bool = False,
+    fit_perturbation_dispersion: bool = False,
+    perturbation_dispersion_prior_rate: float = 10.0,
     count_censoring_threshold=None,
 ):
     del guide_to_element, guide_effect_strategy
@@ -247,6 +249,10 @@ def BaseModel(
             outlier_mean_shift = numpyro.sample("outlier_mean_shift", dist.HalfNormal(1.0))
         with pert_plate:
             beta = _sample_effect_site("beta", prior)
+            if fit_perturbation_dispersion:
+                dispersion_excess_inverse = numpyro.sample(
+                    "dispersion_excess_inverse", dist.Exponential(perturbation_dispersion_prior_rate)
+                )
 
     covariate_coef = None
     if covariates is not None:
@@ -289,9 +295,13 @@ def BaseModel(
             raise ValueError("pert_id must be provided.")
         if pert_id.ndim == 1:
             pert_effect = beta[pert_id, :]
+            if fit_perturbation_dispersion:
+                effective_theta = jnp.reciprocal(jnp.reciprocal(theta)[None, :] + dispersion_excess_inverse[pert_id, :])
         elif pert_id.ndim == 2:
             pert_matrix = jnp.asarray(pert_id, dtype=beta.dtype)
             pert_effect = pert_matrix @ beta
+            if fit_perturbation_dispersion:
+                effective_theta = jnp.reciprocal(jnp.reciprocal(theta)[None, :] + pert_matrix @ dispersion_excess_inverse)
         else:
             raise ValueError("pert_id must be 1D (indices) or 2D (binary matrix).")
 
@@ -312,7 +322,8 @@ def BaseModel(
             mu = mu + guide_random_effect_contrib
             mu_outlier = mu_outlier + guide_random_effect_contrib
 
-        logits = mu - jnp.log(theta)
+        theta_for_observations = effective_theta if fit_perturbation_dispersion else theta
+        logits = mu - jnp.log(theta_for_observations)
         logits_outlier = (mu_outlier + outlier_mean_shift) - jnp.log(theta_outlier) if uses_mixture_nb else None
         if skip_obs_sampling:
             return None
@@ -322,7 +333,7 @@ def BaseModel(
                 counts=counts,
                 likelihood=likelihood,
                 logits=logits,
-                theta=theta,
+                theta=theta_for_observations,
                 noise_scale=noise_scale if likelihood in {"lnnb", "lognormal_nb"} else None,
                 logits_outlier=logits_outlier,
                 theta_outlier=theta_outlier if uses_mixture_nb else None,
@@ -350,6 +361,8 @@ def GuideSharedEffectModel(
     skip_obs_sampling: bool = False,
     guide_effect_strategy: str = "shared",
     guide_random_effects: bool = False,
+    fit_perturbation_dispersion: bool = False,
+    perturbation_dispersion_prior_rate: float = 10.0,
     count_censoring_threshold=None,
 ):
     if guide_matrix is None or guide_to_element is None:
@@ -418,6 +431,11 @@ def GuideSharedEffectModel(
             outlier_mean_shift = numpyro.sample("outlier_mean_shift", dist.HalfNormal(1.0))
         with pert_plate:
             beta = _sample_effect_site("beta", prior)
+        if fit_perturbation_dispersion:
+            with guide_plate:
+                guide_dispersion_excess_inverse = numpyro.sample(
+                    "guide_dispersion_excess_inverse", dist.Exponential(perturbation_dispersion_prior_rate)
+                )
 
     covariate_coef = None
     if covariates is not None:
@@ -478,6 +496,10 @@ def GuideSharedEffectModel(
                 factor_scores = numpyro.sample("factor_scores", dist.Normal(0, 1.0))
 
         guide_effect_matrix = jnp.asarray(guide_matrix, dtype=guide_effect.dtype) @ guide_effect
+        if fit_perturbation_dispersion:
+            effective_theta = jnp.reciprocal(
+                jnp.reciprocal(theta)[None, :] + jnp.asarray(guide_matrix, dtype=theta.dtype) @ guide_dispersion_excess_inverse
+            )
         mu = beta_0 + guide_effect_matrix + size_factor
         # Outlier component is a right-shifted baseline mode and does not
         # depend on guide/element effect beta.
@@ -495,7 +517,8 @@ def GuideSharedEffectModel(
             mu = mu + guide_random_effect_contrib
             mu_outlier = mu_outlier + guide_random_effect_contrib
 
-        logits = mu - jnp.log(theta)
+        theta_for_observations = effective_theta if fit_perturbation_dispersion else theta
+        logits = mu - jnp.log(theta_for_observations)
         logits_outlier = (mu_outlier + outlier_mean_shift) - jnp.log(theta_outlier) if uses_mixture_nb else None
         if skip_obs_sampling:
             return None
@@ -505,7 +528,7 @@ def GuideSharedEffectModel(
                 counts=counts,
                 likelihood=likelihood,
                 logits=logits,
-                theta=theta,
+                theta=theta_for_observations,
                 noise_scale=noise_scale if likelihood in {"lnnb", "lognormal_nb"} else None,
                 logits_outlier=logits_outlier,
                 theta_outlier=theta_outlier if uses_mixture_nb else None,

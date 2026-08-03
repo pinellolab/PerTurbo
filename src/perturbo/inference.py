@@ -91,6 +91,7 @@ def _beta_arrays(beta_fit: core.BetaFit) -> dict[str, Any]:
         "posterior_scale": beta_fit.posterior_scale,
         "z_values": beta_fit.z_values,
         "losses": beta_fit.losses,
+        "dispersion_excess_inverse": beta_fit.dispersion_excess_inverse,
     }
 
 
@@ -103,6 +104,7 @@ def _guide_posterior_arrays(beta_fit: core.BetaFit) -> dict[str, Any]:
         "guide_relative_efficiency_scale": beta_fit.guide_relative_efficiency_scale,
         "guide_offset_mean": beta_fit.guide_offset_mean,
         "guide_offset_scale": beta_fit.guide_offset_scale,
+        "guide_dispersion_excess_inverse": beta_fit.guide_dispersion_excess_inverse,
     }
 
 
@@ -156,6 +158,8 @@ def _restore_beta_fit(
         guide_relative_efficiency_scale=guide_arrays.get("guide_relative_efficiency_scale"),
         guide_offset_mean=guide_arrays.get("guide_offset_mean"),
         guide_offset_scale=guide_arrays.get("guide_offset_scale"),
+        dispersion_excess_inverse=arrays.get("dispersion_excess_inverse"),
+        guide_dispersion_excess_inverse=guide_arrays.get("guide_dispersion_excess_inverse"),
     )
 
 
@@ -271,6 +275,8 @@ class PerTurboModel:
         gene_outlier_threshold_floor: int = 2,
         count_censoring_percentile: float | None = None,
         guide_random_effects: bool = False,
+        fit_perturbation_dispersion: bool = False,
+        perturbation_dispersion_prior_rate: float = 10.0,
         fit_guide_efficacy: bool | None = None,
         library_size_center_log_mean: float | None = None,
         svi_config: core.SVIConfig | None = None,
@@ -293,6 +299,8 @@ class PerTurboModel:
         self.gene_outlier_threshold_floor = gene_outlier_threshold_floor
         self.count_censoring_percentile = count_censoring_percentile
         self.guide_random_effects = bool(guide_random_effects)
+        self.fit_perturbation_dispersion = bool(fit_perturbation_dispersion)
+        self.perturbation_dispersion_prior_rate = float(perturbation_dispersion_prior_rate)
         self.fit_guide_efficacy = fit_guide_efficacy
         self.library_size_center_log_mean = library_size_center_log_mean
         self.svi_config = svi_config or core.SVIConfig(step_size=0.01)
@@ -329,6 +337,8 @@ class PerTurboModel:
             gene_outlier_threshold_floor=metadata.get("gene_outlier_threshold_floor", 2),
             count_censoring_percentile=metadata.get("count_censoring_percentile"),
             guide_random_effects=metadata.get("guide_random_effects", False),
+            fit_perturbation_dispersion=metadata.get("fit_perturbation_dispersion", False),
+            perturbation_dispersion_prior_rate=metadata.get("perturbation_dispersion_prior_rate", 10.0),
             library_size_center_log_mean=metadata.get("library_size_center_log_mean"),
             svi_config=core.SVIConfig(**metadata.get("svi_config", {})),
         )
@@ -509,6 +519,8 @@ class PerTurboModel:
             count_censoring_percentile=self.count_censoring_percentile,
             minibatch_size=minibatch_size,
             guide_random_effects=self.guide_random_effects,
+            fit_perturbation_dispersion=self.fit_perturbation_dispersion,
+            perturbation_dispersion_prior_rate=self.perturbation_dispersion_prior_rate,
         )
         self.beta_fit = core.fit_perturbation_effects(
             analysis_data,
@@ -568,6 +580,10 @@ class PerTurboModel:
             values["guide_relative_efficiency"] = np.asarray(beta_fit.guide_relative_efficiency_mean)
         if beta_fit.guide_offset_mean is not None:
             values["guide_offset"] = np.asarray(beta_fit.guide_offset_mean)
+        if beta_fit.dispersion_excess_inverse is not None:
+            values["perturbation_dispersion_excess_inverse"] = np.asarray(beta_fit.dispersion_excess_inverse)
+        if beta_fit.guide_dispersion_excess_inverse is not None:
+            values["guide_dispersion_excess_inverse"] = np.asarray(beta_fit.guide_dispersion_excess_inverse)
         if control_fit.covariate_coef is not None:
             values["covariate_coef"] = np.asarray(control_fit.covariate_coef)
         if control_fit.factor_loadings is not None:
@@ -617,6 +633,10 @@ class PerTurboModel:
             params["guide_offset_loc"] = beta_fit.guide_offset_mean
         if beta_fit.guide_offset_scale is not None:
             params["guide_offset_scale"] = beta_fit.guide_offset_scale
+        if beta_fit.dispersion_excess_inverse is not None:
+            params["perturbation_dispersion_excess_inverse"] = beta_fit.dispersion_excess_inverse
+        if beta_fit.guide_dispersion_excess_inverse is not None:
+            params["guide_dispersion_excess_inverse"] = beta_fit.guide_dispersion_excess_inverse
         if control_fit.baseline_posterior is not None:
             params["baseline_beta_0_loc"] = control_fit.baseline_posterior.beta_0_loc
             params["baseline_beta_0_scale"] = control_fit.baseline_posterior.beta_0_scale
@@ -673,6 +693,8 @@ class PerTurboModel:
             "gene_outlier_threshold_floor": self.gene_outlier_threshold_floor,
             "count_censoring_percentile": self.count_censoring_percentile,
             "guide_random_effects": self.guide_random_effects,
+            "fit_perturbation_dispersion": self.fit_perturbation_dispersion,
+            "perturbation_dispersion_prior_rate": self.perturbation_dispersion_prior_rate,
             "fit_guide_efficacy": self.fit_guide_efficacy,
             "library_size_center_log_mean": self.library_size_center_log_mean,
             "setup": self.setup.to_json_dict(),
