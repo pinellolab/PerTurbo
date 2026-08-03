@@ -4,6 +4,7 @@ WORKDIR /app
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends git curl ca-certificates && rm -rf /var/lib/apt/lists/*
 RUN pip install --upgrade pip
+RUN pip install pyarrow
 
 # The workflow will place PerTurbo/ alongside this Dockerfile
 COPY . /app/PerTurbo
