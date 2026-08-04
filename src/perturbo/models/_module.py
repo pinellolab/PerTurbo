@@ -1,3 +1,4 @@
+import functools
 import warnings
 from collections.abc import Mapping
 from typing import Literal
@@ -6,7 +7,7 @@ import pyro
 import pyro.distributions as dist
 import torch
 from pyro import poutine
-from pyro.infer.autoguide import AutoDelta, AutoGuideList, AutoNormal, init_to_median
+from pyro.infer.autoguide import AutoDelta, AutoGuideList, AutoNormal, init_to_median, init_to_value
 from scvi.module.base import PyroBaseModuleClass
 
 from ._constants import REGISTRY_KEYS
@@ -31,6 +32,7 @@ class PerTurboPyroModule(PyroBaseModuleClass):
         n_batches: int | None = 1,
         log_gene_mean_init: torch.Tensor | None = None,
         log_gene_dispersion_init: torch.Tensor | None = None,
+        lfc_init: torch.Tensor | None = None,
         guide_by_element: torch.Tensor | None = None,
         gene_by_element: torch.Tensor | None = None,
         likelihood: Literal["nb", "lnnb"] = "nb",
@@ -89,7 +91,7 @@ class PerTurboPyroModule(PyroBaseModuleClass):
         module_kwargs : dict
             Additional keyword arguments (unused).
         """
-        super().__init__()
+        super().__init__(on_load_kwargs={"skip_initialization": True, "batch_size": 1})
         # set user-defined options for model behavior
         # self.dispersion_effects = dispersion_effects
         for k in module_kwargs:
@@ -150,35 +152,18 @@ class PerTurboPyroModule(PyroBaseModuleClass):
         self.n_batches = n_batches
 
         # Sites to approximate with Delta distribution instead of default Normal distribution.
-        self.delta_sites = []
+        # self.delta_sites = []
+        self.delta_sites = ["log_gene_mean", "log_gene_dispersion", "multiplicative_noise"]
         # self.delta_sites = ["cell_factors"]
         # self.delta_sites = ["cell_factors", "cell_loadings", "pert_factors", "pert_loadings"]
 
         if log_gene_mean_init is None:
             log_gene_mean_init = torch.zeros(self.n_genes)
+        self.log_gene_mean_init = log_gene_mean_init
 
         if log_gene_dispersion_init is None:
             log_gene_dispersion_init = torch.ones(self.n_genes)
-
-        # if control_pcs is not None and n_factors is not None:
-        #     init_values["cell_loadings"] = control_pcs
-
-        self._guide = AutoGuideList(self.model, create_plates=self.create_plates)
-
-        self._guide.append(
-            AutoNormal(
-                poutine.block(self.model, hide=self.delta_sites + self.discrete_sites),
-                init_loc_fn=lambda x: init_to_median(x, num_samples=100),
-            ),
-        )
-
-        if self.delta_sites:
-            self._guide.append(
-                AutoDelta(
-                    poutine.block(self.model, expose=self.delta_sites),
-                    init_loc_fn=lambda x: init_to_median(x, num_samples=100),
-                )
-            )
+        self.log_gene_dispersion_init = log_gene_dispersion_init
 
         ## register hyperparameters as buffers so they get automatically moved to GPU by scvi-tools
 
@@ -208,11 +193,14 @@ class PerTurboPyroModule(PyroBaseModuleClass):
         self.register_buffer("one", torch.tensor(1.0))
 
         # per-gene hyperparams
-        self.register_buffer("gene_mean_prior_loc", log_gene_mean_init)
-        self.register_buffer("gene_disp_prior_loc", log_gene_dispersion_init)
+        self.register_buffer("gene_mean_prior_loc", torch.tensor(0.0))
+        self.register_buffer("gene_disp_prior_loc", torch.tensor(1.0))
 
-        self.register_buffer("gene_mean_prior_scale", torch.tensor(0.2))
-        self.register_buffer("gene_disp_prior_scale", torch.tensor(0.2))
+        self.register_buffer("gene_mean_prior_scale", torch.tensor(3.0))
+        self.register_buffer("gene_disp_prior_scale", torch.tensor(1.0))
+
+        self.register_buffer("noise_prior_loc", torch.tensor(-1.0))
+        self.register_buffer("noise_prior_scale", torch.tensor(0.5))
 
         # batch/covariate hyperparams
         self.register_buffer("batch_effect_prior_scale", torch.tensor(0.2))
@@ -243,8 +231,27 @@ class PerTurboPyroModule(PyroBaseModuleClass):
         self.register_buffer("pert_factor_prior_scale", torch.tensor(0.1))
         self.register_buffer("pert_loading_prior_scale", torch.tensor(1.0))
 
-        # for LogNormalNegativeBinomial likelihood hyperparams
-        self.register_buffer("noise_prior_rate", torch.tensor(2.0))
+        # create guide with initial values
+        if lfc_init is None:
+            lfc_init = torch.zeros((self.n_elements, self.n_genes))
+
+        if self.local_effects and self.sparse_tensors:
+            if lfc_init.shape == (self.n_elements, self.n_genes):
+                lfc_init = lfc_init[self.element_by_gene_idx[0], self.element_by_gene_idx[1]]
+            assert lfc_init.shape != (self.n_element_effects,), (
+                f"lfc_init shape: {lfc_init.shape}, expected ({self.n_element_effects},)"
+            )
+        self.lfc_init = lfc_init
+
+        # self._guide = self._guide_factory(self.model)
+        # self._guide = self._guide_factory(
+        #     self.model,
+        #     init_values={
+        #         "log_gene_mean": self.log_gene_mean_init,
+        #         "log_gene_dispersion": self.log_gene_dispersion_init,
+        #         "element_effects": self.lfc_init,
+        #     },
+        # )
 
         # override with user-provided values from prior_param_dict
         if prior_param_dict is not None:
@@ -253,6 +260,34 @@ class PerTurboPyroModule(PyroBaseModuleClass):
                 assert isinstance(v, torch.Tensor) and k in buffer_keys
                 assert v.shape == self.get_buffer(k).shape
                 self.register_buffer(k, v)
+
+    def _guide_factory(self, model, init_values=None, init_scale=0.05):
+        guide = AutoGuideList(model, create_plates=self.create_plates)
+        if init_values is None:
+            init_values = {}
+            # init_values = {
+            #     "log_gene_mean": self.log_gene_mean_init,
+            #     "log_gene_dispersion": self.log_gene_dispersion_init,
+            #     "element_effects": self.lfc_init,
+            # }
+        init_loc_fn = functools.partial(init_to_value, values=init_values, fallback=init_to_median(num_samples=100))
+
+        guide.append(
+            AutoNormal(
+                poutine.block(model, hide=self.delta_sites + self.discrete_sites),
+                init_loc_fn=init_loc_fn,
+                init_scale=init_scale,
+            ),
+        )
+
+        if self.delta_sites:
+            guide.append(
+                AutoDelta(
+                    poutine.block(model, expose=self.delta_sites),
+                    init_loc_fn=init_loc_fn,
+                )
+            )
+        return guide
 
     @staticmethod
     def _get_fn_args_from_batch(tensor_dict: dict) -> tuple[tuple[torch.Tensor], dict]:
@@ -547,7 +582,10 @@ class PerTurboPyroModule(PyroBaseModuleClass):
 
             if self.likelihood == "lnnb":
                 # additional noise for LogNormalNegativeBinomial likelihood
-                multiplicative_noise = pyro.sample("multiplicative_noise", dist.Exponential(self.noise_prior_rate))
+                # multiplicative_noise = pyro.sample("multiplicative_noise", dist.LogNormal(self.noise_prior_rate))
+                multiplicative_noise = pyro.sample(
+                    "multiplicative_noise", dist.LogNormal(self.noise_prior_loc, self.noise_prior_scale)
+                )
                 # multiplicative_noise = 1 / self.noise_prior_rate
 
             with batch_plate:
@@ -618,6 +656,7 @@ class PerTurboPyroModule(PyroBaseModuleClass):
                             "obs",
                             LogNormalNegativeBinomial(
                                 logits=nb_log_mean - nb_log_dispersion - multiplicative_noise**2 / 2,
+                                # logits=nb_log_mean - nb_log_dispersion,
                                 total_count=nb_log_dispersion.exp(),
                                 multiplicative_noise_scale=multiplicative_noise,
                                 num_quad_points=self.lnnb_quad_points,

@@ -69,6 +69,11 @@ def test_model_mdata(
     assert model.summary_stats.n_vars == len(mdata[rna_key].var)
     assert model.summary_stats.n_perturbations == len(mdata[perturb_key].var)
 
+    model.pretrain(
+        indices=np.random.choice(len(mdata), size=len(mdata) // 2, replace=False),
+        max_epochs=2,
+        lr=0.1,
+    )
     model.train(
         # accelerator="auto",
         max_epochs=5,
@@ -76,6 +81,7 @@ def test_model_mdata(
         batch_size=2,
         # load_sparse_tensor=sparse_tensors,
     )
+
     # model.train(
     #     # accelerator="auto",
     #     max_epochs=5,

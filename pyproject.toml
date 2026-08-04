@@ -19,11 +19,11 @@ authors = [{ name = "Logan Blaine" }]
 maintainers = [{ name = "Logan Blaine", email = "loganblaine@g.harvard.edu" }]
 dependencies = [
     "anndata>=0.10.9",
-    "scvi-tools>=1.1.2",
+    "scvi-tools>=1.4.1",
     "torch>=1.11.0",
     "pyro-ppl>=1.8.6",
     "mudata>=0.3.1",
-    "pandas>=1.5.3",
+    "pandas>=2.0.3",
     "scipy>=1.11.4",
     "matplotlib",
     "numpy",
@@ -52,7 +52,7 @@ optional-dependencies.doc = [
     "sphinxext-opengraph",
 ]
 
-optional-dependencies.test = ["pytest", "coverage"]
+optional-dependencies.test = ["pytest", "coverage>=7.6.1"]
 
 # https://docs.pypi.org/project_metadata/#project-urls
 urls.Documentation = "https://PerTurbo.readthedocs.io/"
