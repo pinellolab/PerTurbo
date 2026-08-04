@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
 from typing import Any, Callable, Iterable
 
@@ -1933,67 +1934,125 @@ def _posterior_summary_from_draws(draws: np.ndarray) -> tuple[np.ndarray, np.nda
     return mean, scale, z_values
 
 
+@partial(jax.jit, static_argnames=("num_samples",))
+def _summarize_relative_guide_block(
+    beta_loc: jnp.ndarray,
+    beta_scale: jnp.ndarray,
+    relative_loc: jnp.ndarray,
+    relative_scale: jnp.ndarray,
+    guide_to_element: jnp.ndarray,
+    beta_key: jax.Array,
+    relative_key: jax.Array,
+    *,
+    num_samples: int,
+) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+    """Draw and summarize a bounded element-by-guide posterior block."""
+    num_elements, num_genes = beta_loc.shape
+    num_guides = relative_loc.shape[0]
+    beta_draws = beta_loc + beta_scale * jax.random.normal(
+        beta_key,
+        shape=(num_samples, num_elements, num_genes),
+        dtype=beta_loc.dtype,
+    )
+    relative_draws = jax.nn.sigmoid(
+        relative_loc + relative_scale * jax.random.normal(
+            relative_key,
+            shape=(num_samples, num_guides, num_genes),
+            dtype=relative_loc.dtype,
+        )
+    )
+    guide_effect_draws = jnp.einsum("qe,seg->sqg", guide_to_element, beta_draws) * relative_draws
+    effect_mean = jnp.mean(guide_effect_draws, axis=0)
+    effect_scale = jnp.clip(jnp.std(guide_effect_draws, axis=0), 1e-6)
+    relative_mean = jnp.mean(relative_draws, axis=0)
+    relative_scale_summary = jnp.clip(jnp.std(relative_draws, axis=0), 1e-6)
+    return effect_mean, effect_scale, relative_mean, relative_scale_summary
+
+
 def _summarize_stage2_guide_posteriors(
-    posterior_guide: AutoNormal,
     params: dict[str, Any],
     *,
     data: PerTurboData,
-    size_factors: jnp.ndarray | None,
-    num_perts: int,
-    num_genes: int,
-    num_factors: int | None,
-    prior: str,
     guide_effect_strategy: str,
-    guide_random_effects: bool,
     num_samples: int = 64,
+    guide_block_size: int = 16,
+    element_block_size: int = 100,
 ) -> dict[str, np.ndarray]:
+    """Summarize guide-level derived effects without materializing all beta draws.
+
+    ``AutoNormal`` represents the unconstrained ``beta`` site directly as an
+    independent Normal distribution, so shared guide effects have closed-form
+    moments. Relative effects require Monte Carlo propagation through the
+    sigmoid-constrained guide efficiency, but are sampled in bounded element
+    and guide blocks.
+    """
     if data.guide_to_element is None:
         return {}
-
-    samples = posterior_guide.sample_posterior(
-        jax.random.PRNGKey(2024),
-        params,
-        data.counts,
-        data.pert_id,
-        sample_shape=(num_samples,),
-        size_factors=size_factors,
-        covariates=data.covariates,
-        guide_matrix=data.guide_matrix,
-        guide_to_element=data.guide_to_element,
-        num_cells=data.counts.shape[0],
-        num_perts=num_perts,
-        num_guides=(data.guide_matrix.shape[1] if data.guide_matrix is not None else None),
-        num_genes=num_genes,
-        num_factors=num_factors,
-        subsample_size=None,
-        prior=prior,
-        guide_effect_strategy=guide_effect_strategy,
-        guide_random_effects=guide_random_effects,
-        skip_obs_sampling=True,
-    )
-
     guide_to_element = np.asarray(data.guide_to_element, dtype=np.float32)
-    beta_draws = np.asarray(samples["beta"], dtype=np.float32)
-    guide_effect_draws = np.einsum("qe,...eg->...qg", guide_to_element, beta_draws)
-    summary: dict[str, np.ndarray] = {}
-    if guide_effect_strategy == "relative" and "guide_relative_efficiency" in samples:
-        relative_draws = np.asarray(samples["guide_relative_efficiency"], dtype=np.float32)
-        guide_effect_draws = guide_effect_draws * relative_draws
-        rel_mean, rel_scale, _rel_z = _posterior_summary_from_draws(relative_draws)
-        summary["guide_relative_efficiency_mean"] = rel_mean
-        summary["guide_relative_efficiency_scale"] = rel_scale
-    if guide_effect_strategy == "offset" and "guide_offset" in samples:
-        offset_draws = np.asarray(samples["guide_offset"], dtype=np.float32)
-        guide_effect_draws = guide_effect_draws + offset_draws
-        offset_mean, offset_scale, _offset_z = _posterior_summary_from_draws(offset_draws)
-        summary["guide_offset_mean"] = offset_mean
-        summary["guide_offset_scale"] = offset_scale
+    beta_loc = np.asarray(params["beta_auto_loc"], dtype=np.float32)
+    beta_scale = np.clip(np.asarray(params["beta_auto_scale"], dtype=np.float32), 1e-6, None)
 
-    effect_mean, effect_scale, effect_z = _posterior_summary_from_draws(guide_effect_draws)
-    summary["guide_effect_mean"] = effect_mean
-    summary["guide_effect_scale"] = effect_scale
-    summary["guide_effect_z_values"] = effect_z
-    return summary
+    if guide_effect_strategy == "shared":
+        effect_mean = guide_to_element @ beta_loc
+        effect_scale = np.sqrt(np.square(guide_to_element) @ np.square(beta_scale))
+        effect_scale = np.clip(effect_scale, 1e-6, None)
+        return {
+            "guide_effect_mean": effect_mean.astype(np.float32, copy=False),
+            "guide_effect_scale": effect_scale.astype(np.float32, copy=False),
+            "guide_effect_z_values": (effect_mean / effect_scale).astype(np.float32, copy=False),
+        }
+
+    if guide_effect_strategy != "relative":
+        return {}
+    if guide_block_size < 1:
+        raise ValueError("guide_block_size must be >= 1.")
+
+    if element_block_size < 1:
+        raise ValueError("element_block_size must be >= 1.")
+    beta_loc_jax = jnp.asarray(params["beta_auto_loc"])
+    beta_scale_jax = jnp.asarray(params["beta_auto_scale"])
+    relative_loc = jnp.asarray(params["guide_relative_efficiency_auto_loc"])
+    relative_scale = jnp.asarray(params["guide_relative_efficiency_auto_scale"])
+    num_guides, num_genes = guide_to_element.shape[0], beta_loc.shape[1]
+    effect_mean = np.empty((num_guides, num_genes), dtype=np.float32)
+    effect_scale = np.empty((num_guides, num_genes), dtype=np.float32)
+    relative_mean = np.empty((num_guides, num_genes), dtype=np.float32)
+    relative_scale_summary = np.empty((num_guides, num_genes), dtype=np.float32)
+    rng_key = jax.random.PRNGKey(2024)
+
+    for element_start in range(0, beta_loc.shape[0], element_block_size):
+        element_stop = min(element_start + element_block_size, beta_loc.shape[0])
+        guide_indices = np.flatnonzero(np.any(guide_to_element[:, element_start:element_stop] != 0, axis=1))
+        if guide_indices.size == 0:
+            continue
+        for start in range(0, guide_indices.size, guide_block_size):
+            indices = guide_indices[start : start + guide_block_size]
+            beta_key = jax.random.fold_in(rng_key, element_start)
+            relative_key = jax.random.fold_in(rng_key, int(indices[0]) + 1)
+            block_summary = _summarize_relative_guide_block(
+                beta_loc_jax[element_start:element_stop],
+                beta_scale_jax[element_start:element_stop],
+                relative_loc[indices],
+                relative_scale[indices],
+                jnp.asarray(guide_to_element[indices, element_start:element_stop]),
+                beta_key,
+                relative_key,
+                num_samples=num_samples,
+            )
+            (
+                effect_mean[indices],
+                effect_scale[indices],
+                relative_mean[indices],
+                relative_scale_summary[indices],
+            ) = (np.asarray(value, dtype=np.float32) for value in block_summary)
+
+    return {
+        "guide_effect_mean": effect_mean,
+        "guide_effect_scale": effect_scale,
+        "guide_effect_z_values": effect_mean / effect_scale,
+        "guide_relative_efficiency_mean": relative_mean,
+        "guide_relative_efficiency_scale": relative_scale_summary,
+    }
 
 
 def fit_perturbation_effects(
@@ -2273,16 +2332,9 @@ def fit_perturbation_effects(
         else:
             dispersion_excess_inverse = posterior["dispersion_excess_inverse"]
     guide_summary = _summarize_stage2_guide_posteriors(
-        auto_guide,
         result.params,
         data=data,
-        size_factors=size_factors if use_observed_size_factors else None,
-        num_perts=num_perts,
-        num_genes=num_genes,
-        num_factors=num_factors,
-        prior=prior,
         guide_effect_strategy=guide_effect_strategy,
-        guide_random_effects=random_effects_in_model,
     )
     print("[perturbo] Beta fit complete.")
     return BetaFit(

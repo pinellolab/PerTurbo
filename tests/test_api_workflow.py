@@ -6,6 +6,7 @@ from dataclasses import replace
 
 import anndata as ad
 import perturbo.api as api_module
+import perturbo.core as core_module
 import jax.numpy as jnp
 import numpy as np
 import pandas as pd
@@ -57,6 +58,58 @@ def _make_guide_shared_data() -> PerTurboData:
         guide_names=["guide_a_1", "guide_a_2", "ntc_1"],
         guide_to_element=guide_to_element,
     )
+
+
+def test_stage2_guide_summary_uses_analytic_shared_moments() -> None:
+    data = _make_guide_shared_data()
+    params = {
+        "beta_auto_loc": jnp.array([[1.0, -2.0, 3.0], [4.0, 5.0, -6.0]]),
+        "beta_auto_scale": jnp.array([[0.2, 0.3, 0.4], [0.5, 0.6, 0.7]]),
+    }
+
+    summary = core_module._summarize_stage2_guide_posteriors(
+        params,
+        data=data,
+        guide_effect_strategy="shared",
+    )
+
+    mapping = np.asarray(data.guide_to_element)
+    np.testing.assert_allclose(summary["guide_effect_mean"], mapping @ np.asarray(params["beta_auto_loc"]))
+    np.testing.assert_allclose(
+        summary["guide_effect_scale"],
+        np.sqrt(np.square(mapping) @ np.square(np.asarray(params["beta_auto_scale"]))),
+    )
+
+
+def test_stage2_relative_guide_summary_samples_in_small_guide_blocks(monkeypatch: pytest.MonkeyPatch) -> None:
+    data = _make_guide_shared_data()
+    params = {
+        "beta_auto_loc": jnp.zeros((2, 3)),
+        "beta_auto_scale": jnp.ones((2, 3)),
+        "guide_relative_efficiency_auto_loc": jnp.zeros((3, 3)),
+        "guide_relative_efficiency_auto_scale": jnp.ones((3, 3)),
+    }
+    sample_shapes: list[tuple[int, ...]] = []
+    original_normal = core_module.jax.random.normal
+
+    def record_sample_shape(*args, **kwargs):
+        sample_shapes.append(tuple(kwargs["shape"]))
+        return original_normal(*args, **kwargs)
+
+    monkeypatch.setattr(core_module.jax.random, "normal", record_sample_shape)
+    summary = core_module._summarize_stage2_guide_posteriors(
+        params,
+        data=data,
+        guide_effect_strategy="relative",
+        num_samples=8,
+        guide_block_size=1,
+        element_block_size=1,
+    )
+
+    assert all(shape != (8, 2, 3) for shape in sample_shapes)
+    assert max(shape[1] for shape in sample_shapes if len(shape) == 3) == 1
+    assert summary["guide_effect_mean"].shape == (3, 3)
+    assert np.all(np.isfinite(summary["guide_effect_scale"]))
 
 
 def test_two_stage_fit_with_factors_conditions_loadings() -> None:
