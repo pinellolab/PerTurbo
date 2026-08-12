@@ -465,6 +465,7 @@ class PerTurboModel:
             winsorize_gene_expression=self.winsorize_gene_expression,
             gene_outlier_threshold_floor=self.gene_outlier_threshold_floor,
             return_covariate_transform_state=True,
+            retain_perturbation_design=self.guide_random_effects,
         )
         if isinstance(controls, tuple):
             control_data, covariate_transform_state = controls
@@ -491,7 +492,14 @@ class PerTurboModel:
             winsorize_gene_expression=self.winsorize_gene_expression,
             gene_outlier_threshold_floor=self.gene_outlier_threshold_floor,
             covariate_transform_state=covariate_transform_state,
-            retain_guide_structure=self.setup.guide_by_element_key is not None,
+            retain_guide_structure=bool(
+                self.setup.guide_by_element_key is not None
+                and (
+                    self.guide_effect_strategy != "shared"
+                    or self.guide_random_effects
+                    or self.fit_perturbation_dispersion
+                )
+            ),
             library_size_center_log_mean=control_data.library_size_center_log_mean,
         )
         minibatch_size = batch_size if batch_size not in (None, 0) else None

@@ -54,6 +54,22 @@ perturbo --input screen.h5mu --out-dir perturbo_outputs/run --modality-key rna \
   --perturbation-modality-key grna --perturbation-element-varm-key element_targeted
 ```
 
+For a CIS-only or otherwise preselected analysis, pass a CSV, TSV, or Parquet
+table whose required columns are `element` and `gene`:
+
+```bash
+perturbo --input screen.h5mu --out-dir perturbo_outputs/cis --modality-key rna \
+  --perturbation-modality-key grna --perturbation-element-varm-key element_targeted \
+  --pairs-to-test cis_pairs.parquet --minibatch-size-betas 1024
+```
+
+Only those exact coefficients are sampled; the pair list is not expanded to
+an element-by-gene Cartesian product. PerTurbo subsets the RNA genes and
+perturbation elements to the pair-list union before transfer to JAX. A beta
+minibatch uses one global compiled fit by default. Use
+`--perturbation-chunk-size` explicitly only when the full design does not fit
+in device memory, since each distinct chunk shape can require compilation.
+
 The main Python entry points are `PERTURBO` / `PerTurboModel`, `fit_from_path`,
 `setup_mudata`, `fit_control`, `fit_perturbation_effects`, and the posterior
 table and trained-model simulation helpers.

@@ -14,18 +14,20 @@ def create_plates(
     pert_id: jnp.ndarray | None,
     covariates: jnp.ndarray | None = None,
     guide_matrix: jnp.ndarray | None = None,
+    effect_indices: jnp.ndarray | None = None,
     num_cells: int | None = None,
     num_genes: int | None = None,
     num_perts: int | None = None,
     num_guides: int | None = None,
     num_factors: int | None = None,
     num_covariates: int | None = None,
+    num_effects: int | None = None,
     subsample_size: int | None = None,
     cell_idx: jnp.ndarray | None = None,
     **kwargs,
 ):
     del kwargs
-    Plates = namedtuple("Plates", ["cells", "genes", "perts", "guides", "factors", "covariates"])
+    Plates = namedtuple("Plates", ["cells", "genes", "perts", "guides", "factors", "covariates", "effects"])
     if counts is not None:
         inferred_cells, inferred_genes = counts.shape
         if num_cells is None:
@@ -36,6 +38,8 @@ def create_plates(
         num_perts = int(pert_id.shape[1])
     if num_guides is None and guide_matrix is not None and getattr(guide_matrix, "ndim", None) == 2:
         num_guides = int(guide_matrix.shape[1])
+    if num_effects is None and effect_indices is not None:
+        num_effects = int(effect_indices.shape[0])
     if num_factors is None:
         num_factors = 1
     if num_covariates is None and covariates is not None and getattr(covariates, "ndim", None) == 2:
@@ -49,6 +53,7 @@ def create_plates(
         plate("guides", int(num_guides) if num_guides is not None and int(num_guides) > 0 else 1, dim=-2),
         plate("factors", num_factors, dim=-3),
         covariate_plate,
+        plate("effects", int(num_effects) if num_effects is not None and int(num_effects) > 0 else 1, dim=-1),
     )
 
 
@@ -169,6 +174,7 @@ def BaseModel(
     covariates=None,
     guide_matrix=None,
     guide_to_element=None,
+    effect_indices=None,
     num_cells=None,
     num_genes=None,
     num_perts=None,
@@ -196,6 +202,7 @@ def BaseModel(
         num_perts=num_perts,
         num_guides=num_guides,
         num_factors=num_factors,
+        num_effects=None if effect_indices is None else int(effect_indices.shape[0]),
         subsample_size=subsample_size,
         cell_idx=cell_idx,
     )
@@ -205,6 +212,7 @@ def BaseModel(
     guide_plate = plates.guides
     factor_plate = plates.factors
     covariate_plate = plates.covariates
+    effect_plate = plates.effects
     full_num_cells = int(num_cells) if num_cells is not None else (int(counts.shape[0]) if counts is not None else None)
     uses_mixture_nb = likelihood in {"mixture_nb"}
 
@@ -247,12 +255,27 @@ def BaseModel(
         if uses_mixture_nb:
             theta_outlier = numpyro.sample("theta_outlier", dist.LogNormal(0.0, 2.0))
             outlier_mean_shift = numpyro.sample("outlier_mean_shift", dist.HalfNormal(1.0))
-        with pert_plate:
-            beta = _sample_effect_site("beta", prior)
-            if fit_perturbation_dispersion:
-                dispersion_excess_inverse = numpyro.sample(
-                    "dispersion_excess_inverse", dist.Exponential(perturbation_dispersion_prior_rate)
-                )
+        if effect_indices is None:
+            with pert_plate:
+                beta = _sample_effect_site("beta", prior)
+                if fit_perturbation_dispersion:
+                    dispersion_excess_inverse = numpyro.sample(
+                        "dispersion_excess_inverse", dist.Exponential(perturbation_dispersion_prior_rate)
+                    )
+
+    if effect_indices is not None:
+        if fit_perturbation_dispersion:
+            raise ValueError("Pair-restricted effects are not yet compatible with fitted perturbation dispersion.")
+        effect_indices = jnp.asarray(effect_indices, dtype=jnp.int32)
+        with effect_plate:
+            beta_values = _sample_effect_site("beta", prior)
+        # Keep the variational parameterization restricted to the requested
+        # pairs, but assemble a dense matrix for the downstream matmul.  The
+        # perturbation-by-gene map is small even in high-MOI screens (e.g.
+        # 431 x 381 in Gasperini), while JAX's CPU BCOO matmul becomes much
+        # slower once a control is tested against many genes.
+        beta = jnp.zeros((int(num_perts), int(num_genes)), dtype=beta_values.dtype)
+        beta = beta.at[effect_indices[:, 0], effect_indices[:, 1]].set(beta_values)
 
     covariate_coef = None
     if covariates is not None:
@@ -349,6 +372,7 @@ def GuideSharedEffectModel(
     covariates=None,
     guide_matrix=None,
     guide_to_element=None,
+    effect_indices=None,
     num_cells=None,
     num_genes=None,
     num_perts=None,
@@ -378,6 +402,7 @@ def GuideSharedEffectModel(
         num_perts=num_perts,
         num_guides=num_guides,
         num_factors=num_factors,
+        num_effects=None if effect_indices is None else int(effect_indices.shape[0]),
         subsample_size=subsample_size,
         cell_idx=cell_idx,
     )
@@ -387,6 +412,7 @@ def GuideSharedEffectModel(
     guide_plate = plates.guides
     factor_plate = plates.factors
     covariate_plate = plates.covariates
+    effect_plate = plates.effects
     full_num_cells = int(num_cells) if num_cells is not None else (int(counts.shape[0]) if counts is not None else None)
     uses_mixture_nb = likelihood in {"mixture_nb"}
 
@@ -429,13 +455,25 @@ def GuideSharedEffectModel(
         if uses_mixture_nb:
             theta_outlier = numpyro.sample("theta_outlier", dist.LogNormal(0.0, 2.0))
             outlier_mean_shift = numpyro.sample("outlier_mean_shift", dist.HalfNormal(1.0))
-        with pert_plate:
-            beta = _sample_effect_site("beta", prior)
+        if effect_indices is None:
+            with pert_plate:
+                beta = _sample_effect_site("beta", prior)
         if fit_perturbation_dispersion:
             with guide_plate:
                 guide_dispersion_excess_inverse = numpyro.sample(
                     "guide_dispersion_excess_inverse", dist.Exponential(perturbation_dispersion_prior_rate)
                 )
+
+    if effect_indices is not None:
+        if fit_perturbation_dispersion:
+            raise ValueError("Pair-restricted effects are not yet compatible with fitted perturbation dispersion.")
+        effect_indices = jnp.asarray(effect_indices, dtype=jnp.int32)
+        with effect_plate:
+            beta_values = _sample_effect_site("beta", prior)
+        # As above, only requested pairs are parameters; materializing the
+        # compact perturbation-by-gene map makes high-MOI dense matmul fast.
+        beta = jnp.zeros((int(num_perts), int(num_genes)), dtype=beta_values.dtype)
+        beta = beta.at[effect_indices[:, 0], effect_indices[:, 1]].set(beta_values)
 
     covariate_coef = None
     if covariates is not None:

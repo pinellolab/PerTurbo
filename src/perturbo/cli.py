@@ -22,6 +22,7 @@ from .core import (
     _PerturbationChunk,
     _build_matrix_membership,
     _build_obs_membership,
+    build_effect_indices,
     _compute_gene_outlier_thresholds,
     _construct_perturbation_chunks,
     _count_gene_outliers_per_cell,
@@ -38,6 +39,7 @@ from .core import (
     _resolve_adata,
     _resolve_cli_size_factor_mode,
     _resolve_control_element_mask,
+    _resolve_gene_subset_indices,
     _resolve_perturbation_modality,
     _save_loss_plot,
     _save_multi_loss_plot,
@@ -62,6 +64,7 @@ def _beta_fit_arrays(beta_fit: BetaFit) -> dict[str, Any]:
         "z_values": beta_fit.z_values,
         "losses": beta_fit.losses,
         "dispersion_excess_inverse": beta_fit.dispersion_excess_inverse,
+        "effect_indices": beta_fit.effect_indices,
     }
 
 
@@ -95,6 +98,28 @@ def _guide_efficacy_for_cli(
     if arr.ndim == 1:
         return np.clip(arr, a_min=0.0, a_max=None)
     return np.clip(arr.reshape(int(n_guides), -1).mean(axis=1), a_min=0.0, a_max=None).astype(np.float32)
+
+
+def _load_pairs_to_test(path: str | Path) -> pd.DataFrame:
+    pair_path = Path(path)
+    if not pair_path.exists():
+        raise FileNotFoundError(f"pairs-to-test file not found: {pair_path}")
+    if pair_path.suffix.lower() in {".parquet", ".pq"}:
+        frame = pd.read_parquet(pair_path)
+    else:
+        frame = pd.read_csv(pair_path, sep=None, engine="python")
+    required = {"element", "gene"}
+    missing = required.difference(frame.columns)
+    if missing:
+        raise ValueError(
+            f"--pairs-to-test requires columns named 'element' and 'gene'; missing {sorted(missing)}."
+        )
+    if frame[["element", "gene"]].isna().any().any():
+        raise ValueError("--pairs-to-test contains missing element or gene names.")
+    frame = frame.loc[:, ["element", "gene"]].astype(str).drop_duplicates(ignore_index=True)
+    if frame.empty:
+        raise ValueError("--pairs-to-test must contain at least one pair.")
+    return frame
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -186,6 +211,14 @@ def main(argv: list[str] | None = None) -> None:
         ),
     )
     parser.add_argument("--gene-name-key", default=None, help="Var field for gene names")
+    parser.add_argument(
+        "--pairs-to-test",
+        default=None,
+        help=(
+            "CSV, TSV, or Parquet table with element and gene columns. Stage 2 samples only these exact pairs; "
+            "the RNA and perturbation inputs are subset to their union before fitting."
+        ),
+    )
     parser.add_argument(
         "--clip-gene-expression-percentile",
         type=float,
@@ -428,6 +461,16 @@ def main(argv: list[str] | None = None) -> None:
         f"[perturbo] Input loaded in {_load_elapsed:.1f}s: "
         f"{getattr(_loaded_adata, 'n_obs', '?')} cells × {getattr(_loaded_adata, 'n_vars', '?')} genes"
     )
+    pairs_to_test = _load_pairs_to_test(args.pairs_to_test) if args.pairs_to_test is not None else None
+    selected_elements = (
+        list(dict.fromkeys(pairs_to_test["element"].tolist())) if pairs_to_test is not None else None
+    )
+    selected_genes = list(dict.fromkeys(pairs_to_test["gene"].tolist())) if pairs_to_test is not None else None
+    if pairs_to_test is not None:
+        print(
+            f"[perturbo] Pair-restricted fit: {len(pairs_to_test)} exact pairs, "
+            f"{len(selected_elements)} elements, {len(selected_genes)} genes."
+        )
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     print(f"[perturbo] Outputs will be written to: {out_dir}")
@@ -472,6 +515,8 @@ def main(argv: list[str] | None = None) -> None:
         raise ValueError(
             "--guide-activity-mode=absolute is currently only compatible with negative-binomial likelihoods."
         )
+    if pairs_to_test is not None and args.fit_perturbation_dispersion:
+        raise ValueError("--pairs-to-test is not yet compatible with --fit-perturbation-dispersion.")
 
     clip_percentile = _validate_clip_percentile(args.clip_gene_expression_percentile)
     if _is_censored_model_name(args.likelihood) and clip_percentile >= 100.0:
@@ -509,6 +554,9 @@ def main(argv: list[str] | None = None) -> None:
     if not apply_filter_cells and args.outlier_cell_min_genes != 0:
         raise ValueError("--outlier-cell-min-genes requires --gene-outlier-action=filter_cells or both.")
     analysis_adata = _resolve_adata(data, args.modality_key)
+    if selected_genes is not None:
+        gene_idx = _resolve_gene_subset_indices(analysis_adata, selected_genes, args.gene_name_key)
+        analysis_adata = analysis_adata[:, gene_idx]
     _row_chunk_size = BACKED_ROW_CHUNK_SIZE if args.backed else None
     gene_clip_thresholds = None
     if (apply_filter_cells or apply_winsorize) and clip_percentile is not None and clip_percentile < 100.0:
@@ -547,12 +595,31 @@ def main(argv: list[str] | None = None) -> None:
         analysis_adata_for_workflow = analysis_adata
 
     should_chunk = False
-    retain_guide_structure = args.perturbation_element_varm_key is not None
+    retain_guide_structure = bool(
+        args.perturbation_element_varm_key is not None
+        and (guide_effect_strategy != "shared" or args.guide_random_effects or args.fit_perturbation_dispersion)
+    )
     n_analysis_cells = getattr(analysis_adata_for_workflow, "n_obs", None)
+    requested_beta_minibatch = args.minibatch_size_betas or args.minibatch_size or 0
     if args.perturbation_chunk_size > 0:
         should_chunk = True
-    elif n_analysis_cells is not None and n_analysis_cells > args.max_chunk_size:
+    elif (
+        n_analysis_cells is not None
+        and n_analysis_cells > args.max_chunk_size
+        and requested_beta_minibatch == 0
+    ):
         should_chunk = True
+        print(
+            "[perturbo] Auto chunking enabled because the analysis dataset has "
+            f"{n_analysis_cells} cells; chunk cell counts will be capped at "
+            f"--max-chunk-size={args.max_chunk_size}."
+        )
+    elif n_analysis_cells is not None and n_analysis_cells > args.max_chunk_size:
+        print(
+            "[perturbo] Stage-2 minibatching enabled; using one global fit to avoid "
+            "a separate JAX compilation for every perturbation chunk. Use "
+            "--perturbation-chunk-size explicitly if the full design does not fit in device memory."
+        )
     if (
         should_chunk
         and args.fit_perturbation_dispersion
@@ -561,11 +628,6 @@ def main(argv: list[str] | None = None) -> None:
         raise ValueError(
             "High-MOI fitted perturbation dispersion is not yet compatible with CLI perturbation chunking; "
             "increase --max-chunk-size or disable --perturbation-chunk-size."
-        )
-        print(
-            "[perturbo] Auto chunking enabled because the analysis dataset has "
-            f"{n_analysis_cells} cells; chunk cell counts will be capped at "
-            f"--max-chunk-size={args.max_chunk_size}."
         )
 
     if should_chunk:
@@ -585,6 +647,14 @@ def main(argv: list[str] | None = None) -> None:
                 all_perturbation_names = element_names
             else:
                 all_perturbation_names = _extract_pert_names(pert_adata)
+            if selected_elements is not None:
+                name_to_idx = {name: idx for idx, name in enumerate(all_perturbation_names)}
+                missing = [name for name in selected_elements if name not in name_to_idx]
+                if missing:
+                    raise KeyError(f"Pair-list elements not found in perturbation data: {missing[:10]}")
+                selected_idx = [name_to_idx[name] for name in selected_elements]
+                pert_matrix = pert_matrix[:, selected_idx]
+                all_perturbation_names = list(selected_elements)
             membership = _build_matrix_membership(
                 pert_matrix,
                 num_perts=len(all_perturbation_names),
@@ -597,7 +667,11 @@ def main(argv: list[str] | None = None) -> None:
             )
         else:
             pert_series = analysis_adata_for_workflow.obs[args.perturbation_key].astype(str)
-            all_perturbation_names = [str(x) for x in pd.Categorical(pert_series).categories.tolist()]
+            all_perturbation_names = (
+                list(selected_elements)
+                if selected_elements is not None
+                else [str(x) for x in pd.Categorical(pert_series).categories.tolist()]
+            )
             membership = _build_obs_membership(pert_series, all_perturbation_names)
             chunks = _construct_perturbation_chunks(
                 all_perturbation_names,
@@ -619,6 +693,7 @@ def main(argv: list[str] | None = None) -> None:
         size_factor_key=size_factor_key_for_loading,
         library_size_key=library_size_key_for_loading,
         gene_name_key=args.gene_name_key,
+        selected_genes=selected_genes,
         device=args.device,
         cell_keep_mask=cell_keep_mask,
         clip_gene_expression_percentile=clip_percentile,
@@ -629,6 +704,7 @@ def main(argv: list[str] | None = None) -> None:
         batch_covariate=batch_covariate,
         return_covariate_transform_state=True,
         infer_control_guides=bool(args.guide_random_effects and args.perturbation_modality_key is not None),
+        retain_perturbation_design=bool(args.guide_random_effects),
     )
     if isinstance(controls_loaded, tuple):
         controls, covariate_transform_state = controls_loaded
@@ -692,9 +768,10 @@ def main(argv: list[str] | None = None) -> None:
             raise RuntimeError("Chunk metadata was not initialized.")
         n_genes = len(analysis_gene_names)
         n_perts = len(all_perturbation_names)
-        posterior_mean = np.zeros((n_perts, n_genes), dtype=np.float32)
-        posterior_scale = np.zeros((n_perts, n_genes), dtype=np.float32)
-        z_values = np.zeros((n_perts, n_genes), dtype=np.float32)
+        fill_value = np.nan if pairs_to_test is not None else 0.0
+        posterior_mean = np.full((n_perts, n_genes), fill_value, dtype=np.float32)
+        posterior_scale = np.full((n_perts, n_genes), fill_value, dtype=np.float32)
+        z_values = np.full((n_perts, n_genes), fill_value, dtype=np.float32)
         dispersion_excess_inverse = np.zeros((n_perts, n_genes), dtype=np.float32) if args.fit_perturbation_dispersion else None
         last_state = None
         for chunk_i, chunk_info in enumerate(chunks):
@@ -721,6 +798,7 @@ def main(argv: list[str] | None = None) -> None:
                 gene_name_key=args.gene_name_key,
                 device=args.device,
                 selected_perturbations=chunk_names,
+                selected_genes=selected_genes,
                 cell_keep_mask=cell_keep_mask,
                 clip_gene_expression_percentile=clip_percentile,
                 winsorize_gene_expression=apply_winsorize,
@@ -732,6 +810,15 @@ def main(argv: list[str] | None = None) -> None:
                 retain_guide_structure=retain_guide_structure,
                 library_size_center_log_mean=controls.library_size_center_log_mean,
             )
+            if pairs_to_test is not None:
+                chunk_pairs = pairs_to_test[pairs_to_test["element"].isin(chunk_names)]
+                chunk_data.effect_indices = jnp.asarray(
+                    build_effect_indices(
+                        chunk_pairs,
+                        pert_names=chunk_data.pert_names,
+                        gene_names=chunk_data.gene_names,
+                    )
+                )
             if size_factor_mode == "none":
                 chunk_data.size_factors = _fixed_zero_size_factors(chunk_data.counts)
             chunk_fit = fit_perturbation_effects(
@@ -795,6 +882,17 @@ def main(argv: list[str] | None = None) -> None:
             losses=jnp.concatenate(chunk_losses) if chunk_losses else jnp.array([]),
             svi_result=last_state,
             dispersion_excess_inverse=None if dispersion_excess_inverse is None else jnp.asarray(dispersion_excess_inverse),
+            effect_indices=(
+                None
+                if pairs_to_test is None
+                else jnp.asarray(
+                    build_effect_indices(
+                        pairs_to_test,
+                        pert_names=list(all_perturbation_names),
+                        gene_names=list(analysis_gene_names),
+                    )
+                )
+            ),
         )
         # full = PerTurboData(
         #     counts=jnp.empty((0, len(analysis_gene_names))),
@@ -816,6 +914,8 @@ def main(argv: list[str] | None = None) -> None:
             library_size_key=library_size_key_for_loading,
             gene_name_key=args.gene_name_key,
             device=args.device,
+            selected_perturbations=selected_elements,
+            selected_genes=selected_genes,
             cell_keep_mask=cell_keep_mask,
             clip_gene_expression_percentile=clip_percentile,
             winsorize_gene_expression=apply_winsorize,
@@ -827,6 +927,14 @@ def main(argv: list[str] | None = None) -> None:
             retain_guide_structure=retain_guide_structure,
             library_size_center_log_mean=controls.library_size_center_log_mean,
         )
+        if pairs_to_test is not None:
+            analysis_data.effect_indices = jnp.asarray(
+                build_effect_indices(
+                    pairs_to_test,
+                    pert_names=analysis_data.pert_names,
+                    gene_names=analysis_data.gene_names,
+                )
+            )
         if size_factor_mode == "none":
             analysis_data.size_factors = _fixed_zero_size_factors(analysis_data.counts)
         all_perturbation_names = analysis_data.pert_names
@@ -876,6 +984,10 @@ def main(argv: list[str] | None = None) -> None:
         gene_names=list(analysis_gene_names),
         null_z_values=null_z_values,
     )
+    if pairs_to_test is not None:
+        requested_pairs = pd.MultiIndex.from_frame(pairs_to_test[["element", "gene"]])
+        output_pairs = pd.MultiIndex.from_frame(element_effects[["element", "gene"]])
+        element_effects = element_effects.loc[output_pairs.isin(requested_pairs)].reset_index(drop=True)
     element_effects_path = out_dir / "element_effects.parquet"
     element_effects.to_parquet(element_effects_path, index=False)
     print(f"[perturbo] Wrote {element_effects_path}")
