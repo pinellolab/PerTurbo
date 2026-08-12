@@ -110,6 +110,7 @@ def fit_from_path(
     library_size_key: str | None = None,
     size_factor_mode: str = "infer",
     gene_name_key: str | None = None,
+    pairs_to_test: str | Path | None = None,
     clip_gene_expression_percentile: float = 100.0,
     gene_outlier_action: str = "none",
     gene_outlier_threshold_floor: int = 2,
@@ -165,6 +166,7 @@ def fit_from_path(
     _append_cli_arg(argv, "--library-size-key", library_size_key)
     _append_cli_arg(argv, "--size-factor-mode", size_factor_mode)
     _append_cli_arg(argv, "--gene-name-key", gene_name_key)
+    _append_cli_arg(argv, "--pairs-to-test", pairs_to_test)
     _append_cli_arg(argv, "--clip-gene-expression-percentile", clip_gene_expression_percentile)
     _append_cli_arg(argv, "--gene-outlier-action", gene_outlier_action)
     _append_cli_arg(argv, "--gene-outlier-threshold-floor", gene_outlier_threshold_floor)

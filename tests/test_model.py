@@ -83,6 +83,24 @@ def test_negbin_model_runs_one_step() -> None:
     )
 
 
+def test_pair_restricted_model_samples_only_requested_coefficients() -> None:
+    counts, pert_id = _make_toy_data()
+    effect_indices = jnp.array([[0, 1], [1, 2]], dtype=jnp.int32)
+    trace = numpyro.handlers.trace(
+        numpyro.handlers.seed(NegBinModel, jax.random.PRNGKey(0))
+    ).get_trace(
+        counts,
+        pert_id,
+        effect_indices=effect_indices,
+        num_cells=counts.shape[0],
+        num_genes=counts.shape[1],
+        num_perts=2,
+    )
+
+    assert trace["beta"]["value"].shape == (2,)
+    assert trace["obs"]["value"].shape == counts.shape
+
+
 def test_negbin_model_uses_negative_binomial_observation() -> None:
     counts, pert_id = _make_toy_data()
     trace = _trace_model(NegBinModel, counts, pert_id)

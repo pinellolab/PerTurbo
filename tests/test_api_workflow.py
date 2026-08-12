@@ -201,6 +201,34 @@ def test_two_stage_fit_with_baseline_uncertainty_marginalization() -> None:
     assert jnp.all(jnp.isfinite(beta_fit.posterior_scale))
 
 
+def test_pair_restricted_fit_has_one_variational_parameter_per_pair() -> None:
+    counts = jnp.array(
+        [[0, 1, 0], [2, 0, 1], [0, 0, 3], [1, 0, 0]],
+        dtype=jnp.int32,
+    )
+    data = PerTurboData(
+        counts=counts,
+        pert_id=jnp.array([0, 1, 0, 1], dtype=jnp.int32),
+        pert_names=["ctrl", "pert"],
+        gene_names=["g1", "g2", "g3"],
+        effect_indices=jnp.array([[0, 1], [1, 2]], dtype=jnp.int32),
+    )
+    control_fit = fit_control(data, num_steps=2, model_name="negbin", minibatch_size=2)
+    beta_fit = fit_perturbation_effects(
+        data,
+        control_fit,
+        num_steps=2,
+        model_name="negbin",
+        minibatch_size=2,
+    )
+
+    assert beta_fit.effect_indices.shape == (2, 2)
+    assert int(jnp.isfinite(beta_fit.posterior_mean).sum()) == 2
+    assert int(jnp.isfinite(beta_fit.posterior_scale).sum()) == 2
+    assert jnp.isnan(beta_fit.posterior_mean[0, 0])
+    assert jnp.isfinite(beta_fit.posterior_mean[0, 1])
+
+
 def test_two_stage_fit_supports_mixture_nb() -> None:
     counts = jnp.array(
         [

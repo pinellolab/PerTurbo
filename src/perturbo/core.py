@@ -86,6 +86,9 @@ class PerTurboData:
     guide_matrix: jnp.ndarray | None = None
     guide_names: list[str] | None = None
     guide_to_element: jnp.ndarray | None = None
+    # Integer (element_index, gene_index) rows. When provided, stage 2 samples
+    # only these coefficients instead of the full element-by-gene product.
+    effect_indices: jnp.ndarray | None = None
     library_size_center_log_mean: float | None = None
 
 
@@ -136,6 +139,7 @@ class BetaFit:
     guide_offset_scale: jnp.ndarray | None = None
     dispersion_excess_inverse: jnp.ndarray | None = None
     guide_dispersion_excess_inverse: jnp.ndarray | None = None
+    effect_indices: jnp.ndarray | None = None
 
 
 @dataclass
@@ -337,29 +341,32 @@ def _run_svi_minibatch(
 
     update_impl = svi.stable_update if stable_update else svi.update
 
-    def update_step(
+    def run_index_steps(
         state: numpyro.infer.svi.SVIState,
         counts_full: jnp.ndarray | None,
         pert_full: jnp.ndarray | None,
         size_full: jnp.ndarray | None,
         covariate_full: jnp.ndarray | None,
         guide_matrix_full: jnp.ndarray | None,
-        idx: np.ndarray,
+        batch_indices: jnp.ndarray,
     ):
-        return update_impl(
-            state,
-            counts_full,
-            pert_full,
-            size_factors=size_full,
-            covariates=covariate_full,
-            guide_matrix=guide_matrix_full,
-            cell_idx=idx,
-            num_cells=num_cells,
-            forward_mode_differentiation=forward_mode_differentiation,
-            **static_kwargs,
-        )
+        def body_fn(carry, idx):
+            return update_impl(
+                carry,
+                counts_full,
+                pert_full,
+                size_factors=size_full,
+                covariates=covariate_full,
+                guide_matrix=guide_matrix_full,
+                cell_idx=idx,
+                num_cells=num_cells,
+                forward_mode_differentiation=forward_mode_differentiation,
+                **static_kwargs,
+            )
 
-    update_step = jax.jit(update_step)
+        return jax.lax.scan(body_fn, state, batch_indices)
+
+    run_index_steps = jax.jit(run_index_steps)
 
     if init_state is None:
         init_idx = sample_indices()
@@ -382,43 +389,43 @@ def _run_svi_minibatch(
     if progress_chunk_size < 1:
         raise ValueError("progress_chunk_size must be >= 1.")
 
-    losses = []
+    all_batch_indices = np.stack([sample_indices() for _ in range(num_steps)], axis=0)
+    losses_chunks = []
     remaining = num_steps
+    offset = 0
     if progress:
         with tqdm(total=num_steps, desc="[perturbo] SVI", unit="step") as pbar:
             while remaining > 0:
                 step_count = min(progress_chunk_size, remaining)
-                for _ in range(step_count):
-                    idx = sample_indices()
-                    svi_state, loss = update_step(
-                        svi_state,
-                        counts,
-                        pert_id,
-                        size_factors,
-                        covariates,
-                        guide_matrix,
-                        idx,
-                    )
-                    loss = jax.block_until_ready(loss)
-                    losses.append(loss)
-                    pbar.set_postfix(loss=float(np.asarray(loss)))
-                    pbar.update(1)
+                index_chunk = jnp.asarray(all_batch_indices[offset : offset + step_count])
+                svi_state, losses = run_index_steps(
+                    svi_state,
+                    counts,
+                    pert_id,
+                    size_factors,
+                    covariates,
+                    guide_matrix,
+                    index_chunk,
+                )
+                losses = jax.block_until_ready(losses)
+                losses_chunks.append(losses)
+                pbar.set_postfix(loss=float(np.asarray(losses[-1])))
+                pbar.update(step_count)
+                offset += step_count
                 remaining -= step_count
     else:
-        for _ in range(num_steps):
-            idx = sample_indices()
-            svi_state, loss = update_step(
-                svi_state,
-                counts,
-                pert_id,
-                size_factors,
-                covariates,
-                guide_matrix,
-                idx,
-            )
-            losses.append(loss)
+        svi_state, losses = run_index_steps(
+            svi_state,
+            counts,
+            pert_id,
+            size_factors,
+            covariates,
+            guide_matrix,
+            jnp.asarray(all_batch_indices),
+        )
+        losses_chunks.append(losses)
 
-    losses_arr = jnp.stack(losses) if losses else jnp.array([])
+    losses_arr = jnp.concatenate(losses_chunks) if len(losses_chunks) > 1 else losses_chunks[0]
     return _SVIRunResult(params=svi.get_params(svi_state), state=svi_state, losses=losses_arr)
 
 
@@ -1104,7 +1111,7 @@ def _load_guide_shared_perturbation_data(
     perturbation_element_names_uns_key: str | None,
     obs_names,
     element_subset: list[str] | None = None,
-) -> tuple[np.ndarray, list[str], np.ndarray, np.ndarray, list[str]]:
+) -> tuple[np.ndarray, list[str], np.ndarray, np.ndarray, list[str], np.ndarray | None]:
     pert_adata = _resolve_perturbation_modality(data, perturbation_modality_key)
     if obs_names is not None:
         pert_adata = pert_adata[obs_names]
@@ -1130,12 +1137,18 @@ def _load_guide_shared_perturbation_data(
     else:
         element_names = list(all_element_names)
     grouped = _group_perturbation_matrix_by_element(raw_matrix, element_mapping)
+    row_mask = None
+    if element_subset is not None:
+        row_mask = np.asarray(grouped).sum(axis=1) > 0
+        raw_matrix = raw_matrix[row_mask]
+        grouped = grouped[row_mask]
     return (
         _to_dense(raw_matrix),
         guide_names,
         grouped,
         np.asarray(element_mapping > 0, dtype=np.float32),
         element_names,
+        row_mask,
     )
 
 
@@ -1322,6 +1335,59 @@ def _extract_gene_names(adata, gene_name_key: str | None) -> list[str]:
     return adata.var.index.astype(str).tolist()
 
 
+def _resolve_gene_subset_indices(
+    adata,
+    selected_genes: list[str] | None,
+    gene_name_key: str | None,
+) -> np.ndarray | slice:
+    """Resolve requested gene labels without materializing an AnnData view."""
+    if selected_genes is None:
+        return slice(None)
+    requested = [str(name) for name in selected_genes]
+    if not requested:
+        raise ValueError("selected_genes must contain at least one gene.")
+    if len(set(requested)) != len(requested):
+        raise ValueError("selected_genes must be unique.")
+    available = _extract_gene_names(adata, gene_name_key)
+    name_to_idx = {name: idx for idx, name in enumerate(available)}
+    missing = [name for name in requested if name not in name_to_idx]
+    if missing:
+        preview = ", ".join(missing[:10])
+        raise KeyError(f"Genes not found in analysis modality: {preview}")
+    return np.asarray([name_to_idx[name] for name in requested], dtype=np.int64)
+
+
+def build_effect_indices(
+    pairs: pd.DataFrame,
+    *,
+    pert_names: list[str],
+    gene_names: list[str],
+) -> np.ndarray:
+    """Map an exact element/gene pair table to local integer coefficient indices."""
+    required = {"element", "gene"}
+    missing_columns = required.difference(pairs.columns)
+    if missing_columns:
+        raise ValueError(f"pairs_to_test is missing required columns: {sorted(missing_columns)}")
+    pair_frame = pairs.loc[:, ["element", "gene"]].astype(str).drop_duplicates(ignore_index=True)
+    if pair_frame.empty:
+        raise ValueError("pairs_to_test must contain at least one element/gene pair.")
+    pert_lookup = {str(name): idx for idx, name in enumerate(pert_names)}
+    gene_lookup = {str(name): idx for idx, name in enumerate(gene_names)}
+    missing_elements = sorted(set(pair_frame["element"]).difference(pert_lookup))
+    missing_genes = sorted(set(pair_frame["gene"]).difference(gene_lookup))
+    if missing_elements or missing_genes:
+        details = []
+        if missing_elements:
+            details.append(f"elements={missing_elements[:10]}")
+        if missing_genes:
+            details.append(f"genes={missing_genes[:10]}")
+        raise KeyError("pairs_to_test names were not loaded: " + "; ".join(details))
+    return np.asarray(
+        [(pert_lookup[element], gene_lookup[gene]) for element, gene in pair_frame.itertuples(index=False, name=None)],
+        dtype=np.int32,
+    )
+
+
 def _validate_cli_input_keys(
     data,
     *,
@@ -1422,6 +1488,7 @@ def load_controls(
     size_factor_key: str | None = None,
     library_size_key: str | None = None,
     gene_name_key: str | None = None,
+    selected_genes: list[str] | None = None,
     device: str | Any | None = None,
     cell_keep_mask: np.ndarray | None = None,
     clip_gene_expression_percentile: float | None = None,
@@ -1432,10 +1499,12 @@ def load_controls(
     batch_covariate: str | None = None,
     return_covariate_transform_state: bool = False,
     infer_control_guides: bool = False,
+    retain_perturbation_design: bool = True,
 ) -> PerTurboData | tuple[PerTurboData, CovariateTransformState | None]:
     print("[perturbo] Loading controls...")
     adata = _resolve_adata(data, modality_key)
     is_backed = getattr(adata, "isbacked", False)
+    gene_idx = _resolve_gene_subset_indices(adata, selected_genes, gene_name_key)
 
     # Compose all obs-level filters into a single integer index array before
     # touching adata.X.  Backed AnnData forbids "view of a view", so we must
@@ -1456,7 +1525,7 @@ def load_controls(
         pert_adata = _resolve_perturbation_modality(data, perturbation_modality_key)
         if working_obs_names is not None:
             pert_adata = pert_adata[working_obs_names]
-        pert_id = _to_dense(_get_layer_matrix(pert_adata, perturbation_layer))
+        pert_matrix = _get_layer_matrix(pert_adata, perturbation_layer)
         pert_names = _extract_pert_names(pert_adata)
         guide_to_element = None
         element_names = None
@@ -1477,10 +1546,17 @@ def load_controls(
             perturbation_modality_key=perturbation_modality_key,
         )
         if control_cols is not None:
-            mask = pert_id[:, control_cols].sum(axis=1) > 0
+            selected_matrix = pert_matrix[:, control_cols]
+            mask = np.asarray(selected_matrix.sum(axis=1)).reshape(-1) > 0
             obs_idx = obs_idx[mask]
-            pert_id = np.asarray(pert_id)[np.ix_(mask, control_cols)]
+            pert_id = _to_dense(selected_matrix[mask]) if retain_perturbation_design else np.zeros(mask.sum(), dtype=np.int32)
             pert_names = [n for n, c in zip(pert_names, control_cols) if c]
+        elif retain_perturbation_design:
+            pert_id = _to_dense(pert_matrix)
+        else:
+            pert_id = np.zeros(len(obs_idx), dtype=np.int32)
+        if not retain_perturbation_design:
+            pert_names = ["control"]
     else:
         if perturbation_key is None:
             raise ValueError("perturbation_key must be provided for obs-based perturbations.")
@@ -1496,7 +1572,7 @@ def load_controls(
         print(f"[perturbo] Subsampled controls to {max_control_cells} cells.")
 
     # Single slice: for backed data this is one targeted disk read.
-    adata = adata[obs_idx]
+    adata = adata[obs_idx, gene_idx]
     if is_backed:
         adata = adata.to_memory()
 
@@ -1569,6 +1645,7 @@ def load_analysis_cells(
     gene_name_key: str | None = None,
     device: str | Any | None = None,
     selected_perturbations: list[str] | None = None,
+    selected_genes: list[str] | None = None,
     cell_keep_mask: np.ndarray | None = None,
     clip_gene_expression_percentile: float | None = None,
     winsorize_gene_expression: bool = False,
@@ -1584,6 +1661,7 @@ def load_analysis_cells(
     print(f"[perturbo] Loading analysis cells{subset_suffix}...")
     adata = _resolve_adata(data, modality_key)
     is_backed = getattr(adata, "isbacked", False)
+    gene_idx = _resolve_gene_subset_indices(adata, selected_genes, gene_name_key)
 
     # Compose all obs-level filters into a single integer index array before
     # touching adata.X.  Backed AnnData forbids "view of a view", so we must
@@ -1607,7 +1685,14 @@ def load_analysis_cells(
         if retain_guide_structure:
             if perturbation_element_varm_key is None:
                 raise ValueError("retain_guide_structure requires perturbation_element_varm_key.")
-            guide_matrix, guide_names, pert_id, guide_to_element, pert_names = _load_guide_shared_perturbation_data(
+            (
+                guide_matrix,
+                guide_names,
+                pert_id,
+                guide_to_element,
+                pert_names,
+                selected_row_mask,
+            ) = _load_guide_shared_perturbation_data(
                 data,
                 perturbation_modality_key=perturbation_modality_key,
                 perturbation_layer=perturbation_layer,
@@ -1617,10 +1702,9 @@ def load_analysis_cells(
                 element_subset=selected_perturbations,
             )
             if selected_perturbations is not None:
-                mask = np.asarray(pert_id).sum(axis=1) > 0
-                obs_idx = obs_idx[mask]
-                pert_id = pert_id[mask]
-                guide_matrix = guide_matrix[mask]
+                if selected_row_mask is None:
+                    raise RuntimeError("Missing row mask for selected guide-aware perturbations.")
+                obs_idx = obs_idx[selected_row_mask]
         elif perturbation_element_varm_key is not None:
             pert_id, pert_names = _load_grouped_perturbation_matrix(
                 data,
@@ -1655,7 +1739,7 @@ def load_analysis_cells(
             obs_idx = obs_idx[mask]
 
     # Single slice: for backed data this is one targeted disk read.
-    adata = adata[obs_idx]
+    adata = adata[obs_idx, gene_idx]
     if is_backed:
         adata = adata.to_memory()
 
@@ -1750,6 +1834,11 @@ def fit_control(
     print("[perturbo] Fitting control model...")
     counts = data.counts
     pert_id = data.pert_id
+    # Stage 1 conditions beta to zero. Unless guide random effects are being
+    # estimated, perturbation identities cannot affect the likelihood and a
+    # high-MOI matrix would only trigger a large zero-valued matrix multiply.
+    if not guide_random_effects and getattr(pert_id, "ndim", None) == 2:
+        pert_id = jnp.zeros((counts.shape[0],), dtype=jnp.int32)
     num_perts = _infer_num_perts(pert_id)
     num_genes = counts.shape[1]
     if minibatch_size is not None and minibatch_size > counts.shape[0]:
@@ -1989,8 +2078,17 @@ def _summarize_stage2_guide_posteriors(
     if data.guide_to_element is None:
         return {}
     guide_to_element = np.asarray(data.guide_to_element, dtype=np.float32)
-    beta_loc = np.asarray(params["beta_auto_loc"], dtype=np.float32)
-    beta_scale = np.clip(np.asarray(params["beta_auto_scale"], dtype=np.float32), 1e-6, None)
+    beta_loc_raw = np.asarray(params["beta_auto_loc"], dtype=np.float32)
+    beta_scale_raw = np.clip(np.asarray(params["beta_auto_scale"], dtype=np.float32), 1e-6, None)
+    if data.effect_indices is None:
+        beta_loc = beta_loc_raw
+        beta_scale = beta_scale_raw
+    else:
+        indices = np.asarray(data.effect_indices, dtype=np.int32)
+        beta_loc = np.zeros((len(data.pert_names), len(data.gene_names)), dtype=np.float32)
+        beta_scale = np.zeros_like(beta_loc)
+        beta_loc[indices[:, 0], indices[:, 1]] = beta_loc_raw
+        beta_scale[indices[:, 0], indices[:, 1]] = beta_scale_raw
 
     if guide_effect_strategy == "shared":
         effect_mean = guide_to_element @ beta_loc
@@ -2009,8 +2107,8 @@ def _summarize_stage2_guide_posteriors(
 
     if element_block_size < 1:
         raise ValueError("element_block_size must be >= 1.")
-    beta_loc_jax = jnp.asarray(params["beta_auto_loc"])
-    beta_scale_jax = jnp.asarray(params["beta_auto_scale"])
+    beta_loc_jax = jnp.asarray(beta_loc)
+    beta_scale_jax = jnp.asarray(beta_scale)
     relative_loc = jnp.asarray(params["guide_relative_efficiency_auto_loc"])
     relative_scale = jnp.asarray(params["guide_relative_efficiency_auto_scale"])
     num_guides, num_genes = guide_to_element.shape[0], beta_loc.shape[1]
@@ -2081,6 +2179,19 @@ def fit_perturbation_effects(
     pert_id = data.pert_id
     num_perts = _infer_num_perts(pert_id)
     num_genes = counts.shape[1]
+    effect_indices = data.effect_indices
+    if effect_indices is not None:
+        effect_indices_np = np.asarray(effect_indices, dtype=np.int32)
+        if effect_indices_np.ndim != 2 or effect_indices_np.shape[1] != 2 or effect_indices_np.shape[0] == 0:
+            raise ValueError("effect_indices must have shape (n_pairs, 2) with at least one pair.")
+        if np.any(effect_indices_np[:, 0] < 0) or np.any(effect_indices_np[:, 0] >= num_perts):
+            raise ValueError("effect_indices contains an out-of-range perturbation index.")
+        if np.any(effect_indices_np[:, 1] < 0) or np.any(effect_indices_np[:, 1] >= num_genes):
+            raise ValueError("effect_indices contains an out-of-range gene index.")
+        if np.unique(effect_indices_np, axis=0).shape[0] != effect_indices_np.shape[0]:
+            raise ValueError("effect_indices must not contain duplicate pairs.")
+        if fit_perturbation_dispersion:
+            raise ValueError("Pair-restricted effects are not yet compatible with fit_perturbation_dispersion=True.")
     guide_effect_strategy, guide_activity_mode = _validate_guide_model_request(
         data,
         guide_effect_strategy=guide_effect_strategy,
@@ -2185,7 +2296,7 @@ def fit_perturbation_effects(
     )
     dispersion_kwargs = ({"fit_perturbation_dispersion": True, "perturbation_dispersion_prior_rate": perturbation_dispersion_prior_rate} if fit_perturbation_dispersion else {})
     init_values = {
-        "beta": jnp.zeros((num_perts, num_genes)),
+        "beta": jnp.zeros((num_perts, num_genes) if effect_indices is None else (int(effect_indices.shape[0]),)),
     }
     if guide_effect_strategy == "relative" and num_guides is not None:
         init_values["guide_relative_efficiency"] = jnp.full((num_guides, num_genes), 0.8, dtype=jnp.float32)
@@ -2280,6 +2391,7 @@ def fit_perturbation_effects(
             prior=prior,
             guide_matrix=data.guide_matrix if use_guide_shared_model else None,
             guide_to_element=data.guide_to_element if use_guide_shared_model else None,
+            effect_indices=effect_indices,
             guide_effect_strategy=guide_effect_strategy,
             guide_random_effects=random_effects_in_model,
             **dispersion_kwargs,
@@ -2306,14 +2418,23 @@ def fit_perturbation_effects(
             prior=prior,
             guide_matrix=data.guide_matrix if use_guide_shared_model else None,
             guide_to_element=data.guide_to_element if use_guide_shared_model else None,
+            effect_indices=effect_indices,
             guide_effect_strategy=guide_effect_strategy,
             guide_random_effects=random_effects_in_model,
             **dispersion_kwargs,
             **count_censoring_kwargs,
         )
 
-    loc = result.params["beta_auto_loc"]
-    scale = jnp.clip(result.params["beta_auto_scale"], 1e-6, None)
+    loc_raw = result.params["beta_auto_loc"]
+    scale_raw = jnp.clip(result.params["beta_auto_scale"], 1e-6, None)
+    if effect_indices is None:
+        loc = loc_raw
+        scale = scale_raw
+    else:
+        loc = jnp.full((num_perts, num_genes), jnp.nan, dtype=loc_raw.dtype)
+        scale = jnp.full((num_perts, num_genes), jnp.nan, dtype=scale_raw.dtype)
+        loc = loc.at[effect_indices[:, 0], effect_indices[:, 1]].set(loc_raw)
+        scale = scale.at[effect_indices[:, 0], effect_indices[:, 1]].set(scale_raw)
     if apply_scale_inflation_fallback:
         tau = jnp.asarray(control_fit.guide_random_effect_tau, dtype=scale.dtype)
         if tau.ndim != 1 or tau.shape[0] != num_genes:
@@ -2352,6 +2473,7 @@ def fit_perturbation_effects(
         guide_offset_scale=guide_summary.get("guide_offset_scale"),
         dispersion_excess_inverse=dispersion_excess_inverse,
         guide_dispersion_excess_inverse=guide_dispersion_excess_inverse,
+        effect_indices=effect_indices,
     )
 
 
@@ -2678,6 +2800,16 @@ def _subset_perturbo_data_for_chunk(
         guide_to_element_chunk = jnp.asarray(guide_to_element_chunk_full[guide_keep], dtype=jnp.float32)
         guide_names_chunk = [str(name) for keep, name in zip(guide_keep.tolist(), data.guide_names, strict=True) if keep]
 
+    effect_indices_chunk = None
+    if data.effect_indices is not None:
+        global_effect_indices = np.asarray(data.effect_indices, dtype=np.int32)
+        global_to_local = np.full((len(data.pert_names),), -1, dtype=np.int32)
+        global_to_local[chunk_indices] = np.arange(chunk_indices.size, dtype=np.int32)
+        keep_effect = global_to_local[global_effect_indices[:, 0]] >= 0
+        selected_effects = global_effect_indices[keep_effect].copy()
+        selected_effects[:, 0] = global_to_local[selected_effects[:, 0]]
+        effect_indices_chunk = jnp.asarray(selected_effects, dtype=jnp.int32)
+
     return PerTurboData(
         counts=counts_chunk,
         pert_id=pert_id_chunk,
@@ -2689,6 +2821,7 @@ def _subset_perturbo_data_for_chunk(
         guide_matrix=guide_matrix_chunk,
         guide_names=guide_names_chunk,
         guide_to_element=guide_to_element_chunk,
+        effect_indices=effect_indices_chunk,
         library_size_center_log_mean=data.library_size_center_log_mean,
     )
 
