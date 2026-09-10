@@ -13,6 +13,21 @@ and this project adheres to [Semantic Versioning][].
 ### Added
 
 -   PerTurbo 2.0 replaces the default implementation with NumPyro/JAX.
+-   A conditional randomization test (`--crt`), evaluated in closed form rather
+    than by resampling, so every perturbation-gene pair of a genome-scale screen
+    can be tested. The null distribution of the negative-binomial score statistic
+    under random reassignment of the guide is a weighted sum of independent
+    Bernoulli variables; its cumulant generating function is exact and a
+    saddlepoint approximation gives tail probabilities to 1e-12 without drawing a
+    resample. One baseline fit is amortised over every pair. `--crt-only` stops
+    after the test and skips the effect estimates.
+-   Both screen designs are served by the same test: one perturbation per cell
+    tested inside a pool of control cells, and many perturbations per cell tested
+    as marginal associations over all cells (`--crt-pool`).
+-   `--pairs-to-test` writes `element_effects_requested_pairs.parquet` beside the
+    transcriptome-wide table, holding the requested pairs with Benjamini-Hochberg
+    recomputed within that family, so one run yields both a preselected-pair
+    comparison and the full analysis.
 -   The former PyTorch/Pyro/scvi implementation is isolated under the deprecated
     `perturbo.legacy` optional extra.
 -   Cortado-format MuData registrations and fit bundles are read compatibly and
@@ -22,3 +37,26 @@ and this project adheres to [Semantic Versioning][].
 
 -   Python 3.11 is now the minimum supported version.
 -   The command-line entry point is `perturbo`.
+-   **`--pairs-to-test` no longer restricts the fit.** It previously sampled effects
+    only for the requested pairs; it now selects the rows of a second output table
+    while the fit and the test still cover every pair. Callers that relied on the
+    old behaviour for speed should expect a transcriptome-wide run; the command
+    line states this at startup.
+-   Perturbation codes are 32-bit. A chunk holding a single perturbation received
+    8-bit categorical codes from pandas, and stage two then failed where it
+    combined them with the first chunk's perturbation count.
+-   Guide-level summaries are derived only where a guide's effect differs from its
+    element's. Under the shared strategy it does not, so nothing is derived and
+    consumers join the element table through the guide map; under the offset
+    strategy the moments are closed-form; only the relative strategy samples, and
+    it does so in bounded element and guide blocks. The previous implementation
+    drew 64 samples of the whole effect matrix whatever the strategy, tens of
+    gigabytes on a screen-scale fit.
+
+### Fixed
+
+-   A perturbation with more cells than `--max-chunk-size` no longer aborts the
+    run. It takes a chunk of its own, and the run reports which perturbations did
+    so and which one sets peak memory. Screens exist with tens of thousands of
+    cells behind one perturbation, and a perturbation's cells cannot be split
+    across chunks without breaking its estimate.
