@@ -634,7 +634,21 @@ def main(argv: list[str] | None = None) -> None:
         # run to discover.
         crt_pool = args.crt_pool
         if crt_pool == "auto":
+            # The proxy is the presence of a guide-to-element map, not a measured
+            # multiplicity of infection: nothing here counts guides per cell. Both
+            # pools are valid for a screen whose realised MOI is a little above one,
+            # and they answer different questions - all-cells tests a marginal
+            # association and keeps every cell, control-anchored contrasts against
+            # unperturbed cells and drops any cell carrying two perturbations. A
+            # caller that knows its design should say so with --crt-pool rather than
+            # let this proxy decide, so the choice is recorded in their configuration
+            # and not inferred from ours.
             crt_pool = "all-cells" if args.perturbation_element_varm_key is not None else "control-anchored"
+            print(
+                f"[perturbo] --crt-pool auto resolved to '{crt_pool}' because the guide-to-element map was "
+                + ("given" if args.perturbation_element_varm_key is not None else "not given")
+                + ". Pass --crt-pool explicitly to choose on the screen's design rather than on this proxy."
+            )
         if crt_pool == "all-cells":
             if args.perturbation_element_varm_key is None:
                 raise ValueError("--crt-pool all-cells needs the guide-to-element map (--perturbation-element-varm-key).")
