@@ -22,7 +22,6 @@ from .core import (
     _PerturbationChunk,
     _build_matrix_membership,
     _build_obs_membership,
-    build_effect_indices,
     _compute_gene_outlier_thresholds,
     _construct_perturbation_chunks,
     _count_gene_outliers_per_cell,
@@ -36,13 +35,14 @@ from .core import (
     _load_from_path_with_backing,
     _load_perturbation_element_mapping,
     _normalize_likelihood_name,
+    _pad_cortado_data_for_chunk,
     _resolve_adata,
     _resolve_cli_size_factor_mode,
     _resolve_control_element_mask,
-    _resolve_gene_subset_indices,
     _resolve_perturbation_modality,
     _save_loss_plot,
     _save_multi_loss_plot,
+    _ReusableSVIRunner,
     _validate_cli_input_keys,
     _validate_clip_percentile,
     _validate_gene_outlier_threshold_floor,
@@ -53,7 +53,25 @@ from .core import (
     load_controls,
 )
 from .io import MuDataSetup, control_fit_arrays, save_array_bundle, save_light_fit_bundle
-from .results import build_guide_efficiency_df, build_standard_element_effects_df
+from .crt import (
+    CRTAccumulator,
+    CRT_ALL_TAIL_FAMILIES,
+    CRT_MECHANISMS,
+    CRT_SADDLEPOINT_FAMILY,
+    CRT_TAIL_FAMILIES,
+    DEFAULT_NEWTON_STEP_TOLERANCE,
+    exclude_targets,
+    prepare_crt_baseline,
+    run_crt_all_cells,
+    run_crt_for_chunk,
+    validate_crt_config,
+)
+from .results import (
+    build_guide_efficiency_df,
+    build_standard_element_effects_df,
+    load_pairs_to_test,
+    restrict_effects_to_pairs,
+)
 from .training_schedule import resolve_training_schedule
 
 
@@ -64,7 +82,6 @@ def _beta_fit_arrays(beta_fit: BetaFit) -> dict[str, Any]:
         "z_values": beta_fit.z_values,
         "losses": beta_fit.losses,
         "dispersion_excess_inverse": beta_fit.dispersion_excess_inverse,
-        "effect_indices": beta_fit.effect_indices,
     }
 
 
@@ -100,36 +117,25 @@ def _guide_efficacy_for_cli(
     return np.clip(arr.reshape(int(n_guides), -1).mean(axis=1), a_min=0.0, a_max=None).astype(np.float32)
 
 
-def _load_pairs_to_test(path: str | Path) -> pd.DataFrame:
-    pair_path = Path(path)
-    if not pair_path.exists():
-        raise FileNotFoundError(f"pairs-to-test file not found: {pair_path}")
-    if pair_path.suffix.lower() in {".parquet", ".pq"}:
-        frame = pd.read_parquet(pair_path)
-    else:
-        frame = pd.read_csv(pair_path, sep=None, engine="python")
-    required = {"element", "gene"}
-    missing = required.difference(frame.columns)
-    if missing:
-        raise ValueError(
-            f"--pairs-to-test requires columns named 'element' and 'gene'; missing {sorted(missing)}."
-        )
-    if frame[["element", "gene"]].isna().any().any():
-        raise ValueError("--pairs-to-test contains missing element or gene names.")
-    frame = frame.loc[:, ["element", "gene"]].astype(str).drop_duplicates(ignore_index=True)
-    if frame.empty:
-        raise ValueError("--pairs-to-test must contain at least one pair.")
-    return frame
-
-
 def main(argv: list[str] | None = None) -> None:
     import argparse
 
     parser = argparse.ArgumentParser(
-        description="Run PerTurbo end-to-end on an AnnData/MuData file.",
+        description="Run Cortado end-to-end on an AnnData/MuData file.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument("--input", required=True, help="Path to .h5ad or .h5mu file")
+    parser.add_argument(
+        "--pairs-to-test",
+        default=None,
+        help=(
+            "Optional CSV/TSV/Parquet with columns element,gene. The run is unchanged - every "
+            "pair is still fitted and tested - but a second effect table restricted to these "
+            "pairs is written beside the transcriptome-wide one, with Benjamini-Hochberg "
+            "recomputed within that family. Use it to obtain a cis-scale comparison and the "
+            "transcriptome-wide analysis from a single run."
+        ),
+    )
     parser.add_argument("--out-dir", required=True, help="Directory to write outputs")
     parser.add_argument("--modality-key", default=None, help="MuData modality key (e.g., rna)")
     parser.add_argument(
@@ -210,15 +216,123 @@ def main(argv: list[str] | None = None) -> None:
             "condition on observed/computed values (observed), or fix size factors to zero (none)."
         ),
     )
-    parser.add_argument("--gene-name-key", default=None, help="Var field for gene names")
     parser.add_argument(
-        "--pairs-to-test",
-        default=None,
+        "--crt",
+        action="store_true",
         help=(
-            "CSV, TSV, or Parquet table with element and gene columns. Stage 2 samples only these exact pairs; "
-            "the RNA and perturbation inputs are subset to their union before fitting."
+            "Also run the conditional randomization test against the stage-1 baseline, adding "
+            "crt_p_value/crt_q_value/crt_z_value to element_effects.parquet. Requires "
+            "--size-factor-mode observed (or none), --likelihood nb, --num-factors 0, no "
+            "--guide-random-effects, and one perturbation per cell."
         ),
     )
+    parser.add_argument("--crt-num-resamples", type=int, default=999)
+    parser.add_argument("--crt-seed", type=int, default=0)
+    parser.add_argument(
+        "--crt-gene-chunk-size",
+        type=int,
+        default=2000,
+        help=(
+            "Genes per inner CRT block. The score gather scales with this times the cells per "
+            "target times the resample block, so it is the main memory knob."
+        ),
+    )
+    parser.add_argument("--crt-max-gather-gib", type=float, default=8.0)
+    parser.add_argument(
+        "--crt-tail-families",
+        nargs="*",
+        default=list(CRT_TAIL_FAMILIES),
+        choices=list(CRT_ALL_TAIL_FAMILIES),
+        help=(
+            "Continuous nulls so p-values can resolve below the empirical floor of 1/(resamples+1). "
+            "skew_normal and student_t are fitted from the resampled moments; saddlepoint is "
+            "evaluated in the kernel and, under --crt-mechanism propensity, uses the exact "
+            "Bernoulli-sum CGF. All share one resampling pass. Pass with no values to skip them."
+        ),
+    )
+    parser.add_argument(
+        "--crt-only",
+        action="store_true",
+        help=(
+            "Stop after stage one and the CRT: skip the stage-two effect fit. The element table "
+            "then carries the CRT columns with missing effect estimates. This is the fast path when "
+            "only the test is wanted (power calculations, calibration checks)."
+        ),
+    )
+    parser.add_argument(
+        "--crt-pool",
+        choices=("auto", "control-anchored", "all-cells"),
+        default="auto",
+        help=(
+            "Cells a target is resampled against. 'control-anchored' (low MOI) tests each target "
+            "inside the control cells plus its own cells, with the null fit on controls. 'all-cells' "
+            "(high MOI) tests each element as a marginal association over every analysed cell, with "
+            "the null fit on all cells; it needs the guide-to-element map "
+            "(--perturbation-element-varm-key) and no control cells, and runs the exact "
+            "Bernoulli-sum saddlepoint with no resamples. 'auto' picks all-cells when the element "
+            "map is given, control-anchored otherwise."
+        ),
+    )
+    parser.add_argument(
+        "--crt-mechanism",
+        choices=list(CRT_MECHANISMS),
+        default="permutation",
+        help=(
+            "How a target's label is resampled inside its pool of controls plus its own cells: "
+            "a stratified permutation holding the count fixed, or model-X Bernoulli draws at each "
+            "cell's fitted selection probability (propensity)."
+        ),
+    )
+    parser.add_argument(
+        "--crt-saddlepoint-only",
+        action="store_true",
+        help=(
+            "Draw no resamples: fit the propensity model, compute observed scores, and evaluate the "
+            "exact-CGF saddlepoint alone. Requires --crt-mechanism propensity and "
+            "--crt-tail-families saddlepoint; crt_p_value stays missing."
+        ),
+    )
+    parser.add_argument(
+        "--crt-screen-p-value",
+        type=float,
+        default=0.05,
+        help="Evaluate the saddlepoint only where the Pearson III screen is at or below this p-value.",
+    )
+    parser.add_argument(
+        "--crt-two-sided",
+        choices=["symmetric", "equal-tail"],
+        default="equal-tail",
+        help=(
+            "Two-sided convention for the saddlepoint p-value: 'symmetric' is P(|S| >= |observed|); "
+            "'equal-tail' is twice the tail on the observed side, which rejects each tail equally under a skewed null."
+        ),
+    )
+    parser.add_argument(
+        "--crt-baseline-step-tolerance",
+        type=float,
+        default=DEFAULT_NEWTON_STEP_TOLERANCE,
+        help=(
+            "Maximum per-gene Newton step, in nats, from the stage-1 baseline to the control-cell "
+            "null mode. The CRT reuses that baseline rather than refitting it, so this is the only "
+            "check that it is fit well enough for the score test to mean what it says."
+        ),
+    )
+    parser.add_argument(
+        "--crt-allow-unconverged-baseline",
+        action="store_true",
+        help="Warn instead of failing when the stage-1 baseline is not at the control-cell null mode.",
+    )
+    parser.add_argument(
+        "--crt-polish-baseline",
+        action="store_true",
+        help=(
+            "Before the CRT, move the stage-1 nuisance coefficients onto the control-cell null "
+            "mode by Fisher scoring at the stage-1 dispersion. The resampling null is exact either "
+            "way; this restores the efficiency of the score statistic when stage one sits off the "
+            "mode, as it does with a batch covariate."
+        ),
+    )
+    parser.add_argument("--gene-name-key", default=None, help="Var field for gene names")
     parser.add_argument(
         "--clip-gene-expression-percentile",
         type=float,
@@ -292,11 +406,17 @@ def main(argv: list[str] | None = None) -> None:
         ),
     )
     parser.add_argument(
-        "--fit-perturbation-dispersion", action="store_true",
-        help="Fit non-negative perturbation/guide-by-gene excess inverse dispersion in stage 2 (NB only).",
+        "--fit-perturbation-dispersion",
+        action="store_true",
+        help=(
+            "Fit a non-negative perturbation-by-gene excess inverse dispersion in stage 2. "
+            "Currently supported for low-MOI negative-binomial fits only."
+        ),
     )
     parser.add_argument(
-        "--perturbation-dispersion-prior-rate", type=float, default=10.0,
+        "--perturbation-dispersion-prior-rate",
+        type=float,
+        default=10.0,
         help="Rate of the exponential prior on stage-2 excess inverse dispersion.",
     )
     parser.add_argument(
@@ -452,25 +572,11 @@ def main(argv: list[str] | None = None) -> None:
     _t0 = time.monotonic()
     data = _load_from_path_with_backing(args.input, backed=args.backed)
     _load_elapsed = time.monotonic() - _t0
-    _loaded_adata = (
-        data[args.modality_key]
-        if hasattr(data, "mod") and args.modality_key in data.mod
-        else next(iter(data.mod.values())) if hasattr(data, "mod") else data
-    )
+    _loaded_adata = data if hasattr(data, "n_obs") else next(iter(data.mod.values())) if hasattr(data, "mod") else data
     print(
         f"[perturbo] Input loaded in {_load_elapsed:.1f}s: "
         f"{getattr(_loaded_adata, 'n_obs', '?')} cells × {getattr(_loaded_adata, 'n_vars', '?')} genes"
     )
-    pairs_to_test = _load_pairs_to_test(args.pairs_to_test) if args.pairs_to_test is not None else None
-    selected_elements = (
-        list(dict.fromkeys(pairs_to_test["element"].tolist())) if pairs_to_test is not None else None
-    )
-    selected_genes = list(dict.fromkeys(pairs_to_test["gene"].tolist())) if pairs_to_test is not None else None
-    if pairs_to_test is not None:
-        print(
-            f"[perturbo] Pair-restricted fit: {len(pairs_to_test)} exact pairs, "
-            f"{len(selected_elements)} elements, {len(selected_genes)} genes."
-        )
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     print(f"[perturbo] Outputs will be written to: {out_dir}")
@@ -515,12 +621,51 @@ def main(argv: list[str] | None = None) -> None:
         raise ValueError(
             "--guide-activity-mode=absolute is currently only compatible with negative-binomial likelihoods."
         )
-    if pairs_to_test is not None and args.fit_perturbation_dispersion:
-        raise ValueError("--pairs-to-test is not yet compatible with --fit-perturbation-dispersion.")
 
     clip_percentile = _validate_clip_percentile(args.clip_gene_expression_percentile)
     if _is_censored_model_name(args.likelihood) and clip_percentile >= 100.0:
         raise ValueError("--likelihood=censored_nb requires --clip-gene-expression-percentile < 100.")
+
+    if args.crt_only and not args.crt:
+        raise ValueError("--crt-only requires --crt.")
+    if args.crt:
+        # Deliberately before any fitting: a CRT run sits behind a full stage-1
+        # fit, so surfacing an unsupported flag afterwards would cost a training
+        # run to discover.
+        crt_pool = args.crt_pool
+        if crt_pool == "auto":
+            crt_pool = "all-cells" if args.perturbation_element_varm_key is not None else "control-anchored"
+        if crt_pool == "all-cells":
+            if args.perturbation_element_varm_key is None:
+                raise ValueError("--crt-pool all-cells needs the guide-to-element map (--perturbation-element-varm-key).")
+            if not args.crt_saddlepoint_only or args.crt_mechanism != "propensity":
+                raise ValueError(
+                    "--crt-pool all-cells runs the propensity saddlepoint with no resamples; pass "
+                    "--crt-mechanism propensity --crt-tail-families saddlepoint --crt-saddlepoint-only."
+                )
+        validate_crt_config(
+            likelihood=args.likelihood,
+            size_factor_mode=size_factor_mode,
+            num_factors=args.num_factors,
+            guide_random_effects=args.guide_random_effects,
+            retain_guide_structure=args.perturbation_element_varm_key is not None and crt_pool == "control-anchored",
+        )
+        if args.crt_num_resamples < 1:
+            raise ValueError("--crt-num-resamples must be >= 1.")
+        if args.crt_saddlepoint_only:
+            if list(args.crt_tail_families) != [CRT_SADDLEPOINT_FAMILY]:
+                raise ValueError("--crt-saddlepoint-only requires --crt-tail-families saddlepoint alone.")
+            if args.crt_mechanism != "propensity":
+                raise ValueError("--crt-saddlepoint-only requires --crt-mechanism propensity.")
+        if not 0.0 < args.crt_screen_p_value <= 1.0:
+            raise ValueError("--crt-screen-p-value must lie in (0, 1].")
+        if args.crt_gene_chunk_size < 1:
+            raise ValueError("--crt-gene-chunk-size must be >= 1.")
+        if args.control_substring is None and crt_pool == "control-anchored":
+            raise ValueError(
+                "--crt requires --control-substring: the test resamples each perturbation's label "
+                "within a pool of control cells, so it needs to know which cells those are."
+            )
 
     _validate_cli_input_keys(
         data,
@@ -554,9 +699,6 @@ def main(argv: list[str] | None = None) -> None:
     if not apply_filter_cells and args.outlier_cell_min_genes != 0:
         raise ValueError("--outlier-cell-min-genes requires --gene-outlier-action=filter_cells or both.")
     analysis_adata = _resolve_adata(data, args.modality_key)
-    if selected_genes is not None:
-        gene_idx = _resolve_gene_subset_indices(analysis_adata, selected_genes, args.gene_name_key)
-        analysis_adata = analysis_adata[:, gene_idx]
     _row_chunk_size = BACKED_ROW_CHUNK_SIZE if args.backed else None
     gene_clip_thresholds = None
     if (apply_filter_cells or apply_winsorize) and clip_percentile is not None and clip_percentile < 100.0:
@@ -595,39 +737,26 @@ def main(argv: list[str] | None = None) -> None:
         analysis_adata_for_workflow = analysis_adata
 
     should_chunk = False
-    retain_guide_structure = bool(
-        args.perturbation_element_varm_key is not None
-        and (guide_effect_strategy != "shared" or args.guide_random_effects or args.fit_perturbation_dispersion)
-    )
+    retain_guide_structure = args.perturbation_element_varm_key is not None
     n_analysis_cells = getattr(analysis_adata_for_workflow, "n_obs", None)
-    requested_beta_minibatch = args.minibatch_size_betas or args.minibatch_size or 0
+    if args.pairs_to_test is not None:
+        # Say this before the expensive work, not after. On the perturbo branch this
+        # flag restricted the fit itself, so a caller who has not read the release
+        # notes would otherwise wait out a transcriptome-wide run expecting a small one.
+        print(
+            "[perturbo] --pairs-to-test given: the fit and the test still cover every "
+            "perturbation and gene. The file selects the rows of a second table, "
+            "element_effects_requested_pairs.parquet, whose q-values are corrected "
+            "within that set alone."
+        )
     if args.perturbation_chunk_size > 0:
         should_chunk = True
-    elif (
-        n_analysis_cells is not None
-        and n_analysis_cells > args.max_chunk_size
-        and requested_beta_minibatch == 0
-    ):
+    elif n_analysis_cells is not None and n_analysis_cells > args.max_chunk_size:
         should_chunk = True
         print(
             "[perturbo] Auto chunking enabled because the analysis dataset has "
             f"{n_analysis_cells} cells; chunk cell counts will be capped at "
             f"--max-chunk-size={args.max_chunk_size}."
-        )
-    elif n_analysis_cells is not None and n_analysis_cells > args.max_chunk_size:
-        print(
-            "[perturbo] Stage-2 minibatching enabled; using one global fit to avoid "
-            "a separate JAX compilation for every perturbation chunk. Use "
-            "--perturbation-chunk-size explicitly if the full design does not fit in device memory."
-        )
-    if (
-        should_chunk
-        and args.fit_perturbation_dispersion
-        and args.perturbation_modality_key is not None
-    ):
-        raise ValueError(
-            "High-MOI fitted perturbation dispersion is not yet compatible with CLI perturbation chunking; "
-            "increase --max-chunk-size or disable --perturbation-chunk-size."
         )
 
     if should_chunk:
@@ -647,14 +776,6 @@ def main(argv: list[str] | None = None) -> None:
                 all_perturbation_names = element_names
             else:
                 all_perturbation_names = _extract_pert_names(pert_adata)
-            if selected_elements is not None:
-                name_to_idx = {name: idx for idx, name in enumerate(all_perturbation_names)}
-                missing = [name for name in selected_elements if name not in name_to_idx]
-                if missing:
-                    raise KeyError(f"Pair-list elements not found in perturbation data: {missing[:10]}")
-                selected_idx = [name_to_idx[name] for name in selected_elements]
-                pert_matrix = pert_matrix[:, selected_idx]
-                all_perturbation_names = list(selected_elements)
             membership = _build_matrix_membership(
                 pert_matrix,
                 num_perts=len(all_perturbation_names),
@@ -667,11 +788,7 @@ def main(argv: list[str] | None = None) -> None:
             )
         else:
             pert_series = analysis_adata_for_workflow.obs[args.perturbation_key].astype(str)
-            all_perturbation_names = (
-                list(selected_elements)
-                if selected_elements is not None
-                else [str(x) for x in pd.Categorical(pert_series).categories.tolist()]
-            )
+            all_perturbation_names = [str(x) for x in pd.Categorical(pert_series).categories.tolist()]
             membership = _build_obs_membership(pert_series, all_perturbation_names)
             chunks = _construct_perturbation_chunks(
                 all_perturbation_names,
@@ -693,7 +810,6 @@ def main(argv: list[str] | None = None) -> None:
         size_factor_key=size_factor_key_for_loading,
         library_size_key=library_size_key_for_loading,
         gene_name_key=args.gene_name_key,
-        selected_genes=selected_genes,
         device=args.device,
         cell_keep_mask=cell_keep_mask,
         clip_gene_expression_percentile=clip_percentile,
@@ -704,7 +820,6 @@ def main(argv: list[str] | None = None) -> None:
         batch_covariate=batch_covariate,
         return_covariate_transform_state=True,
         infer_control_guides=bool(args.guide_random_effects and args.perturbation_modality_key is not None),
-        retain_perturbation_design=bool(args.guide_random_effects),
     )
     if isinstance(controls_loaded, tuple):
         controls, covariate_transform_state = controls_loaded
@@ -760,20 +875,219 @@ def main(argv: list[str] | None = None) -> None:
     control_fit_path = out_dir / "control_fit.npz"
     save_array_bundle(control_fit_path, control_fit_arrays(control_fit))
     print(f"[perturbo] Wrote {control_fit_path}")
+
+    crt_baseline = None
+    crt_accumulator: CRTAccumulator | None = None
+    if args.crt and crt_pool == "control-anchored":
+        print("[perturbo] Preparing CRT baseline from the stage-1 fit...")
+        crt_baseline = prepare_crt_baseline(
+            controls,
+            control_fit,
+            step_tolerance=args.crt_baseline_step_tolerance,
+            strict=not args.crt_allow_unconverged_baseline,
+            polish=args.crt_polish_baseline,
+        )
+        if crt_baseline.pre_polish_check is not None:
+            print(f"[perturbo] CRT baseline before polishing: {crt_baseline.pre_polish_check.describe()}")
+        print(f"[perturbo] CRT baseline: {crt_baseline.null_check.describe()}")
+    def _run_crt_on_chunk(chunk_source: PerTurboData, accumulator: CRTAccumulator) -> None:
+        """Test one chunk's perturbations, skipping the control elements.
+
+        Control cells are already the pool, so testing them as targets from the
+        chunk side would stack the same biological cells twice as distinct rows.
+        """
+
+        control_names = [
+            name
+            for name, is_control in zip(
+                list(chunk_source.pert_names),
+                _resolve_control_element_mask(
+                    list(chunk_source.pert_names),
+                    args.control_substring,
+                    infer_control_elements=False,
+                ),
+                strict=True,
+            )
+            if is_control
+        ]
+        testable = exclude_targets(chunk_source, control_names)
+        if testable is None:
+            print("[perturbo] CRT: chunk holds only control elements; nothing to test.")
+            return
+        if control_names:
+            print(f"[perturbo] CRT: skipping {len(control_names)} control element(s) as targets.")
+        accumulator.absorb(
+            run_crt_for_chunk(
+                crt_baseline,
+                testable,
+                control_data=controls,
+                num_resamples=args.crt_num_resamples,
+                seed=args.crt_seed,
+                gene_chunk_size=args.crt_gene_chunk_size,
+                tail_families=args.crt_tail_families,
+                jax_max_gather_gib=args.crt_max_gather_gib,
+                resampling_mechanism=args.crt_mechanism,
+                saddlepoint_only=args.crt_saddlepoint_only,
+                saddlepoint_screen_p_value=args.crt_screen_p_value,
+                saddlepoint_two_sided=args.crt_two_sided,
+            )
+        )
+
+    def _nan_beta_fit(n_perts: int, n_genes: int):
+        """A stage-two result with every estimate missing, for --crt-only runs."""
+        shape = (int(n_perts), int(n_genes))
+        return BetaFit(
+            posterior_mean=jnp.full(shape, jnp.nan, dtype=jnp.float32),
+            posterior_scale=jnp.full(shape, jnp.nan, dtype=jnp.float32),
+            z_values=jnp.full(shape, jnp.nan, dtype=jnp.float32),
+            losses=jnp.zeros((0,), dtype=jnp.float32),
+            svi_result=None,
+        )
+
+    def _run_all_cells_crt(full_data: PerTurboData) -> CRTAccumulator:
+        """The high-MOI CRT over every analysed cell at once, independent of stage-two chunking."""
+        started = time.perf_counter()
+        print("[perturbo] Preparing the all-cells CRT baseline: stage-1 fit polished over every analysed cell...")
+        baseline = prepare_crt_baseline(
+            full_data,
+            control_fit,
+            step_tolerance=args.crt_baseline_step_tolerance,
+            strict=not args.crt_allow_unconverged_baseline,
+            polish=True,
+        )
+        print(f"[perturbo] CRT baseline: {baseline.null_check.describe()}")
+        accumulator = CRTAccumulator(
+            element_names=tuple(str(name) for name in full_data.pert_names),
+            gene_names=tuple(str(name) for name in full_data.gene_names),
+            tail_families=tuple(args.crt_tail_families),
+        )
+        accumulator.absorb(
+            run_crt_all_cells(
+                baseline,
+                full_data,
+                gene_chunk_size=args.crt_gene_chunk_size,
+                screen_p_value=args.crt_screen_p_value,
+                two_sided=args.crt_two_sided,
+            )
+        )
+        print(f"[perturbo] CRT (all-cells pool) complete in {time.perf_counter() - started:.0f}s")
+        return accumulator
+
+    def _load_all_analysis_cells() -> PerTurboData:
+        return load_analysis_cells(
+            data,
+            perturbation_key=args.perturbation_key,
+            modality_key=args.modality_key,
+            perturbation_modality_key=args.perturbation_modality_key,
+            perturbation_layer=args.perturbation_layer,
+            perturbation_element_varm_key=args.perturbation_element_varm_key,
+            perturbation_element_names_uns_key=args.perturbation_element_names_uns_key,
+            size_factor_key=size_factor_key_for_loading,
+            library_size_key=library_size_key_for_loading,
+            gene_name_key=args.gene_name_key,
+            device=args.device,
+            cell_keep_mask=cell_keep_mask,
+            clip_gene_expression_percentile=clip_percentile,
+            winsorize_gene_expression=apply_winsorize,
+            gene_outlier_threshold_floor=threshold_floor,
+            gene_clip_thresholds=gene_clip_thresholds if apply_winsorize else None,
+            continuous_covariates=continuous_covariates,
+            batch_covariate=batch_covariate,
+            covariate_transform_state=covariate_transform_state,
+            retain_guide_structure=retain_guide_structure,
+            library_size_center_log_mean=controls.library_size_center_log_mean,
+        )
+
     chunk_losses: list[jnp.ndarray] = []
     guide_efficiency_frames: list[pd.DataFrame] = []
     analysis_data: PerTurboData | None = None
-    if chunks is not None:
+    stage_two_skipped = False
+    if chunks is not None and args.crt and crt_pool == "all-cells":
+        # The all-cells pool needs every cell at once, whatever the stage-two
+        # chunking does: load the full analysis data, test, and release it.
+        full_data = _load_all_analysis_cells()
+        if size_factor_mode == "none":
+            full_data.size_factors = _fixed_zero_size_factors(full_data.counts)
+        crt_accumulator = _run_all_cells_crt(full_data)
+        all_perturbation_names = list(full_data.pert_names)
+        analysis_gene_names = list(full_data.gene_names)
+        del full_data
+    if chunks is not None and args.crt_only:
+        # No stage two: the CRT already ran (all cells) or runs chunk by chunk
+        # below without any effect fit.
+        n_genes = len(analysis_gene_names)
+        n_perts = len(all_perturbation_names)
+        if crt_pool == "control-anchored":
+            crt_accumulator = CRTAccumulator(
+                element_names=tuple(str(name) for name in all_perturbation_names),
+                gene_names=tuple(str(name) for name in analysis_gene_names),
+                tail_families=tuple(args.crt_tail_families),
+            )
+            for chunk_i, chunk_info in enumerate(chunks):
+                chunk_data = load_analysis_cells(
+                    data,
+                    perturbation_key=args.perturbation_key,
+                    modality_key=args.modality_key,
+                    perturbation_modality_key=args.perturbation_modality_key,
+                    perturbation_layer=args.perturbation_layer,
+                    perturbation_element_varm_key=args.perturbation_element_varm_key,
+                    perturbation_element_names_uns_key=args.perturbation_element_names_uns_key,
+                    size_factor_key=size_factor_key_for_loading,
+                    library_size_key=library_size_key_for_loading,
+                    gene_name_key=args.gene_name_key,
+                    device=args.device,
+                    selected_perturbations=chunk_info.pert_names,
+                    cell_keep_mask=cell_keep_mask,
+                    clip_gene_expression_percentile=clip_percentile,
+                    winsorize_gene_expression=apply_winsorize,
+                    gene_outlier_threshold_floor=threshold_floor,
+                    gene_clip_thresholds=gene_clip_thresholds if apply_winsorize else None,
+                    continuous_covariates=continuous_covariates,
+                    batch_covariate=batch_covariate,
+                    covariate_transform_state=covariate_transform_state,
+                    retain_guide_structure=retain_guide_structure,
+                    library_size_center_log_mean=controls.library_size_center_log_mean,
+                )
+                if size_factor_mode == "none":
+                    chunk_data.size_factors = _fixed_zero_size_factors(chunk_data.counts)
+                crt_started = time.perf_counter()
+                _run_crt_on_chunk(chunk_data, crt_accumulator)
+                print(f"[perturbo] CRT chunk {chunk_i + 1}/{len(chunks)} in {time.perf_counter() - crt_started:.0f}s")
+        beta_fit = _nan_beta_fit(n_perts, n_genes)
+        # Stage two and the unchunked branch below are both skipped: the CRT
+        # has already run over every chunk (or over all cells), and falling
+        # into the unchunked branch would reload every cell and run it again.
+        stage_two_skipped = True
+        analysis_data = None
+        print("[perturbo] --crt-only: stage two skipped; effect estimates are missing in the element table.")
+    if stage_two_skipped:
+        pass
+    elif chunks is not None:
         if all_perturbation_names is None or analysis_gene_names is None:
             raise RuntimeError("Chunk metadata was not initialized.")
         n_genes = len(analysis_gene_names)
         n_perts = len(all_perturbation_names)
-        fill_value = np.nan if pairs_to_test is not None else 0.0
-        posterior_mean = np.full((n_perts, n_genes), fill_value, dtype=np.float32)
-        posterior_scale = np.full((n_perts, n_genes), fill_value, dtype=np.float32)
-        z_values = np.full((n_perts, n_genes), fill_value, dtype=np.float32)
-        dispersion_excess_inverse = np.zeros((n_perts, n_genes), dtype=np.float32) if args.fit_perturbation_dispersion else None
+        if crt_baseline is not None:
+            crt_accumulator = CRTAccumulator(
+                element_names=tuple(str(name) for name in all_perturbation_names),
+                gene_names=tuple(str(name) for name in analysis_gene_names),
+                tail_families=tuple(args.crt_tail_families),
+            )
+        posterior_mean = np.zeros((n_perts, n_genes), dtype=np.float32)
+        posterior_scale = np.zeros((n_perts, n_genes), dtype=np.float32)
+        z_values = np.zeros((n_perts, n_genes), dtype=np.float32)
+        dispersion_excess_inverse = (
+            np.zeros((n_perts, n_genes), dtype=np.float32) if args.fit_perturbation_dispersion else None
+        )
         last_state = None
+        # Keep the standard (non-guide-aware) chunked path on one reusable
+        # shape. Guide-aware chunks retain their current variable-shape path
+        # until their guide buffers can be handled separately.
+        padded_chunk_cell_capacity = max(int(chunk.cell_indices.size) for chunk in chunks)
+        padded_chunk_pert_capacity = max(len(chunk.pert_names) for chunk in chunks)
+        chunk_runner_cache: dict[str, _ReusableSVIRunner] | None = (
+            {} if not retain_guide_structure and minibatch_betas is None else None
+        )
         for chunk_i, chunk_info in enumerate(chunks):
             chunk_names = chunk_info.pert_names
             chunk_indices = chunk_info.pert_indices
@@ -798,7 +1112,6 @@ def main(argv: list[str] | None = None) -> None:
                 gene_name_key=args.gene_name_key,
                 device=args.device,
                 selected_perturbations=chunk_names,
-                selected_genes=selected_genes,
                 cell_keep_mask=cell_keep_mask,
                 clip_gene_expression_percentile=clip_percentile,
                 winsorize_gene_expression=apply_winsorize,
@@ -810,19 +1123,17 @@ def main(argv: list[str] | None = None) -> None:
                 retain_guide_structure=retain_guide_structure,
                 library_size_center_log_mean=controls.library_size_center_log_mean,
             )
-            if pairs_to_test is not None:
-                chunk_pairs = pairs_to_test[pairs_to_test["element"].isin(chunk_names)]
-                chunk_data.effect_indices = jnp.asarray(
-                    build_effect_indices(
-                        chunk_pairs,
-                        pert_names=chunk_data.pert_names,
-                        gene_names=chunk_data.gene_names,
-                    )
-                )
             if size_factor_mode == "none":
                 chunk_data.size_factors = _fixed_zero_size_factors(chunk_data.counts)
+            fit_data = chunk_data
+            if chunk_runner_cache is not None:
+                fit_data = _pad_cortado_data_for_chunk(
+                    chunk_data,
+                    cell_capacity=padded_chunk_cell_capacity,
+                    pert_capacity=padded_chunk_pert_capacity,
+                )
             chunk_fit = fit_perturbation_effects(
-                chunk_data,
+                fit_data,
                 control_fit,
                 num_steps=schedule.resolve_stage_steps(
                     stage="beta",
@@ -844,12 +1155,23 @@ def main(argv: list[str] | None = None) -> None:
                 guide_random_effects=args.guide_random_effects,
                 fit_perturbation_dispersion=args.fit_perturbation_dispersion,
                 perturbation_dispersion_prior_rate=args.perturbation_dispersion_prior_rate,
+                _runner_cache=chunk_runner_cache,
             )
-            posterior_mean[chunk_indices] = np.asarray(chunk_fit.posterior_mean)
-            posterior_scale[chunk_indices] = np.asarray(chunk_fit.posterior_scale)
-            z_values[chunk_indices] = np.asarray(chunk_fit.z_values)
+            if crt_accumulator is not None and crt_baseline is not None:
+                # Control-anchored only: the all-cells pool was tested once on
+                # the full data before this loop.
+                crt_started = time.perf_counter()
+                # The unpadded chunk, deliberately: padding rows are all-zero
+                # cells the model drops via cell_mask, and they would otherwise
+                # join the pooled null as legitimate zero-count observations.
+                _run_crt_on_chunk(chunk_data, crt_accumulator)
+                print(f"[perturbo] CRT chunk {chunk_i + 1}/{len(chunks)} in {time.perf_counter() - crt_started:.0f}s")
+            n_chunk_perts = len(chunk_names)
+            posterior_mean[chunk_indices] = np.asarray(chunk_fit.posterior_mean)[:n_chunk_perts]
+            posterior_scale[chunk_indices] = np.asarray(chunk_fit.posterior_scale)[:n_chunk_perts]
+            z_values[chunk_indices] = np.asarray(chunk_fit.z_values)[:n_chunk_perts]
             if dispersion_excess_inverse is not None and chunk_fit.dispersion_excess_inverse is not None:
-                dispersion_excess_inverse[chunk_indices] = np.asarray(chunk_fit.dispersion_excess_inverse)
+                dispersion_excess_inverse[chunk_indices] = np.asarray(chunk_fit.dispersion_excess_inverse)[:n_chunk_perts]
             last_state = chunk_fit.svi_result
             if chunk_fit.losses.size > 0:
                 chunk_losses.append(chunk_fit.losses)
@@ -881,17 +1203,8 @@ def main(argv: list[str] | None = None) -> None:
             z_values=jnp.asarray(z_values),
             losses=jnp.concatenate(chunk_losses) if chunk_losses else jnp.array([]),
             svi_result=last_state,
-            dispersion_excess_inverse=None if dispersion_excess_inverse is None else jnp.asarray(dispersion_excess_inverse),
-            effect_indices=(
-                None
-                if pairs_to_test is None
-                else jnp.asarray(
-                    build_effect_indices(
-                        pairs_to_test,
-                        pert_names=list(all_perturbation_names),
-                        gene_names=list(analysis_gene_names),
-                    )
-                )
+            dispersion_excess_inverse=(
+                None if dispersion_excess_inverse is None else jnp.asarray(dispersion_excess_inverse)
             ),
         )
         # full = PerTurboData(
@@ -914,8 +1227,6 @@ def main(argv: list[str] | None = None) -> None:
             library_size_key=library_size_key_for_loading,
             gene_name_key=args.gene_name_key,
             device=args.device,
-            selected_perturbations=selected_elements,
-            selected_genes=selected_genes,
             cell_keep_mask=cell_keep_mask,
             clip_gene_expression_percentile=clip_percentile,
             winsorize_gene_expression=apply_winsorize,
@@ -927,19 +1238,26 @@ def main(argv: list[str] | None = None) -> None:
             retain_guide_structure=retain_guide_structure,
             library_size_center_log_mean=controls.library_size_center_log_mean,
         )
-        if pairs_to_test is not None:
-            analysis_data.effect_indices = jnp.asarray(
-                build_effect_indices(
-                    pairs_to_test,
-                    pert_names=analysis_data.pert_names,
-                    gene_names=analysis_data.gene_names,
-                )
-            )
         if size_factor_mode == "none":
             analysis_data.size_factors = _fixed_zero_size_factors(analysis_data.counts)
         all_perturbation_names = analysis_data.pert_names
         analysis_gene_names = analysis_data.gene_names
-        beta_fit = fit_perturbation_effects(
+        if args.crt and crt_pool == "all-cells":
+            crt_accumulator = _run_all_cells_crt(analysis_data)
+        elif crt_baseline is not None:
+            crt_accumulator = CRTAccumulator(
+                element_names=tuple(str(name) for name in all_perturbation_names),
+                gene_names=tuple(str(name) for name in analysis_gene_names),
+                tail_families=tuple(args.crt_tail_families),
+            )
+            crt_started = time.perf_counter()
+            _run_crt_on_chunk(analysis_data, crt_accumulator)
+            print(f"[perturbo] CRT complete in {time.perf_counter() - crt_started:.0f}s")
+        if args.crt_only:
+            beta_fit = _nan_beta_fit(len(all_perturbation_names), len(analysis_gene_names))
+            print("[perturbo] --crt-only: stage two skipped; effect estimates are missing in the element table.")
+        else:
+            beta_fit = fit_perturbation_effects(
             analysis_data,
             control_fit,
             num_steps=schedule.resolve_stage_steps(
@@ -976,6 +1294,41 @@ def main(argv: list[str] | None = None) -> None:
         null_z_values: np.ndarray | None = None
     else:
         null_z_values = null_z
+    crt_columns = None
+    if crt_accumulator is not None:
+        # Benjamini-Hochberg happens here and only here: it has to see every
+        # hypothesis at once, and each chunk was by construction only part of
+        # the family.
+        crt_columns = crt_accumulator.finalize()
+        tested = int(crt_accumulator.tested.sum())
+        primary = (
+            f"crt_{CRT_SADDLEPOINT_FAMILY}_p_value" if args.crt_saddlepoint_only else "crt_p_value"
+        )
+        finite = np.isfinite(crt_columns[primary])
+        print(
+            f"[perturbo] CRT ({args.crt_mechanism}): {tested}/{len(all_perturbation_names)} elements "
+            f"tested, {int(finite.sum())} pairs with a p-value."
+        )
+        if args.crt_saddlepoint_only:
+            print("[perturbo] CRT: saddlepoint-only run; no resamples were drawn and crt_p_value is missing.")
+        else:
+            # The empirical p-value floors at 1/(resamples+1); over a large
+            # screen that floor can sit above the Benjamini-Hochberg cutoff
+            # entirely, so report each family beside it rather than letting a
+            # q of zero discoveries read as "nothing is there".
+            floor = 1.0 / (args.crt_num_resamples + 1)
+            at_floor = int(np.count_nonzero(crt_columns["crt_p_value"][finite] <= floor + 1e-12))
+            print(
+                f"[perturbo] CRT empirical: {int(np.count_nonzero(crt_columns['crt_q_value'][finite] < 0.05))} "
+                f"at q<0.05; {at_floor} pairs tied at the p floor of {floor:.3g}."
+            )
+        for family in crt_accumulator.tail_families:
+            q = crt_columns[f"crt_{family}_q_value"]
+            valid = crt_columns[f"crt_{family}_valid"] > 0
+            print(
+                f"[perturbo] CRT {family}: {int(np.count_nonzero(q[finite] < 0.05))} at q<0.05, "
+                f"{int(np.count_nonzero(valid & finite))}/{int(finite.sum())} fits valid."
+            )
     element_effects = build_standard_element_effects_df(
         method="perturbo",
         effect_loc=np.asarray(beta_fit.posterior_mean),
@@ -983,14 +1336,25 @@ def main(argv: list[str] | None = None) -> None:
         element_names=list(all_perturbation_names),
         gene_names=list(analysis_gene_names),
         null_z_values=null_z_values,
+        extra_columns=crt_columns,
     )
-    if pairs_to_test is not None:
-        requested_pairs = pd.MultiIndex.from_frame(pairs_to_test[["element", "gene"]])
-        output_pairs = pd.MultiIndex.from_frame(element_effects[["element", "gene"]])
-        element_effects = element_effects.loc[output_pairs.isin(requested_pairs)].reset_index(drop=True)
     element_effects_path = out_dir / "element_effects.parquet"
     element_effects.to_parquet(element_effects_path, index=False)
     print(f"[perturbo] Wrote {element_effects_path}")
+
+    if args.pairs_to_test is not None:
+        # One fit and one test, two tables. The restricted table exists because
+        # the multiple-testing family differs, not because the analysis does.
+        requested_pairs = load_pairs_to_test(args.pairs_to_test)
+        restricted = restrict_effects_to_pairs(element_effects, requested_pairs)
+        missing = len(requested_pairs) - len(restricted)
+        restricted_path = out_dir / "element_effects_requested_pairs.parquet"
+        restricted.to_parquet(restricted_path, index=False)
+        print(
+            f"[perturbo] Wrote {restricted_path}: {len(restricted):,} of {len(requested_pairs):,} requested pairs"
+            + (f" ({missing:,} not present in the analysed grid)" if missing else "")
+            + "; q-values recomputed within this family."
+        )
 
     if guide_effect_strategy == "relative":
         guide_efficiency_df: pd.DataFrame | None = None
@@ -1092,8 +1456,6 @@ def main(argv: list[str] | None = None) -> None:
             n_guides=len(guide_names),
         )
         metadata = {
-            "producer": "perturbo",
-            "bundle_version": 2,
             "likelihood": args.likelihood,
             "effect_prior_dist": args.prior,
             "efficiency_mode": guide_effect_strategy,

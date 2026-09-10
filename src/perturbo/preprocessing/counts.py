@@ -46,6 +46,7 @@ def compute_gene_clip_thresholds(
     percentile: float,
     threshold_floor: int = 2,
     target_dense_bytes: int = 64 * 1024 * 1024,
+    max_histogram_bytes: int = 2 * 1024 * 1024 * 1024,
     row_chunk_size: int | None = None,
 ) -> np.ndarray:
     """Compute per-gene clip thresholds at the given percentile.
@@ -53,6 +54,12 @@ def compute_gene_clip_thresholds(
     When ``row_chunk_size`` is set, the matrix is read in row chunks and
     thresholds are computed via integer histograms — suitable for backed
     (disk-resident) matrices where column slicing is expensive.
+
+    ``max_histogram_bytes`` bounds the resident histogram and therefore the
+    number of passes over the matrix: a backed row slice reads every gene
+    regardless of which columns are wanted afterwards, so genes whose
+    histograms cannot be held together cost another full read. At the default
+    2 GiB a transcriptome-scale panel needs a single pass.
     """
     percentile = _validate_clip_percentile(percentile)
     if percentile is None:
@@ -71,13 +78,23 @@ def compute_gene_clip_thresholds(
         # working buffer for one row chunk fit within target_dense_bytes.
         _MAX = _HIST_MAX_COUNT
         int32_size = np.dtype(np.int32).itemsize
+        # Size of the dense working buffer for one row chunk. This is a memory
+        # bound, not an I/O one, so it only decides how a row chunk already in
+        # hand is carved up.
         genes_per_block = max(
             1,
-            min(
-                n_vars,
-                target_dense_bytes // ((_MAX + 1) * int32_size),
-                target_dense_bytes // (row_chunk_size * int32_size),
-            ),
+            min(n_vars, target_dense_bytes // (row_chunk_size * int32_size)),
+        )
+        # How many genes' histograms can be held at once. This is what decides
+        # how many times the matrix is read, because a backed row slice reads
+        # every gene whatever column subset is wanted afterwards. Holding the
+        # histograms for one gene block and looping rows inside that - which
+        # this did until it was measured - reads the whole matrix once per gene
+        # block: 25 passes over 62 GB on the genome-wide screen, to build a
+        # histogram that needs one.
+        genes_per_pass = max(
+            genes_per_block,
+            min(n_vars, max_histogram_bytes // ((_MAX + 1) * int32_size)),
         )
 
         # Replicate numpy's linear quantile formula exactly so results match
@@ -95,28 +112,34 @@ def compute_gene_clip_thresholds(
             idx = np.argmax(cumsum_2d >= rank, axis=0).astype(np.int32)
             return np.where(cumsum_2d[-1] >= rank, idx, np.int32(_MAX))
 
-        for g_start in range(0, n_vars, genes_per_block):
-            g_stop = min(n_vars, g_start + genes_per_block)
-            n_block = g_stop - g_start
-            hist = np.zeros((_MAX + 1, n_block), dtype=np.int32)
+        for p_start in range(0, n_vars, genes_per_pass):
+            p_stop = min(n_vars, p_start + genes_per_pass)
+            hist = np.zeros((_MAX + 1, p_stop - p_start), dtype=np.int32)
 
             for r_start in range(0, n_obs, row_chunk_size):
                 r_stop = min(n_obs, r_start + row_chunk_size)
+                # The one disk read. Every gene block below slices this in
+                # memory rather than going back to the file.
                 row_block = matrix[r_start:r_stop]
-                dense = to_dense_array(row_block[:, g_start:g_stop]).astype(np.int32, copy=False)
-                clipped = np.clip(dense, 0, _MAX)
-                # Vectorised 2-D histogram via offset trick: shift each gene's
-                # values into a non-overlapping range then use a single bincount.
-                offsets = (np.arange(n_block, dtype=np.int32) * (_MAX + 1))[None, :]
-                flat = (clipped + offsets).ravel()
-                flat_hist = np.bincount(flat, minlength=(_MAX + 1) * n_block)
-                hist += flat_hist.reshape(n_block, _MAX + 1).T.astype(np.int32)
+                for g_start in range(p_start, p_stop, genes_per_block):
+                    g_stop = min(p_stop, g_start + genes_per_block)
+                    n_block = g_stop - g_start
+                    dense = to_dense_array(row_block[:, g_start:g_stop]).astype(np.int32, copy=False)
+                    clipped = np.clip(dense, 0, _MAX)
+                    # Vectorised 2-D histogram via offset trick: shift each gene's
+                    # values into a non-overlapping range then use a single bincount.
+                    offsets = (np.arange(n_block, dtype=np.int32) * (_MAX + 1))[None, :]
+                    flat = (clipped + offsets).ravel()
+                    flat_hist = np.bincount(flat, minlength=(_MAX + 1) * n_block)
+                    hist[:, g_start - p_start : g_stop - p_start] += (
+                        flat_hist.reshape(n_block, _MAX + 1).T.astype(np.int32)
+                    )
 
             cumsum = np.cumsum(hist, axis=0)
             x_lo = _rank_value(cumsum, lo + 1).astype(np.float64)
             x_hi = _rank_value(cumsum, hi + 1).astype(np.float64)
             result = x_lo + (x_hi - x_lo) * frac
-            thresholds[g_start:g_stop] = np.maximum(np.ceil(result).astype(np.int32), threshold_floor)
+            thresholds[p_start:p_stop] = np.maximum(np.ceil(result).astype(np.int32), threshold_floor)
 
         return thresholds
 

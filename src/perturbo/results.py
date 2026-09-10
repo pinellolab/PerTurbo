@@ -9,7 +9,11 @@ from math import erf
 import numpy as np
 import pandas as pd
 
-from ._statistics import empirical_pvals_from_tnull_fixed0, z_to_two_sided_pvalues
+from ._statistics import (
+    benjamini_hochberg_over_finite,
+    empirical_pvals_from_tnull_fixed0,
+    z_to_two_sided_pvalues,
+)
 
 
 @dataclass(frozen=True)
@@ -107,6 +111,59 @@ def build_guide_effects_df(
     )
 
 
+def load_pairs_to_test(path) -> pd.DataFrame:
+    """Read a two-column ``element,gene`` restriction table.
+
+    The contract is the one the IGVF CRISPR pipeline's PerTurbo adapter already
+    writes: a CSV, TSV or Parquet file with columns ``element`` and ``gene``,
+    duplicates dropped. It is deliberately unchanged so that nothing upstream
+    has to be edited.
+    """
+    from pathlib import Path
+
+    pair_path = Path(path)
+    if not pair_path.exists():
+        raise FileNotFoundError(f"pairs-to-test file not found: {pair_path}")
+    if pair_path.suffix.lower() in {".parquet", ".pq"}:
+        frame = pd.read_parquet(pair_path)
+    else:
+        frame = pd.read_csv(pair_path, sep=None, engine="python")
+    missing = {"element", "gene"}.difference(frame.columns)
+    if missing:
+        raise ValueError(f"pairs-to-test requires columns named 'element' and 'gene'; missing {sorted(missing)}.")
+    if frame[["element", "gene"]].isna().any().any():
+        raise ValueError("pairs-to-test contains missing element or gene names.")
+    frame = frame.loc[:, ["element", "gene"]].astype(str).drop_duplicates(ignore_index=True)
+    if frame.empty:
+        raise ValueError("pairs-to-test must contain at least one pair.")
+    return frame
+
+
+def restrict_effects_to_pairs(effects: pd.DataFrame, pairs: pd.DataFrame) -> pd.DataFrame:
+    """The rows of ``effects`` named by ``pairs``, with every q-value recorrected.
+
+    A restricted table is not a filtered copy of the transcriptome-wide one: the
+    Benjamini-Hochberg family is the restricted set, so the same pair carries a
+    different q-value in each. Everything else, including the effect estimates
+    and the p-values, is identical, because one fit and one test produced both.
+    That is the whole point of emitting the two tables from a single run rather
+    than running the analysis twice over different pair sets.
+    """
+    for column in ("element", "gene"):
+        if column not in effects.columns:
+            raise ValueError(f"effects table is missing the {column!r} column.")
+    wanted = set(zip(pairs["element"].astype(str), pairs["gene"].astype(str)))
+    keys = list(zip(effects["element"].astype(str), effects["gene"].astype(str)))
+    keep = np.fromiter((key in wanted for key in keys), dtype=bool, count=len(keys))
+    restricted = effects.loc[keep].reset_index(drop=True)
+    for column in restricted.columns:
+        if column == "q_value" or column.endswith("_q_value"):
+            source = column[:-len("_q_value")] + "_p_value" if column.endswith("_q_value") else "p_value"
+            if source in restricted.columns:
+                restricted[column] = benjamini_hochberg_over_finite(restricted[source].to_numpy(dtype=float))
+    return restricted
+
+
 def build_standard_element_effects_df(
     *,
     method: str,
@@ -115,7 +172,17 @@ def build_standard_element_effects_df(
     element_names: list[str],
     gene_names: list[str],
     null_z_values: np.ndarray | None = None,
+    extra_columns: dict[str, np.ndarray] | None = None,
 ) -> pd.DataFrame:
+    """Element-by-gene effect table.
+
+    ``extra_columns`` appends further ``(n_elements, n_genes)`` matrices under
+    their own names, flattened in the same row-major order as the built-in
+    columns. It exists so an additional test computed over the same grid - the
+    CRT, in particular - can travel in the same table without this builder
+    having to know what such a test is.
+    """
+
     loc = np.asarray(effect_loc, dtype=float)
     scale = np.clip(np.asarray(effect_scale, dtype=float), a_min=1e-6, a_max=None)
     if loc.shape != scale.shape:
@@ -142,7 +209,7 @@ def build_standard_element_effects_df(
                 dtype=float,
             )
 
-    return pd.DataFrame(
+    frame = pd.DataFrame(
         {
             "method": method,
             "element": np.repeat(np.asarray(element_names, dtype=str), len(gene_names)),
@@ -154,6 +221,18 @@ def build_standard_element_effects_df(
             "empirical_p_value": empirical_p_value.astype(np.float32, copy=False),
         }
     )
+    for name, values in (extra_columns or {}).items():
+        array = np.asarray(values, dtype=float)
+        if array.shape != loc.shape:
+            raise ValueError(
+                f"extra column {name!r} must match (n_elements, n_genes) {loc.shape}; got {array.shape}."
+            )
+        # Kept in float64, unlike the columns above. A parametric tail p-value
+        # exists precisely to resolve below the empirical floor, and float32
+        # flushes anything under ~1e-45 to zero - which would silently discard
+        # the resolution these columns are carried for.
+        frame[name] = array.reshape(-1)
+    return frame
 
 
 def build_guide_efficiency_df(

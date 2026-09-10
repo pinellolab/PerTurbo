@@ -1,7 +1,10 @@
-"""Statistical helpers used by PerTurbo result tables.
+"""Statistical helpers used by the PerTurbo result tables.
 
-These functions intentionally live outside the research diagnostics package so
-the production result API has no dependency on applications or benchmarks.
+These live outside the diagnostics package so that the production result API has
+no dependency on applications or benchmarks: a released install ships this module
+and not the Streamlit apps or the research diagnostics that also use it.
+``perturbo.diagnostics.empirical_null`` re-exports them for the code that already
+imports from there.
 """
 
 from __future__ import annotations
@@ -99,3 +102,45 @@ def empirical_pvals_from_tnull_fixed0(
 def z_to_two_sided_pvalues(z_values) -> np.ndarray:
     z = np.nan_to_num(np.asarray(z_values, dtype=float), nan=0.0, posinf=0.0, neginf=0.0)
     return np.clip(2.0 * stats.norm.sf(np.abs(z)), 1e-12, 1.0)
+
+def benjamini_hochberg(pvalues: np.ndarray, axis: int = -1) -> np.ndarray:
+    """Benjamini-Hochberg adjusted p-values along ``axis``.
+
+    NaN p-values are treated as 1.0 so a gene that a method could not test never
+    enters a significant set. The step-up monotonicity fix is applied, so the
+    result is non-decreasing in the sorted p-value order and clipped to 1.
+    """
+    p = np.asarray(pvalues, dtype=float)
+    p = np.where(np.isfinite(p), np.clip(p, 0.0, 1.0), 1.0)
+    p = np.moveaxis(p, axis, -1)
+    m = p.shape[-1]
+    if m == 0:
+        return np.moveaxis(p, -1, axis)
+
+    order = np.argsort(p, axis=-1, kind="stable")
+    ordered = np.take_along_axis(p, order, axis=-1)
+    ranks = np.arange(1, m + 1, dtype=float)
+    scaled = ordered * (m / ranks)
+    # Step-up: the adjusted value at rank i is the running minimum from the tail.
+    adjusted_sorted = np.minimum.accumulate(scaled[..., ::-1], axis=-1)[..., ::-1]
+    adjusted_sorted = np.clip(adjusted_sorted, 0.0, 1.0)
+
+    adjusted = np.empty_like(adjusted_sorted)
+    np.put_along_axis(adjusted, order, adjusted_sorted, axis=-1)
+    return np.moveaxis(adjusted, -1, axis)
+
+
+def benjamini_hochberg_over_finite(pvalues: np.ndarray) -> np.ndarray:
+    """Benjamini-Hochberg over the finite p-values only; non-finite entries stay NaN.
+
+    :func:`benjamini_hochberg` treats NaN as 1.0,
+    which keeps untested pairs out of the discoveries but still counts them in
+    the family. A pair a method never tested is not a hypothesis it made, so
+    here the family is exactly the tested pairs.
+    """
+    p = np.asarray(pvalues, dtype=float)
+    out = np.full(p.shape, np.nan)
+    finite = np.isfinite(p)
+    if finite.any():
+        out[finite] = benjamini_hochberg(p[finite].reshape(-1), axis=0)
+    return out

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 import numpyro
 import numpyro.distributions as dist
 from numpyro.infer import SVI, Trace_ELBO
@@ -12,6 +13,7 @@ from numpyro.infer.autoguide import AutoNormal
 from perturbo.log_normal_negative_binomial import LogNormalNegativeBinomial
 from perturbo.model import (
     CensoredNegativeBinomialModel,
+    GuideSharedNegativeBinomialModel,
     LogNormalNegativeBinomialModel,
     MixtureNegativeBinomialModel,
     NegBinModel,
@@ -83,35 +85,77 @@ def test_negbin_model_runs_one_step() -> None:
     )
 
 
-def test_pair_restricted_model_samples_only_requested_coefficients() -> None:
-    counts, pert_id = _make_toy_data()
-    effect_indices = jnp.array([[0, 1], [1, 2]], dtype=jnp.int32)
-    trace = numpyro.handlers.trace(
-        numpyro.handlers.seed(NegBinModel, jax.random.PRNGKey(0))
-    ).get_trace(
-        counts,
-        pert_id,
-        effect_indices=effect_indices,
-        num_cells=counts.shape[0],
-        num_genes=counts.shape[1],
-        num_perts=2,
-    )
 
-    assert trace["beta"]["value"].shape == (2,)
-    assert trace["obs"]["value"].shape == counts.shape
+def _unmasked(fn):
+    """The observation distribution beneath any MaskedDistribution wrappers.
+
+    The censored NB path (commit a38145f) masks the observation site, and the
+    other likelihoods now share that wrapper, so the tests look through it.
+    """
+    while isinstance(fn, dist.MaskedDistribution):
+        fn = fn.base_dist
+    return fn
 
 
 def test_negbin_model_uses_negative_binomial_observation() -> None:
     counts, pert_id = _make_toy_data()
     trace = _trace_model(NegBinModel, counts, pert_id)
-    assert isinstance(trace["obs"]["fn"], dist.NegativeBinomialLogits)
+    assert isinstance(_unmasked(trace["obs"]["fn"]), dist.NegativeBinomialLogits)
     assert "noise_scale" not in trace
+
+
+def test_perturbation_dispersion_adds_nonnegative_inverse_dispersion() -> None:
+    counts = jnp.zeros((2, 1), dtype=jnp.int32)
+    pert_id = jnp.array([0, 1], dtype=jnp.int32)
+    model = numpyro.handlers.condition(
+        NegBinModel,
+        data={
+            "beta_0": jnp.array([0.0]),
+            "theta": jnp.array([2.0]),
+            "beta": jnp.zeros((2, 1)),
+            "dispersion_excess_inverse": jnp.array([[0.0], [0.5]]),
+            "size_factor": jnp.zeros((2, 1)),
+        },
+    )
+    trace = numpyro.handlers.trace(numpyro.handlers.seed(model, jax.random.PRNGKey(0))).get_trace(
+        counts,
+        pert_id,
+        size_factors=jnp.zeros((2, 1)),
+        num_cells=2,
+        num_genes=1,
+        num_perts=2,
+        fit_perturbation_dispersion=True,
+    )
+    total_count = trace["obs"]["fn"].base_dist.total_count
+    np.testing.assert_allclose(np.asarray(total_count).reshape(-1), [2.0, 1.0])
+
+
+def test_guide_dispersion_sums_active_guides_in_inverse_dispersion() -> None:
+    counts = jnp.zeros((2, 1), dtype=jnp.int32)
+    guide_matrix = jnp.array([[1, 0, 1], [0, 1, 0]], dtype=jnp.float32)
+    guide_to_element = jnp.array([[1, 0], [0, 1], [1, 0]], dtype=jnp.float32)
+    model = numpyro.handlers.condition(
+        GuideSharedNegativeBinomialModel,
+        data={
+            "beta_0": jnp.array([0.0]), "theta": jnp.array([2.0]),
+            "beta": jnp.zeros((2, 1)), "size_factor": jnp.zeros((2, 1)),
+            "guide_dispersion_excess_inverse": jnp.array([[0.25], [0.5], [0.75]]),
+        },
+    )
+    trace = numpyro.handlers.trace(numpyro.handlers.seed(model, jax.random.PRNGKey(0))).get_trace(
+        counts, jnp.zeros((2, 2), dtype=jnp.float32), guide_matrix=guide_matrix,
+        guide_to_element=guide_to_element, size_factors=jnp.zeros((2, 1)),
+        num_cells=2, num_genes=1, num_perts=2, num_guides=3,
+        fit_perturbation_dispersion=True,
+    )
+    total_count = trace["obs"]["fn"].base_dist.total_count
+    np.testing.assert_allclose(np.asarray(total_count).reshape(-1), [2.0 / 3.0, 1.0])
 
 
 def test_lognormal_model_uses_lognormal_negative_binomial_observation() -> None:
     counts, pert_id = _make_toy_data()
     trace = _trace_model(LogNormalNegativeBinomialModel, counts, pert_id)
-    assert isinstance(trace["obs"]["fn"], LogNormalNegativeBinomial)
+    assert isinstance(_unmasked(trace["obs"]["fn"]), LogNormalNegativeBinomial)
     assert "noise_scale" in trace
 
 
@@ -126,9 +170,16 @@ def test_censored_model_uses_masked_negative_binomial_observation() -> None:
     )
     obs_fn = trace["obs"]["fn"]
     assert isinstance(obs_fn, dist.MaskedDistribution)
-    assert isinstance(obs_fn.base_dist, dist.NegativeBinomialLogits)
+    assert isinstance(_unmasked(obs_fn), dist.NegativeBinomialLogits)
     expected_mask = counts <= threshold
-    assert jnp.array_equal(obs_fn._mask, expected_mask)
+    # The censoring mask may sit beneath another (all-true) mask; the product of
+    # the wrappers' masks is what the observation actually sees.
+    combined = jnp.ones_like(expected_mask, dtype=bool)
+    fn = obs_fn
+    while isinstance(fn, dist.MaskedDistribution):
+        combined = combined & jnp.broadcast_to(jnp.asarray(fn._mask, dtype=bool), expected_mask.shape)
+        fn = fn.base_dist
+    assert jnp.array_equal(combined, expected_mask)
 
 
 def test_mixture_nb_model_runs_one_step() -> None:
@@ -161,7 +212,7 @@ def test_mixture_nb_model_runs_one_step() -> None:
 def test_mixture_nb_model_uses_mixture_observation() -> None:
     counts, pert_id = _make_toy_data()
     trace = _trace_model(MixtureNegativeBinomialModel, counts, pert_id)
-    assert isinstance(trace["obs"]["fn"], dist.MixtureSameFamily)
+    assert isinstance(_unmasked(trace["obs"]["fn"]), dist.MixtureSameFamily)
     assert "pi_outlier" in trace
     assert "theta_outlier" in trace
     assert "outlier_mean_shift" in trace
@@ -190,7 +241,7 @@ def test_mixture_nb_outlier_component_is_independent_of_beta() -> None:
         num_perts=2,
         size_factors=jnp.zeros((2, 1), dtype=jnp.float32),
     )
-    logits_components = trace["obs"]["fn"].component_distribution.logits
+    logits_components = _unmasked(trace["obs"]["fn"]).component_distribution.logits
     # Inlier mode depends on beta, so these should differ.
     assert float(logits_components[0, 0, 0]) != float(logits_components[1, 0, 0])
     # Outlier mode is beta-independent baseline shift, so these should match.

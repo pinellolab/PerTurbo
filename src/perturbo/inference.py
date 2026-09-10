@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import warnings
+
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any
@@ -351,11 +353,23 @@ class PerTurboModel:
         if loaded_guide_efficacy is not None:
             model._guide_efficacy = np.asarray(loaded_guide_efficacy, dtype=np.float32).reshape(-1)
         else:
-            model._guide_efficacy = _guide_efficacy_from_model(
-                beta_fit=model.beta_fit,
-                guide_effect_strategy=model.guide_effect_strategy,
-                n_guides=_num_guides(model.adata, model.setup),
-            )
+            try:
+                model._guide_efficacy = _guide_efficacy_from_model(
+                    beta_fit=model.beta_fit,
+                    guide_effect_strategy=model.guide_effect_strategy,
+                    n_guides=_num_guides(model.adata, model.setup),
+                )
+            except RuntimeError as error:
+                # Bundles written before guide posteriors were saved carry no
+                # relative efficiency. The fit is still usable for baselines,
+                # element effects and simulation with caller-supplied
+                # efficacies; only the guide_efficacy accessor is unavailable.
+                warnings.warn(
+                    f"{error} Loaded without guide efficacy; model.guide_efficacy will raise until it is set.",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
+                model._guide_efficacy = None
         control_loss = np.asarray(model.control_fit.losses).reshape(-1)
         beta_loss = np.asarray(model.beta_fit.losses).reshape(-1)
         history_len = max(len(control_loss), len(beta_loss))
@@ -404,9 +418,14 @@ class PerTurboModel:
                 guide_names,
                 parent_elements,
             )
-        effect_loc = np.asarray(mapping, dtype=np.float32) @ np.asarray(self.beta_fit.posterior_mean)
+        # No derived summary means the guide effect is its element's (the shared
+        # strategy), so the guide rows are the element rows gathered through the
+        # map. Variances add, not standard deviations: summing the scales would
+        # overstate any guide that the map assigns to more than one element.
+        map_array = np.asarray(mapping, dtype=np.float32)
+        effect_loc = map_array @ np.asarray(self.beta_fit.posterior_mean)
         effect_scale = np.clip(
-            np.asarray(mapping, dtype=np.float32) @ np.asarray(self.beta_fit.posterior_scale),
+            np.sqrt(np.square(map_array) @ np.square(np.asarray(self.beta_fit.posterior_scale))),
             1e-6,
             None,
         )
@@ -465,7 +484,6 @@ class PerTurboModel:
             winsorize_gene_expression=self.winsorize_gene_expression,
             gene_outlier_threshold_floor=self.gene_outlier_threshold_floor,
             return_covariate_transform_state=True,
-            retain_perturbation_design=self.guide_random_effects,
         )
         if isinstance(controls, tuple):
             control_data, covariate_transform_state = controls
@@ -492,14 +510,7 @@ class PerTurboModel:
             winsorize_gene_expression=self.winsorize_gene_expression,
             gene_outlier_threshold_floor=self.gene_outlier_threshold_floor,
             covariate_transform_state=covariate_transform_state,
-            retain_guide_structure=bool(
-                self.setup.guide_by_element_key is not None
-                and (
-                    self.guide_effect_strategy != "shared"
-                    or self.guide_random_effects
-                    or self.fit_perturbation_dispersion
-                )
-            ),
+            retain_guide_structure=self.setup.guide_by_element_key is not None,
             library_size_center_log_mean=control_data.library_size_center_log_mean,
         )
         minibatch_size = batch_size if batch_size not in (None, 0) else None
@@ -527,8 +538,6 @@ class PerTurboModel:
             count_censoring_percentile=self.count_censoring_percentile,
             minibatch_size=minibatch_size,
             guide_random_effects=self.guide_random_effects,
-            fit_perturbation_dispersion=self.fit_perturbation_dispersion,
-            perturbation_dispersion_prior_rate=self.perturbation_dispersion_prior_rate,
         )
         self.beta_fit = core.fit_perturbation_effects(
             analysis_data,
@@ -548,6 +557,8 @@ class PerTurboModel:
             guide_effect_strategy=self.guide_effect_strategy,
             guide_activity_mode=self.guide_activity_mode,
             guide_random_effects=self.guide_random_effects,
+            fit_perturbation_dispersion=self.fit_perturbation_dispersion,
+            perturbation_dispersion_prior_rate=self.perturbation_dispersion_prior_rate,
         )
         self._guide_efficacy = _guide_efficacy_from_model(
             beta_fit=self.beta_fit,
@@ -580,6 +591,10 @@ class PerTurboModel:
             "size_factor": np.asarray(control_fit.size_factors),
             "guide_efficacy": np.asarray(self.guide_efficacy),
         }
+        if beta_fit.dispersion_excess_inverse is not None:
+            values["perturbation_dispersion_excess_inverse"] = np.asarray(
+                beta_fit.dispersion_excess_inverse
+            )
         guide_payload = self._guide_effect_payload()
         if guide_payload is not None:
             guide_loc, _guide_scale, _guide_names, _guide_parent_elements = guide_payload
@@ -588,10 +603,6 @@ class PerTurboModel:
             values["guide_relative_efficiency"] = np.asarray(beta_fit.guide_relative_efficiency_mean)
         if beta_fit.guide_offset_mean is not None:
             values["guide_offset"] = np.asarray(beta_fit.guide_offset_mean)
-        if beta_fit.dispersion_excess_inverse is not None:
-            values["perturbation_dispersion_excess_inverse"] = np.asarray(beta_fit.dispersion_excess_inverse)
-        if beta_fit.guide_dispersion_excess_inverse is not None:
-            values["guide_dispersion_excess_inverse"] = np.asarray(beta_fit.guide_dispersion_excess_inverse)
         if control_fit.covariate_coef is not None:
             values["covariate_coef"] = np.asarray(control_fit.covariate_coef)
         if control_fit.factor_loadings is not None:
@@ -628,6 +639,8 @@ class PerTurboModel:
             "element_effects_loc": beta_fit.posterior_mean,
             "element_effects_scale": beta_fit.posterior_scale,
         }
+        if beta_fit.dispersion_excess_inverse is not None:
+            params["perturbation_dispersion_excess_inverse"] = beta_fit.dispersion_excess_inverse
         guide_payload = self._guide_effect_payload()
         if guide_payload is not None:
             guide_loc, guide_scale, _guide_names, _guide_parent_elements = guide_payload
@@ -641,10 +654,6 @@ class PerTurboModel:
             params["guide_offset_loc"] = beta_fit.guide_offset_mean
         if beta_fit.guide_offset_scale is not None:
             params["guide_offset_scale"] = beta_fit.guide_offset_scale
-        if beta_fit.dispersion_excess_inverse is not None:
-            params["perturbation_dispersion_excess_inverse"] = beta_fit.dispersion_excess_inverse
-        if beta_fit.guide_dispersion_excess_inverse is not None:
-            params["guide_dispersion_excess_inverse"] = beta_fit.guide_dispersion_excess_inverse
         if control_fit.baseline_posterior is not None:
             params["baseline_beta_0_loc"] = control_fit.baseline_posterior.beta_0_loc
             params["baseline_beta_0_scale"] = control_fit.baseline_posterior.beta_0_scale
@@ -688,8 +697,6 @@ class PerTurboModel:
         out_path.mkdir(parents=True, exist_ok=True)
         control_fit, beta_fit = self._require_fit()
         metadata = {
-            "producer": "perturbo",
-            "bundle_version": 2,
             "likelihood": self.likelihood,
             "effect_prior_dist": self.effect_prior_dist,
             "efficiency_mode": self.efficiency_mode,

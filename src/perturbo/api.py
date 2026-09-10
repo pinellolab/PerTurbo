@@ -96,6 +96,7 @@ def fit_from_path(
     input_path: str | Path,
     out_dir: str | Path,
     *,
+    pairs_to_test: str | Path | None = None,
     modality_key: str | None = None,
     perturbation_key: str | None = None,
     perturbation_modality_key: str | None = None,
@@ -110,7 +111,6 @@ def fit_from_path(
     library_size_key: str | None = None,
     size_factor_mode: str = "infer",
     gene_name_key: str | None = None,
-    pairs_to_test: str | Path | None = None,
     clip_gene_expression_percentile: float = 100.0,
     gene_outlier_action: str = "none",
     gene_outlier_threshold_floor: int = 2,
@@ -144,14 +144,47 @@ def fit_from_path(
     single_frame: bool = False,
     save_model_params: bool = True,
     return_model: bool = False,
+    crt: bool = False,
+    crt_num_resamples: int = 999,
+    crt_seed: int = 0,
+    crt_gene_chunk_size: int = 2000,
+    crt_max_gather_gib: float = 8.0,
+    crt_tail_families: list[str] | tuple[str, ...] | None = None,
+    crt_mechanism: str = "permutation",
+    crt_saddlepoint_only: bool = False,
+    crt_screen_p_value: float = 0.05,
+    crt_two_sided: str = "equal-tail",
+    crt_baseline_step_tolerance: float | None = None,
+    crt_allow_unconverged_baseline: bool = False,
+    crt_polish_baseline: bool = False,
+    crt_pool: str | None = None,
+    crt_only: bool = False,
 ) -> PerTurboModel | None:
     """Run the CLI-equivalent end-to-end fit from Python.
 
     Keyword names are snake_case versions of the CLI flags. The implementation
     delegates to ``perturbo.api.main`` so Python and CLI fits share the same
     validation, loading, chunking, fitting, output, and light-bundle behavior.
+
+    ``crt=True`` also runs the conditional randomization test against the
+    stage-one baseline and adds ``crt_*`` columns to ``element_effects.parquet``.
+    ``crt_tail_families=None`` keeps the CLI default (the moment-fitted
+    families); pass ``("saddlepoint",)`` with ``crt_mechanism="propensity"`` and
+    ``crt_saddlepoint_only=True`` for the exact-CGF saddlepoint without any
+    resampling. An empty tuple switches the continuous tails off. ``crt_pool``
+    selects the resampling pool (``'control-anchored'`` for low MOI,
+    ``'all-cells'`` for high MOI; ``None`` lets the CLI choose from the design).
+    ``crt_only=True`` stops after stage one and the CRT, skipping the stage-two
+    fit: the path for power calculations, where the posterior is not needed.
+
+    ``pairs_to_test`` names a two-column ``element,gene`` table. It does not
+    change the run: every pair is still fitted and tested. A second effect
+    table restricted to those pairs is written beside the transcriptome-wide
+    one, with Benjamini-Hochberg recomputed within that smaller family, so a
+    single run yields both a cis-scale comparison and the full analysis.
     """
     argv = ["--input", str(input_path), "--out-dir", str(out_dir)]
+    _append_cli_arg(argv, "--pairs-to-test", pairs_to_test)
     _append_cli_arg(argv, "--modality-key", modality_key)
     _append_cli_arg(argv, "--perturbation-key", perturbation_key)
     _append_cli_arg(argv, "--perturbation-modality-key", perturbation_modality_key)
@@ -166,7 +199,6 @@ def fit_from_path(
     _append_cli_arg(argv, "--library-size-key", library_size_key)
     _append_cli_arg(argv, "--size-factor-mode", size_factor_mode)
     _append_cli_arg(argv, "--gene-name-key", gene_name_key)
-    _append_cli_arg(argv, "--pairs-to-test", pairs_to_test)
     _append_cli_arg(argv, "--clip-gene-expression-percentile", clip_gene_expression_percentile)
     _append_cli_arg(argv, "--gene-outlier-action", gene_outlier_action)
     _append_cli_arg(argv, "--gene-outlier-threshold-floor", gene_outlier_threshold_floor)
@@ -209,6 +241,30 @@ def fit_from_path(
         argv.append("--save-model-params")
     else:
         argv.append("--no-save-model-params")
+    if crt:
+        argv.append("--crt")
+        _append_cli_arg(argv, "--crt-num-resamples", crt_num_resamples)
+        _append_cli_arg(argv, "--crt-seed", crt_seed)
+        _append_cli_arg(argv, "--crt-gene-chunk-size", crt_gene_chunk_size)
+        _append_cli_arg(argv, "--crt-max-gather-gib", crt_max_gather_gib)
+        if crt_tail_families is not None:
+            # nargs="*": the flag alone switches the continuous tails off.
+            argv.append("--crt-tail-families")
+            argv.extend(str(family) for family in crt_tail_families)
+        _append_cli_arg(argv, "--crt-mechanism", crt_mechanism)
+        if crt_saddlepoint_only:
+            argv.append("--crt-saddlepoint-only")
+        _append_cli_arg(argv, "--crt-screen-p-value", crt_screen_p_value)
+        _append_cli_arg(argv, "--crt-two-sided", crt_two_sided)
+        _append_cli_arg(argv, "--crt-baseline-step-tolerance", crt_baseline_step_tolerance)
+        if crt_allow_unconverged_baseline:
+            argv.append("--crt-allow-unconverged-baseline")
+        if crt_polish_baseline:
+            argv.append("--crt-polish-baseline")
+        if crt_pool is not None:
+            _append_cli_arg(argv, "--crt-pool", crt_pool)
+        if crt_only:
+            argv.append("--crt-only")
 
     main(argv)
     if return_model:

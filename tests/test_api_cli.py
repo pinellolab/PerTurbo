@@ -844,14 +844,23 @@ def test_construct_perturbation_chunks_honors_perturbation_cap() -> None:
     assert [chunk.pert_names for chunk in chunks] == [["p0", "p1"], ["p2", "p3"]]
 
 
-def test_construct_perturbation_chunks_raises_for_oversized_single_perturbation() -> None:
-    with pytest.raises(ValueError, match="exceeding --max-chunk-size"):
-        api._construct_perturbation_chunks(
-            ["p0"],
-            [np.array([0, 1, 2], dtype=np.int64)],
-            max_chunk_size=2,
-            max_perturbations_per_chunk=None,
-        )
+def test_construct_perturbation_chunks_isolates_an_oversized_single_perturbation(capsys) -> None:
+    """A perturbation bigger than the cap is kept whole, not refused.
+
+    This used to raise. Screens exist with tens of thousands of cells behind one
+    perturbation, and its cells cannot be split across chunks without breaking the
+    estimate, so the cap yields and the run says which perturbation set peak memory.
+    See tests/test_oversized_perturbation_chunking.py for the full behaviour.
+    """
+    chunks = api._construct_perturbation_chunks(
+        ["p0"],
+        [np.array([0, 1, 2], dtype=np.int64)],
+        max_chunk_size=2,
+        max_perturbations_per_chunk=None,
+    )
+    assert [chunk.pert_names for chunk in chunks] == [["p0"]]
+    assert chunks[0].cell_indices.size == 3
+    assert "exceed --max-chunk-size" in capsys.readouterr().out
 
 
 class _FakeDevice:
@@ -1812,3 +1821,38 @@ def test_main_filter_cells_and_winsorize_reuses_mask_and_thresholds(monkeypatch,
     assert all(flag is True for flag in captured["analysis_winsorize"])
     assert all(thresholds is outlier_thresholds for thresholds in captured["analysis_thresholds"])
     assert captured["chunk_subsets"] == [("ctrl",), ("pertB",)]
+
+
+def test_fit_from_path_maps_the_crt_keywords_onto_the_flags(monkeypatch) -> None:
+    """The saddlepoint-only all-cells CRT with no stage two, as a power calculator would call it."""
+    captured: dict[str, list[str]] = {}
+
+    def _fake_main(argv):
+        captured["argv"] = list(argv)
+
+    monkeypatch.setattr(api, "main", _fake_main)
+    api.fit_from_path(
+        "screen.h5mu",
+        "out",
+        modality_key="gene",
+        perturbation_modality_key="guide",
+        perturbation_element_varm_key="guide_intended_target_pairs",
+        perturbation_element_names_uns_key="intended_targets",
+        crt=True,
+        crt_only=True,
+        crt_pool="all-cells",
+        crt_mechanism="propensity",
+        crt_tail_families=("saddlepoint",),
+        crt_saddlepoint_only=True,
+        crt_allow_unconverged_baseline=True,
+        crt_polish_baseline=True,
+    )
+    argv = captured["argv"]
+    for flag in ("--crt", "--crt-only", "--crt-saddlepoint-only", "--crt-allow-unconverged-baseline", "--crt-polish-baseline"):
+        assert flag in argv
+    for flag, value in (("--crt-pool", "all-cells"), ("--crt-mechanism", "propensity"), ("--crt-tail-families", "saddlepoint")):
+        assert argv[argv.index(flag) + 1] == value
+
+    api.fit_from_path("screen.h5mu", "out", modality_key="gene", perturbation_key="perturbation", control_substring="non-targeting")
+    assert "--crt" not in captured["argv"]
+    assert "--crt-only" not in captured["argv"]

@@ -11,7 +11,7 @@ import perturbo
 import perturbo.core as core
 import perturbo.inference as inference
 from perturbo.io import MuDataSetup, control_fit_arrays, save_light_fit_bundle
-from perturbo.simulation.fitted import _resolve_size_factors
+from perturbo.simulation.fitted import _resolve_perturbation_dispersion_theta, _resolve_size_factors
 
 
 def _make_registered_mdata(*, size_factor_key: str | None = None) -> md.MuData:
@@ -621,6 +621,49 @@ def test_control_array_roundtrip_preserves_guide_random_effect_fields() -> None:
     )
 
 
+def test_dispersion_excess_roundtrip_and_low_moi_simulation_theta() -> None:
+    model = perturbo.PERTURBO(_make_registered_mdata(), likelihood="negbin", effect_prior_dist="normal")
+    model.control_fit = perturbo.ControlFit(
+        beta_0=jnp.zeros((2,)),
+        theta=jnp.array([2.0, 4.0]),
+        noise_scale=jnp.ones((2,)),
+        factor_loadings=None,
+        factor_scores=None,
+        factor_center=None,
+        pca_loadings=None,
+        size_factors=jnp.zeros((4, 1)),
+        losses=jnp.array([]),
+        svi_result=None,
+    )
+    model.beta_fit = perturbo.BetaFit(
+        posterior_mean=jnp.zeros((2, 2)),
+        posterior_scale=jnp.ones((2, 2)),
+        z_values=jnp.zeros((2, 2)),
+        losses=jnp.array([]),
+        svi_result=None,
+        dispersion_excess_inverse=jnp.array([[0.0, 0.0], [0.5, 0.25]]),
+    )
+    arrays = inference._beta_arrays(model.beta_fit)
+    restored = inference._restore_beta_fit({key: np.asarray(value) for key, value in arrays.items() if value is not None})
+    np.testing.assert_allclose(restored.dispersion_excess_inverse, model.beta_fit.dispersion_excess_inverse)
+    theta = _resolve_perturbation_dispersion_theta(
+        model=model,
+        element_membership=np.array([[0, 0], [0, 1]], dtype=np.float32),
+        guide_obs=np.array([[0, 0], [0, 1]], dtype=np.float32),
+        gene_indices=np.array([0, 1], dtype=np.int32),
+    )
+    np.testing.assert_allclose(theta, [[2.0, 4.0], [1.0, 2.0]])
+    simulated = perturbo.simulate_data_from_trained_model(
+        model,
+        guide_obs=np.array([[1, 0, 0], [0, 1, 0]], dtype=np.float32),
+        guide_by_element=np.array([[1, 0], [0, 1], [0, 0]], dtype=np.float32),
+        element_by_gene_lfc=np.zeros((2, 2), dtype=np.float32),
+        guide_efficacy=np.ones((3,), dtype=np.float32),
+        cell_indices=np.array([0, 1], dtype=np.int32),
+    )
+    assert simulated["rna"].X.shape == (2, 2)
+
+
 def test_simulation_bundle_roundtrip_supports_retraining(tmp_path) -> None:
     model = perturbo.PERTURBO(_make_registered_mdata(), likelihood="negbin", effect_prior_dist="normal")
     model.train(steps=1, batch_size=2, accelerator="cpu")
@@ -697,6 +740,36 @@ def test_relative_guide_sharing_roundtrip_preserves_guide_outputs(tmp_path) -> N
     ).mean(axis=1)
     np.testing.assert_allclose(model.guide_efficacy, expected_eff, rtol=1e-5, atol=1e-5)
     np.testing.assert_allclose(loaded.guide_efficacy, expected_eff, rtol=1e-5, atol=1e-5)
+
+
+def test_relative_bundle_without_guide_posteriors_loads_with_warning(tmp_path) -> None:
+    """Bundles written before guide posteriors were saved must still load.
+
+    The July 2026 at-scale Gasperini bundle is one: relative strategy, no
+    guide_posteriors.npz. Its baselines and element effects drive the Figure 6
+    simulation, which supplies its own guide efficacies, so the load must not
+    fail on the accessor it cannot serve.
+    """
+    model = perturbo.PERTURBO(
+        _make_registered_mdata(),
+        likelihood="negbin",
+        effect_prior_dist="normal",
+        guide_effect_strategy="relative",
+    )
+    model.train(steps=1, batch_size=2, accelerator="cpu")
+    bundle_dir = model.save(tmp_path / "legacy_bundle", overwrite=True)
+    # A legacy bundle has neither the guide posteriors nor the derived efficacy sidecar.
+    (bundle_dir / "guide_posteriors.npz").unlink()
+    (bundle_dir / "guide_efficacy.npy").unlink(missing_ok=True)
+
+    with pytest.warns(RuntimeWarning, match="guide_relative_efficiency_mean is missing"):
+        loaded = perturbo.PERTURBO.load(bundle_dir)
+
+    assert loaded.control_fit is not None and loaded.beta_fit is not None
+    np.testing.assert_allclose(loaded.control_fit.beta_0, model.control_fit.beta_0)
+    assert loaded._guide_efficacy is None
+    with pytest.raises(RuntimeError, match="guide_relative_efficiency_mean is missing"):
+        _ = loaded.guide_efficacy
 
 
 def test_train_interprets_max_epochs_as_true_epochs(monkeypatch) -> None:

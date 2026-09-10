@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from functools import partial
+import json
 from pathlib import Path
+import time
 from typing import Any, Callable, Iterable
 
 import jax
@@ -16,11 +18,13 @@ import numpyro.distributions as dist
 from numpyro.infer import SVI, Trace_ELBO, TraceMeanField_ELBO
 from numpyro.infer.autoguide import AutoNormal
 import pandas as pd
+import matplotlib
 import hdf5plugin  # noqa: F401 (needed for file reading, ignore unused import warning)
 import anndata as ad
 import mudata as md
 
 import matplotlib.pyplot as plt
+import scipy.sparse as sp
 from tqdm.auto import tqdm
 
 from perturbo.model import (
@@ -38,6 +42,8 @@ from perturbo.censored_negative_binomial import (
     compute_gene_count_censoring_thresholds,
     require_count_censoring_percentile,
 )
+from perturbo.io import control_fit_arrays, save_array_bundle
+from perturbo.results import build_guide_efficiency_df, build_standard_element_effects_df
 from perturbo.preprocessing.counts import (
     BACKED_ROW_CHUNK_SIZE,
     _validate_clip_percentile,
@@ -46,17 +52,11 @@ from perturbo.preprocessing.counts import (
     count_gene_outliers_per_cell,
     to_dense_array,
     winsorize_counts_to_gene_thresholds,
-)  # noqa: F401 - re-exported for CLI compatibility
+)
+from perturbo.training_schedule import resolve_training_schedule
 from perturbo.utils import compute_size_factors
 
 VALID_CLI_SIZE_FACTOR_MODES = ("infer", "observed", "none")
-
-# These count helpers are part of the CLI module's historical import contract.
-_CLI_EXPORTS = (
-    BACKED_ROW_CHUNK_SIZE,
-    _validate_clip_percentile,
-    _validate_gene_outlier_threshold_floor,
-)
 
 
 def _normalize_likelihood_name(likelihood: str) -> str:
@@ -80,16 +80,16 @@ class PerTurboData:
     pert_id: jnp.ndarray
     pert_names: list[str]
     gene_names: list[str]
+    cell_mask: jnp.ndarray | None = None
     size_factors: jnp.ndarray | None = None
     covariates: jnp.ndarray | None = None
     covariate_names: list[str] | None = None
     guide_matrix: jnp.ndarray | None = None
     guide_names: list[str] | None = None
     guide_to_element: jnp.ndarray | None = None
-    # Integer (element_index, gene_index) rows. When provided, stage 2 samples
-    # only these coefficients instead of the full element-by-gene product.
-    effect_indices: jnp.ndarray | None = None
     library_size_center_log_mean: float | None = None
+    categorical_batch_codes: jnp.ndarray | None = None
+    categorical_batch_names: list[str] | None = None
 
 
 @dataclass
@@ -139,7 +139,6 @@ class BetaFit:
     guide_offset_scale: jnp.ndarray | None = None
     dispersion_excess_inverse: jnp.ndarray | None = None
     guide_dispersion_excess_inverse: jnp.ndarray | None = None
-    effect_indices: jnp.ndarray | None = None
 
 
 @dataclass
@@ -147,6 +146,15 @@ class _SVIRunResult:
     params: dict[str, Any]
     state: numpyro.infer.svi.SVIState
     losses: jnp.ndarray
+
+
+@dataclass
+class _ReusableSVIRunner:
+    """Model/guide and compiled update loop shared by same-shaped chunk fits."""
+
+    svi: SVI
+    auto_guide: AutoNormal
+    run_steps: Callable[..., tuple[numpyro.infer.svi.SVIState, jnp.ndarray]] | None = None
 
 
 @dataclass
@@ -217,12 +225,14 @@ def _run_svi(
     size_factors: jnp.ndarray | None = None,
     covariates: jnp.ndarray | None = None,
     guide_matrix: jnp.ndarray | None = None,
+    cell_mask: jnp.ndarray | None = None,
     init_state: numpyro.infer.svi.SVIState | None = None,
     init_params: dict[str, Any] | None = None,
     stable_update: bool = False,
     forward_mode_differentiation: bool = False,
     progress: bool = False,
     progress_chunk_size: int = 100,
+    reusable_runner: _ReusableSVIRunner | None = None,
     **static_kwargs: Any,
 ) -> _SVIRunResult:
     if num_steps < 1:
@@ -237,41 +247,50 @@ def _run_svi(
             size_factors=size_factors,
             covariates=covariates,
             guide_matrix=guide_matrix,
+            cell_mask=cell_mask,
             skip_obs_sampling=True,
             **static_kwargs,
         )
     else:
         svi_state = init_state
 
-    update_impl = svi.stable_update if stable_update else svi.update
+    run_steps = None if reusable_runner is None else reusable_runner.run_steps
+    if run_steps is None:
+        update_impl = svi.stable_update if stable_update else svi.update
 
-    def run_steps(
-        state: numpyro.infer.svi.SVIState,
-        counts_arg: jnp.ndarray | None,
-        pert_id_arg: jnp.ndarray | None,
-        size_factors_arg: jnp.ndarray | None,
-        covariates_arg: jnp.ndarray | None,
-        guide_matrix_arg: jnp.ndarray | None,
-        length: int,
-    ):
-        def body_fn(carry, _):
-            return update_impl(
-                carry,
-                counts_arg,
-                pert_id_arg,
-                size_factors=size_factors_arg,
-                covariates=covariates_arg,
-                guide_matrix=guide_matrix_arg,
-                forward_mode_differentiation=forward_mode_differentiation,
-                **static_kwargs,
-            )
+        def run_steps(
+            state: numpyro.infer.svi.SVIState,
+            counts_arg: jnp.ndarray | None,
+            pert_id_arg: jnp.ndarray | None,
+            size_factors_arg: jnp.ndarray | None,
+            covariates_arg: jnp.ndarray | None,
+            guide_matrix_arg: jnp.ndarray | None,
+            cell_mask_arg: jnp.ndarray | None,
+            length: int,
+        ):
+            def body_fn(carry, _):
+                return update_impl(
+                    carry,
+                    counts_arg,
+                    pert_id_arg,
+                    size_factors=size_factors_arg,
+                    covariates=covariates_arg,
+                    guide_matrix=guide_matrix_arg,
+                    cell_mask=cell_mask_arg,
+                    forward_mode_differentiation=forward_mode_differentiation,
+                    **static_kwargs,
+                )
 
-        return jax.lax.scan(body_fn, state, None, length=length)
+            return jax.lax.scan(body_fn, state, None, length=length)
 
-    run_steps = jax.jit(run_steps, static_argnums=(6,))
+        run_steps = jax.jit(run_steps, static_argnums=(7,))
+        if reusable_runner is not None:
+            reusable_runner.run_steps = run_steps
 
     if not progress:
-        svi_state, losses = run_steps(svi_state, counts, pert_id, size_factors, covariates, guide_matrix, length=num_steps)
+        svi_state, losses = run_steps(
+            svi_state, counts, pert_id, size_factors, covariates, guide_matrix, cell_mask, length=num_steps
+        )
         return _SVIRunResult(params=svi.get_params(svi_state), state=svi_state, losses=losses)
 
     if progress_chunk_size < 1:
@@ -289,6 +308,7 @@ def _run_svi(
                 size_factors,
                 covariates,
                 guide_matrix,
+                cell_mask,
                 length=step_count,
             )
             losses = jax.block_until_ready(losses)
@@ -341,32 +361,29 @@ def _run_svi_minibatch(
 
     update_impl = svi.stable_update if stable_update else svi.update
 
-    def run_index_steps(
+    def update_step(
         state: numpyro.infer.svi.SVIState,
         counts_full: jnp.ndarray | None,
         pert_full: jnp.ndarray | None,
         size_full: jnp.ndarray | None,
         covariate_full: jnp.ndarray | None,
         guide_matrix_full: jnp.ndarray | None,
-        batch_indices: jnp.ndarray,
+        idx: np.ndarray,
     ):
-        def body_fn(carry, idx):
-            return update_impl(
-                carry,
-                counts_full,
-                pert_full,
-                size_factors=size_full,
-                covariates=covariate_full,
-                guide_matrix=guide_matrix_full,
-                cell_idx=idx,
-                num_cells=num_cells,
-                forward_mode_differentiation=forward_mode_differentiation,
-                **static_kwargs,
-            )
+        return update_impl(
+            state,
+            counts_full,
+            pert_full,
+            size_factors=size_full,
+            covariates=covariate_full,
+            guide_matrix=guide_matrix_full,
+            cell_idx=idx,
+            num_cells=num_cells,
+            forward_mode_differentiation=forward_mode_differentiation,
+            **static_kwargs,
+        )
 
-        return jax.lax.scan(body_fn, state, batch_indices)
-
-    run_index_steps = jax.jit(run_index_steps)
+    update_step = jax.jit(update_step)
 
     if init_state is None:
         init_idx = sample_indices()
@@ -389,43 +406,43 @@ def _run_svi_minibatch(
     if progress_chunk_size < 1:
         raise ValueError("progress_chunk_size must be >= 1.")
 
-    all_batch_indices = np.stack([sample_indices() for _ in range(num_steps)], axis=0)
-    losses_chunks = []
+    losses = []
     remaining = num_steps
-    offset = 0
     if progress:
         with tqdm(total=num_steps, desc="[perturbo] SVI", unit="step") as pbar:
             while remaining > 0:
                 step_count = min(progress_chunk_size, remaining)
-                index_chunk = jnp.asarray(all_batch_indices[offset : offset + step_count])
-                svi_state, losses = run_index_steps(
-                    svi_state,
-                    counts,
-                    pert_id,
-                    size_factors,
-                    covariates,
-                    guide_matrix,
-                    index_chunk,
-                )
-                losses = jax.block_until_ready(losses)
-                losses_chunks.append(losses)
-                pbar.set_postfix(loss=float(np.asarray(losses[-1])))
-                pbar.update(step_count)
-                offset += step_count
+                for _ in range(step_count):
+                    idx = sample_indices()
+                    svi_state, loss = update_step(
+                        svi_state,
+                        counts,
+                        pert_id,
+                        size_factors,
+                        covariates,
+                        guide_matrix,
+                        idx,
+                    )
+                    loss = jax.block_until_ready(loss)
+                    losses.append(loss)
+                    pbar.set_postfix(loss=float(np.asarray(loss)))
+                    pbar.update(1)
                 remaining -= step_count
     else:
-        svi_state, losses = run_index_steps(
-            svi_state,
-            counts,
-            pert_id,
-            size_factors,
-            covariates,
-            guide_matrix,
-            jnp.asarray(all_batch_indices),
-        )
-        losses_chunks.append(losses)
+        for _ in range(num_steps):
+            idx = sample_indices()
+            svi_state, loss = update_step(
+                svi_state,
+                counts,
+                pert_id,
+                size_factors,
+                covariates,
+                guide_matrix,
+                idx,
+            )
+            losses.append(loss)
 
-    losses_arr = jnp.concatenate(losses_chunks) if len(losses_chunks) > 1 else losses_chunks[0]
+    losses_arr = jnp.stack(losses) if losses else jnp.array([])
     return _SVIRunResult(params=svi.get_params(svi_state), state=svi_state, losses=losses_arr)
 
 
@@ -1111,7 +1128,7 @@ def _load_guide_shared_perturbation_data(
     perturbation_element_names_uns_key: str | None,
     obs_names,
     element_subset: list[str] | None = None,
-) -> tuple[np.ndarray, list[str], np.ndarray, np.ndarray, list[str], np.ndarray | None]:
+) -> tuple[np.ndarray, list[str], np.ndarray, np.ndarray, list[str]]:
     pert_adata = _resolve_perturbation_modality(data, perturbation_modality_key)
     if obs_names is not None:
         pert_adata = pert_adata[obs_names]
@@ -1137,19 +1154,16 @@ def _load_guide_shared_perturbation_data(
     else:
         element_names = list(all_element_names)
     grouped = _group_perturbation_matrix_by_element(raw_matrix, element_mapping)
-    row_mask = None
-    if element_subset is not None:
-        row_mask = np.asarray(grouped).sum(axis=1) > 0
-        raw_matrix = raw_matrix[row_mask]
-        grouped = grouped[row_mask]
     return (
         _to_dense(raw_matrix),
         guide_names,
         grouped,
         np.asarray(element_mapping > 0, dtype=np.float32),
         element_names,
-        row_mask,
     )
+
+
+_PADDING_GUIDE_PREFIX = "__padding_guide_"
 
 
 def _validate_one_parent_guide_mapping(
@@ -1157,8 +1171,20 @@ def _validate_one_parent_guide_mapping(
     *,
     guide_names: list[str] | None = None,
 ) -> None:
-    row_sums = np.asarray(guide_to_element, dtype=np.int32).sum(axis=1)
+    mapping = np.asarray(guide_to_element, dtype=np.int32)
+    row_sums = mapping.sum(axis=1)
     invalid = np.flatnonzero(row_sums != 1)
+    if guide_names is not None and len(guide_names) == mapping.shape[0] and invalid.size:
+        # Chunk padding appends all-zero guide rows to reach a shared guide
+        # capacity. No cell carries them and they map to no element, so they
+        # contribute nothing to any guide-sharing model; only a real guide
+        # without exactly one parent is a user error.
+        is_padding = np.fromiter(
+            (str(guide_names[int(idx)]).startswith(_PADDING_GUIDE_PREFIX) for idx in invalid),
+            dtype=bool,
+            count=invalid.size,
+        )
+        invalid = invalid[~(is_padding & (row_sums[invalid] == 0))]
     if invalid.size == 0:
         return
     if guide_names is None or len(guide_names) == 0:
@@ -1335,59 +1361,6 @@ def _extract_gene_names(adata, gene_name_key: str | None) -> list[str]:
     return adata.var.index.astype(str).tolist()
 
 
-def _resolve_gene_subset_indices(
-    adata,
-    selected_genes: list[str] | None,
-    gene_name_key: str | None,
-) -> np.ndarray | slice:
-    """Resolve requested gene labels without materializing an AnnData view."""
-    if selected_genes is None:
-        return slice(None)
-    requested = [str(name) for name in selected_genes]
-    if not requested:
-        raise ValueError("selected_genes must contain at least one gene.")
-    if len(set(requested)) != len(requested):
-        raise ValueError("selected_genes must be unique.")
-    available = _extract_gene_names(adata, gene_name_key)
-    name_to_idx = {name: idx for idx, name in enumerate(available)}
-    missing = [name for name in requested if name not in name_to_idx]
-    if missing:
-        preview = ", ".join(missing[:10])
-        raise KeyError(f"Genes not found in analysis modality: {preview}")
-    return np.asarray([name_to_idx[name] for name in requested], dtype=np.int64)
-
-
-def build_effect_indices(
-    pairs: pd.DataFrame,
-    *,
-    pert_names: list[str],
-    gene_names: list[str],
-) -> np.ndarray:
-    """Map an exact element/gene pair table to local integer coefficient indices."""
-    required = {"element", "gene"}
-    missing_columns = required.difference(pairs.columns)
-    if missing_columns:
-        raise ValueError(f"pairs_to_test is missing required columns: {sorted(missing_columns)}")
-    pair_frame = pairs.loc[:, ["element", "gene"]].astype(str).drop_duplicates(ignore_index=True)
-    if pair_frame.empty:
-        raise ValueError("pairs_to_test must contain at least one element/gene pair.")
-    pert_lookup = {str(name): idx for idx, name in enumerate(pert_names)}
-    gene_lookup = {str(name): idx for idx, name in enumerate(gene_names)}
-    missing_elements = sorted(set(pair_frame["element"]).difference(pert_lookup))
-    missing_genes = sorted(set(pair_frame["gene"]).difference(gene_lookup))
-    if missing_elements or missing_genes:
-        details = []
-        if missing_elements:
-            details.append(f"elements={missing_elements[:10]}")
-        if missing_genes:
-            details.append(f"genes={missing_genes[:10]}")
-        raise KeyError("pairs_to_test names were not loaded: " + "; ".join(details))
-    return np.asarray(
-        [(pert_lookup[element], gene_lookup[gene]) for element, gene in pair_frame.itertuples(index=False, name=None)],
-        dtype=np.int32,
-    )
-
-
 def _validate_cli_input_keys(
     data,
     *,
@@ -1470,7 +1443,11 @@ def _extract_names(
     else:
         pert_cat = pd.Categorical(pert_series)
         pert_names = [str(x) for x in pert_cat.categories.tolist()]
-    pert_id = pert_cat.codes
+    # pandas narrows categorical codes to int8 below 128 categories. A chunk that holds
+    # one perturbation would then carry int8 codes into stage two, where a Python
+    # integer as large as the first chunk's perturbation count is combined with them
+    # and JAX refuses ("Python integer 742 out of bounds for int8"). Codes are int32.
+    pert_id = np.asarray(pert_cat.codes, dtype=np.int32)
     return gene_names, pert_names, pert_id
 
 
@@ -1488,7 +1465,6 @@ def load_controls(
     size_factor_key: str | None = None,
     library_size_key: str | None = None,
     gene_name_key: str | None = None,
-    selected_genes: list[str] | None = None,
     device: str | Any | None = None,
     cell_keep_mask: np.ndarray | None = None,
     clip_gene_expression_percentile: float | None = None,
@@ -1499,12 +1475,10 @@ def load_controls(
     batch_covariate: str | None = None,
     return_covariate_transform_state: bool = False,
     infer_control_guides: bool = False,
-    retain_perturbation_design: bool = True,
 ) -> PerTurboData | tuple[PerTurboData, CovariateTransformState | None]:
     print("[perturbo] Loading controls...")
     adata = _resolve_adata(data, modality_key)
     is_backed = getattr(adata, "isbacked", False)
-    gene_idx = _resolve_gene_subset_indices(adata, selected_genes, gene_name_key)
 
     # Compose all obs-level filters into a single integer index array before
     # touching adata.X.  Backed AnnData forbids "view of a view", so we must
@@ -1525,7 +1499,7 @@ def load_controls(
         pert_adata = _resolve_perturbation_modality(data, perturbation_modality_key)
         if working_obs_names is not None:
             pert_adata = pert_adata[working_obs_names]
-        pert_matrix = _get_layer_matrix(pert_adata, perturbation_layer)
+        pert_id = _to_dense(_get_layer_matrix(pert_adata, perturbation_layer))
         pert_names = _extract_pert_names(pert_adata)
         guide_to_element = None
         element_names = None
@@ -1546,17 +1520,10 @@ def load_controls(
             perturbation_modality_key=perturbation_modality_key,
         )
         if control_cols is not None:
-            selected_matrix = pert_matrix[:, control_cols]
-            mask = np.asarray(selected_matrix.sum(axis=1)).reshape(-1) > 0
+            mask = pert_id[:, control_cols].sum(axis=1) > 0
             obs_idx = obs_idx[mask]
-            pert_id = _to_dense(selected_matrix[mask]) if retain_perturbation_design else np.zeros(mask.sum(), dtype=np.int32)
+            pert_id = np.asarray(pert_id)[np.ix_(mask, control_cols)]
             pert_names = [n for n, c in zip(pert_names, control_cols) if c]
-        elif retain_perturbation_design:
-            pert_id = _to_dense(pert_matrix)
-        else:
-            pert_id = np.zeros(len(obs_idx), dtype=np.int32)
-        if not retain_perturbation_design:
-            pert_names = ["control"]
     else:
         if perturbation_key is None:
             raise ValueError("perturbation_key must be provided for obs-based perturbations.")
@@ -1572,7 +1539,7 @@ def load_controls(
         print(f"[perturbo] Subsampled controls to {max_control_cells} cells.")
 
     # Single slice: for backed data this is one targeted disk read.
-    adata = adata[obs_idx, gene_idx]
+    adata = adata[obs_idx]
     if is_backed:
         adata = adata.to_memory()
 
@@ -1645,7 +1612,6 @@ def load_analysis_cells(
     gene_name_key: str | None = None,
     device: str | Any | None = None,
     selected_perturbations: list[str] | None = None,
-    selected_genes: list[str] | None = None,
     cell_keep_mask: np.ndarray | None = None,
     clip_gene_expression_percentile: float | None = None,
     winsorize_gene_expression: bool = False,
@@ -1661,7 +1627,6 @@ def load_analysis_cells(
     print(f"[perturbo] Loading analysis cells{subset_suffix}...")
     adata = _resolve_adata(data, modality_key)
     is_backed = getattr(adata, "isbacked", False)
-    gene_idx = _resolve_gene_subset_indices(adata, selected_genes, gene_name_key)
 
     # Compose all obs-level filters into a single integer index array before
     # touching adata.X.  Backed AnnData forbids "view of a view", so we must
@@ -1685,14 +1650,7 @@ def load_analysis_cells(
         if retain_guide_structure:
             if perturbation_element_varm_key is None:
                 raise ValueError("retain_guide_structure requires perturbation_element_varm_key.")
-            (
-                guide_matrix,
-                guide_names,
-                pert_id,
-                guide_to_element,
-                pert_names,
-                selected_row_mask,
-            ) = _load_guide_shared_perturbation_data(
+            guide_matrix, guide_names, pert_id, guide_to_element, pert_names = _load_guide_shared_perturbation_data(
                 data,
                 perturbation_modality_key=perturbation_modality_key,
                 perturbation_layer=perturbation_layer,
@@ -1702,9 +1660,10 @@ def load_analysis_cells(
                 element_subset=selected_perturbations,
             )
             if selected_perturbations is not None:
-                if selected_row_mask is None:
-                    raise RuntimeError("Missing row mask for selected guide-aware perturbations.")
-                obs_idx = obs_idx[selected_row_mask]
+                mask = np.asarray(pert_id).sum(axis=1) > 0
+                obs_idx = obs_idx[mask]
+                pert_id = pert_id[mask]
+                guide_matrix = guide_matrix[mask]
         elif perturbation_element_varm_key is not None:
             pert_id, pert_names = _load_grouped_perturbation_matrix(
                 data,
@@ -1739,7 +1698,7 @@ def load_analysis_cells(
             obs_idx = obs_idx[mask]
 
     # Single slice: for backed data this is one targeted disk read.
-    adata = adata[obs_idx, gene_idx]
+    adata = adata[obs_idx]
     if is_backed:
         adata = adata.to_memory()
 
@@ -1834,11 +1793,6 @@ def fit_control(
     print("[perturbo] Fitting control model...")
     counts = data.counts
     pert_id = data.pert_id
-    # Stage 1 conditions beta to zero. Unless guide random effects are being
-    # estimated, perturbation identities cannot affect the likelihood and a
-    # high-MOI matrix would only trigger a large zero-valued matrix multiply.
-    if not guide_random_effects and getattr(pert_id, "ndim", None) == 2:
-        pert_id = jnp.zeros((counts.shape[0],), dtype=jnp.int32)
     num_perts = _infer_num_perts(pert_id)
     num_genes = counts.shape[1]
     if minibatch_size is not None and minibatch_size > counts.shape[0]:
@@ -2035,27 +1989,24 @@ def _summarize_relative_guide_block(
     *,
     num_samples: int,
 ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
-    """Draw and summarize a bounded element-by-guide posterior block."""
+    """Draw and summarize one bounded element-by-guide block of the posterior."""
     num_elements, num_genes = beta_loc.shape
     num_guides = relative_loc.shape[0]
     beta_draws = beta_loc + beta_scale * jax.random.normal(
-        beta_key,
-        shape=(num_samples, num_elements, num_genes),
-        dtype=beta_loc.dtype,
+        beta_key, shape=(num_samples, num_elements, num_genes), dtype=beta_loc.dtype
     )
     relative_draws = jax.nn.sigmoid(
-        relative_loc + relative_scale * jax.random.normal(
-            relative_key,
-            shape=(num_samples, num_guides, num_genes),
-            dtype=relative_loc.dtype,
-        )
+        relative_loc
+        + relative_scale
+        * jax.random.normal(relative_key, shape=(num_samples, num_guides, num_genes), dtype=relative_loc.dtype)
     )
     guide_effect_draws = jnp.einsum("qe,seg->sqg", guide_to_element, beta_draws) * relative_draws
-    effect_mean = jnp.mean(guide_effect_draws, axis=0)
-    effect_scale = jnp.clip(jnp.std(guide_effect_draws, axis=0), 1e-6)
-    relative_mean = jnp.mean(relative_draws, axis=0)
-    relative_scale_summary = jnp.clip(jnp.std(relative_draws, axis=0), 1e-6)
-    return effect_mean, effect_scale, relative_mean, relative_scale_summary
+    return (
+        jnp.mean(guide_effect_draws, axis=0),
+        jnp.clip(jnp.std(guide_effect_draws, axis=0), 1e-6),
+        jnp.mean(relative_draws, axis=0),
+        jnp.clip(jnp.std(relative_draws, axis=0), 1e-6),
+    )
 
 
 def _summarize_stage2_guide_posteriors(
@@ -2067,55 +2018,74 @@ def _summarize_stage2_guide_posteriors(
     guide_block_size: int = 16,
     element_block_size: int = 100,
 ) -> dict[str, np.ndarray]:
-    """Summarize guide-level derived effects without materializing all beta draws.
+    """Guide-level effect summaries without materializing every posterior draw.
 
-    ``AutoNormal`` represents the unconstrained ``beta`` site directly as an
-    independent Normal distribution, so shared guide effects have closed-form
-    moments. Relative effects require Monte Carlo propagation through the
-    sigmoid-constrained guide efficiency, but are sampled in bounded element
-    and guide blocks.
+    A summary is returned exactly when a guide's effect differs from its element's.
+
+    Under ``shared`` it does not: the model sets ``guide_effect = guide_to_element
+    @ beta``, so the guide posterior is the element posterior copied, and nothing
+    is returned. Under ``offset`` the guide adds an independent Normal, so the
+    moments are closed-form. Only ``relative`` is nonlinear, the efficiency
+    passing through a sigmoid, and it is sampled in bounded element and guide
+    blocks.
+
+    The previous implementation drew ``num_samples`` samples of the whole
+    ``(elements, genes)`` effect matrix and contracted them against the guide map
+    whatever the strategy. On a 13,000-guide by 13,000-gene screen that is 44 GB
+    of intermediates on an element fit and about 89 GB on a guide-level one,
+    which put guide output out of reach at the scale that asks for it - and under
+    ``shared`` it spent all of that to recompute a copy.
     """
     if data.guide_to_element is None:
         return {}
     guide_to_element = np.asarray(data.guide_to_element, dtype=np.float32)
-    beta_loc_raw = np.asarray(params["beta_auto_loc"], dtype=np.float32)
-    beta_scale_raw = np.clip(np.asarray(params["beta_auto_scale"], dtype=np.float32), 1e-6, None)
-    if data.effect_indices is None:
-        beta_loc = beta_loc_raw
-        beta_scale = beta_scale_raw
-    else:
-        indices = np.asarray(data.effect_indices, dtype=np.int32)
-        beta_loc = np.zeros((len(data.pert_names), len(data.gene_names)), dtype=np.float32)
-        beta_scale = np.zeros_like(beta_loc)
-        beta_loc[indices[:, 0], indices[:, 1]] = beta_loc_raw
-        beta_scale[indices[:, 0], indices[:, 1]] = beta_scale_raw
+    beta_loc = np.asarray(params["beta_auto_loc"], dtype=np.float32)
+    beta_scale = np.clip(np.asarray(params["beta_auto_scale"], dtype=np.float32), 1e-6, None)
 
-    if guide_effect_strategy == "shared":
+    def _closed_form(extra_mean: np.ndarray | None, extra_variance: np.ndarray | None) -> dict[str, np.ndarray]:
         effect_mean = guide_to_element @ beta_loc
-        effect_scale = np.sqrt(np.square(guide_to_element) @ np.square(beta_scale))
-        effect_scale = np.clip(effect_scale, 1e-6, None)
+        effect_variance = np.square(guide_to_element) @ np.square(beta_scale)
+        if extra_mean is not None:
+            effect_mean = effect_mean + extra_mean
+        if extra_variance is not None:
+            effect_variance = effect_variance + extra_variance
+        effect_scale = np.clip(np.sqrt(effect_variance), 1e-6, None)
         return {
             "guide_effect_mean": effect_mean.astype(np.float32, copy=False),
             "guide_effect_scale": effect_scale.astype(np.float32, copy=False),
             "guide_effect_z_values": (effect_mean / effect_scale).astype(np.float32, copy=False),
         }
 
-    if guide_effect_strategy != "relative":
+    if guide_effect_strategy == "shared":
+        # Under this strategy the model sets guide_effect = guide_to_element @ beta,
+        # so a guide's posterior *is* its element's, copied. Returning it here would
+        # duplicate the element table as a (guides, genes) array for no information;
+        # consumers that want guide rows join the element table through the map, and
+        # :meth:`PerTurboModel._guide_effect_payload` does exactly that.
         return {}
-    if guide_block_size < 1:
-        raise ValueError("guide_block_size must be >= 1.")
 
-    if element_block_size < 1:
-        raise ValueError("element_block_size must be >= 1.")
-    beta_loc_jax = jnp.asarray(beta_loc)
-    beta_scale_jax = jnp.asarray(beta_scale)
+    if guide_effect_strategy == "offset":
+        offset_loc = np.asarray(params["guide_offset_auto_loc"], dtype=np.float32)
+        offset_scale = np.clip(np.asarray(params["guide_offset_auto_scale"], dtype=np.float32), 1e-6, None)
+        summary = _closed_form(offset_loc, np.square(offset_scale))
+        summary["guide_offset_mean"] = offset_loc
+        summary["guide_offset_scale"] = offset_scale
+        return summary
+
+    if guide_effect_strategy != "relative":
+        raise ValueError(f"Unknown guide_effect_strategy: {guide_effect_strategy}")
+    if guide_block_size < 1 or element_block_size < 1:
+        raise ValueError("guide_block_size and element_block_size must be >= 1.")
+
+    beta_loc_jax = jnp.asarray(params["beta_auto_loc"])
+    beta_scale_jax = jnp.asarray(params["beta_auto_scale"])
     relative_loc = jnp.asarray(params["guide_relative_efficiency_auto_loc"])
     relative_scale = jnp.asarray(params["guide_relative_efficiency_auto_scale"])
     num_guides, num_genes = guide_to_element.shape[0], beta_loc.shape[1]
-    effect_mean = np.empty((num_guides, num_genes), dtype=np.float32)
-    effect_scale = np.empty((num_guides, num_genes), dtype=np.float32)
-    relative_mean = np.empty((num_guides, num_genes), dtype=np.float32)
-    relative_scale_summary = np.empty((num_guides, num_genes), dtype=np.float32)
+    effect_mean = np.zeros((num_guides, num_genes), dtype=np.float32)
+    effect_scale = np.zeros((num_guides, num_genes), dtype=np.float32)
+    relative_mean = np.zeros((num_guides, num_genes), dtype=np.float32)
+    relative_scale_summary = np.zeros((num_guides, num_genes), dtype=np.float32)
     rng_key = jax.random.PRNGKey(2024)
 
     for element_start in range(0, beta_loc.shape[0], element_block_size):
@@ -2125,16 +2095,14 @@ def _summarize_stage2_guide_posteriors(
             continue
         for start in range(0, guide_indices.size, guide_block_size):
             indices = guide_indices[start : start + guide_block_size]
-            beta_key = jax.random.fold_in(rng_key, element_start)
-            relative_key = jax.random.fold_in(rng_key, int(indices[0]) + 1)
-            block_summary = _summarize_relative_guide_block(
+            block = _summarize_relative_guide_block(
                 beta_loc_jax[element_start:element_stop],
                 beta_scale_jax[element_start:element_stop],
                 relative_loc[indices],
                 relative_scale[indices],
                 jnp.asarray(guide_to_element[indices, element_start:element_stop]),
-                beta_key,
-                relative_key,
+                jax.random.fold_in(rng_key, element_start),
+                jax.random.fold_in(rng_key, int(indices[0]) + 1),
                 num_samples=num_samples,
             )
             (
@@ -2142,12 +2110,12 @@ def _summarize_stage2_guide_posteriors(
                 effect_scale[indices],
                 relative_mean[indices],
                 relative_scale_summary[indices],
-            ) = (np.asarray(value, dtype=np.float32) for value in block_summary)
+            ) = (np.asarray(value, dtype=np.float32) for value in block)
 
     return {
         "guide_effect_mean": effect_mean,
         "guide_effect_scale": effect_scale,
-        "guide_effect_z_values": effect_mean / effect_scale,
+        "guide_effect_z_values": effect_mean / np.clip(effect_scale, 1e-6, None),
         "guide_relative_efficiency_mean": relative_mean,
         "guide_relative_efficiency_scale": relative_scale_summary,
     }
@@ -2173,25 +2141,19 @@ def fit_perturbation_effects(
     guide_random_effects: bool = False,
     fit_perturbation_dispersion: bool = False,
     perturbation_dispersion_prior_rate: float = 10.0,
+    _runner_cache: dict[str, _ReusableSVIRunner] | None = None,
 ) -> BetaFit:
     print("[perturbo] Fitting perturbation effects...")
     counts = data.counts
     pert_id = data.pert_id
-    num_perts = _infer_num_perts(pert_id)
+    num_perts = len(data.pert_names)
+    inferred_num_perts = _infer_num_perts(pert_id)
+    if inferred_num_perts > num_perts:
+        raise ValueError(
+            "pert_id references more perturbations than provided in data.pert_names. "
+            f"Got {inferred_num_perts} perturbations from pert_id and {num_perts} names."
+        )
     num_genes = counts.shape[1]
-    effect_indices = data.effect_indices
-    if effect_indices is not None:
-        effect_indices_np = np.asarray(effect_indices, dtype=np.int32)
-        if effect_indices_np.ndim != 2 or effect_indices_np.shape[1] != 2 or effect_indices_np.shape[0] == 0:
-            raise ValueError("effect_indices must have shape (n_pairs, 2) with at least one pair.")
-        if np.any(effect_indices_np[:, 0] < 0) or np.any(effect_indices_np[:, 0] >= num_perts):
-            raise ValueError("effect_indices contains an out-of-range perturbation index.")
-        if np.any(effect_indices_np[:, 1] < 0) or np.any(effect_indices_np[:, 1] >= num_genes):
-            raise ValueError("effect_indices contains an out-of-range gene index.")
-        if np.unique(effect_indices_np, axis=0).shape[0] != effect_indices_np.shape[0]:
-            raise ValueError("effect_indices must not contain duplicate pairs.")
-        if fit_perturbation_dispersion:
-            raise ValueError("Pair-restricted effects are not yet compatible with fit_perturbation_dispersion=True.")
     guide_effect_strategy, guide_activity_mode = _validate_guide_model_request(
         data,
         guide_effect_strategy=guide_effect_strategy,
@@ -2216,7 +2178,11 @@ def fit_perturbation_effects(
             "[perturbo] guide_random_effects enabled without guide mapping; using conservative stage-2 "
             "posterior scale inflation from stage-1 guide_random_effect_tau."
         )
-    use_guide_shared_model = guide_effect_strategy != "shared" or random_effects_in_model or (fit_perturbation_dispersion and has_guide_mapping)
+    use_guide_shared_model = (
+        guide_effect_strategy != "shared"
+        or random_effects_in_model
+        or (fit_perturbation_dispersion and has_guide_mapping)
+    )
     num_guides = int(data.guide_matrix.shape[1]) if data.guide_matrix is not None else None
     if minibatch_size is not None and minibatch_size > counts.shape[0]:
         print(
@@ -2233,17 +2199,24 @@ def fit_perturbation_effects(
     model_name_lower = model_name.lower()
     if fit_perturbation_dispersion:
         if model_name_lower not in {"negbin", "nb", "censored_nb", "censored_negbin"}:
-            raise ValueError("fit_perturbation_dispersion=True is currently supported only for negative-binomial likelihoods.")
-        if not np.isfinite(perturbation_dispersion_prior_rate) or perturbation_dispersion_prior_rate <= 0:
-            raise ValueError("perturbation_dispersion_prior_rate must be finite and > 0.")
+            raise ValueError(
+                "fit_perturbation_dispersion=True is currently supported only for negative-binomial likelihoods."
+            )
+        pert_array = np.asarray(pert_id)
+        if pert_array.ndim not in {1, 2}:
+            raise ValueError("fit_perturbation_dispersion=True requires 1D or 2D perturbation labels.")
         if has_guide_mapping:
             guide_array = np.asarray(data.guide_matrix)
             if guide_array.ndim != 2 or np.any(~np.isfinite(guide_array)) or np.any(guide_array < 0):
                 raise ValueError("High-MOI guide_matrix must be a finite, non-negative 2D matrix.")
-        else:
-            pert_array = np.asarray(pert_id)
-            if pert_array.ndim not in {1, 2} or (pert_array.ndim == 2 and (np.any(pert_array < 0) or np.any(pert_array.sum(axis=1) > 1))):
-                raise ValueError("Element-level fitted dispersion requires low-MOI perturbation labels.")
+        elif pert_array.ndim == 2 and (
+            np.any(pert_array < 0) or np.any(np.asarray(pert_array.sum(axis=1)).reshape(-1) > 1)
+        ):
+            raise ValueError(
+                "Without guide-level inputs, fit_perturbation_dispersion=True requires at most one active perturbation per cell."
+            )
+        if not np.isfinite(perturbation_dispersion_prior_rate) or perturbation_dispersion_prior_rate <= 0:
+            raise ValueError("perturbation_dispersion_prior_rate must be finite and > 0.")
     model_cls = _resolve_guide_shared_model(model_name) if use_guide_shared_model else _resolve_model(model_name)
     conditioned_data: dict[str, jnp.ndarray | None] = {}
     is_lognormal_model = model_name_lower in {"lognormal_nb", "lnnb"}
@@ -2294,80 +2267,102 @@ def fit_perturbation_effects(
         model_cls,
         data=conditioned_data,
     )
-    dispersion_kwargs = ({"fit_perturbation_dispersion": True, "perturbation_dispersion_prior_rate": perturbation_dispersion_prior_rate} if fit_perturbation_dispersion else {})
-    init_values = {
-        "beta": jnp.zeros((num_perts, num_genes) if effect_indices is None else (int(effect_indices.shape[0]),)),
-    }
-    if guide_effect_strategy == "relative" and num_guides is not None:
-        init_values["guide_relative_efficiency"] = jnp.full((num_guides, num_genes), 0.8, dtype=jnp.float32)
-    if guide_effect_strategy == "offset" and num_guides is not None:
-        init_values["guide_offset"] = jnp.zeros((num_guides, num_genes), dtype=jnp.float32)
-    if random_effects_in_model and num_guides is not None:
-        init_values["guide_random_effect"] = jnp.zeros((num_guides, num_genes), dtype=jnp.float32)
-    if minibatch_size is None:
-        init_values["size_factor"] = size_factors
-    if (
-        num_factors is not None
+    dispersion_kwargs = (
+        {
+            "fit_perturbation_dispersion": True,
+            "perturbation_dispersion_prior_rate": perturbation_dispersion_prior_rate,
+        }
+        if fit_perturbation_dispersion
+        else {}
+    )
+    cacheable_runner = bool(
+        _runner_cache is not None
         and minibatch_size is None
-        and (control_fit.pca_loadings is not None or control_fit.factor_loadings is not None)
-    ):
-        # loadings = control_fit.pca_loadings if control_fit.pca_loadings is not None else control_fit.factor_loadings
-        loadings = control_fit.factor_loadings
-        init_values["factor_scores"] = _project_factor_scores(
-            counts,
-            loadings,
-            control_fit.factor_center,
-        )
-    if is_lognormal_model:
-        init_values["noise_scale"] = control_fit.noise_scale
-    init_value_fn = numpyro.infer.init_to_value(values=init_values)
+        and num_factors is None
+        and data.guide_matrix is None
+        and not use_guide_shared_model
+    )
+    reusable_runner = _runner_cache.get("runner") if cacheable_runner and _runner_cache is not None else None
 
-    if propagate_baseline_uncertainty:
-        if control_fit.baseline_posterior is None:
-            raise ValueError(
-                "propagate_baseline_uncertainty=True requires stage-1 baseline posterior summary in control_fit."
-            )
-        baseline_posterior = control_fit.baseline_posterior
-        if svi_config is not None and svi_config.num_particles == 1:
-            print(
-                "[perturbo] propagate_baseline_uncertainty is enabled with num_particles=1; "
-                "this is valid but can increase gradient noise."
-            )
-        guide_model = numpyro.handlers.block(model, hide=["beta_0", "theta"])
-    else:
-        guide_model = model
-
-    auto_guide = AutoNormal(guide_model, init_loc_fn=init_value_fn, create_plates=create_plates)
-    if propagate_baseline_uncertainty:
-        def guide(
-            counts: jnp.ndarray | None,
-            pert_id: jnp.ndarray | None,
-            *,
-            size_factors: jnp.ndarray | None = None,
-            **kwargs: Any,
+    if reusable_runner is None:
+        init_values = {
+            "beta": jnp.zeros((num_perts, num_genes)),
+        }
+        if guide_effect_strategy == "relative" and num_guides is not None:
+            init_values["guide_relative_efficiency"] = jnp.full((num_guides, num_genes), 0.8, dtype=jnp.float32)
+        if guide_effect_strategy == "offset" and num_guides is not None:
+            init_values["guide_offset"] = jnp.zeros((num_guides, num_genes), dtype=jnp.float32)
+        if random_effects_in_model and num_guides is not None:
+            init_values["guide_random_effect"] = jnp.zeros((num_guides, num_genes), dtype=jnp.float32)
+        if minibatch_size is None:
+            init_values["size_factor"] = size_factors
+        if (
+            num_factors is not None
+            and minibatch_size is None
+            and (control_fit.pca_loadings is not None or control_fit.factor_loadings is not None)
         ):
-            numpyro.sample(
-                "beta_0",
-                dist.Normal(baseline_posterior.beta_0_loc, baseline_posterior.beta_0_scale),
-            )
-            numpyro.sample(
-                "theta",
-                dist.LogNormal(baseline_posterior.theta_log_loc, baseline_posterior.theta_log_scale),
-            )
-            return auto_guide(
+            loadings = control_fit.factor_loadings
+            init_values["factor_scores"] = _project_factor_scores(
                 counts,
-                pert_id,
-                size_factors=size_factors,
-                **kwargs,
+                loadings,
+                control_fit.factor_center,
             )
+        if is_lognormal_model:
+            init_values["noise_scale"] = control_fit.noise_scale
+        init_value_fn = numpyro.infer.init_to_value(values=init_values)
 
+        if propagate_baseline_uncertainty:
+            if control_fit.baseline_posterior is None:
+                raise ValueError(
+                    "propagate_baseline_uncertainty=True requires stage-1 baseline posterior summary in control_fit."
+                )
+            baseline_posterior = control_fit.baseline_posterior
+            if svi_config is not None and svi_config.num_particles == 1:
+                print(
+                    "[perturbo] propagate_baseline_uncertainty is enabled with num_particles=1; "
+                    "this is valid but can increase gradient noise."
+                )
+            guide_model = numpyro.handlers.block(model, hide=["beta_0", "theta"])
+        else:
+            guide_model = model
+
+        auto_guide = AutoNormal(guide_model, init_loc_fn=init_value_fn, create_plates=create_plates)
+        if propagate_baseline_uncertainty:
+            def guide(
+                counts: jnp.ndarray | None,
+                pert_id: jnp.ndarray | None,
+                *,
+                size_factors: jnp.ndarray | None = None,
+                **kwargs: Any,
+            ):
+                numpyro.sample(
+                    "beta_0",
+                    dist.Normal(baseline_posterior.beta_0_loc, baseline_posterior.beta_0_scale),
+                )
+                numpyro.sample(
+                    "theta",
+                    dist.LogNormal(baseline_posterior.theta_log_loc, baseline_posterior.theta_log_scale),
+                )
+                return auto_guide(
+                    counts,
+                    pert_id,
+                    size_factors=size_factors,
+                    **kwargs,
+                )
+
+        else:
+            guide = auto_guide
+
+        if svi_config is None:
+            svi_config = SVIConfig()
+        optimizer = _build_optimizer(svi_config)
+        svi = SVI(model, guide, optimizer, loss=_build_elbo(svi_config))
+        if cacheable_runner and _runner_cache is not None:
+            reusable_runner = _ReusableSVIRunner(svi=svi, auto_guide=auto_guide)
+            _runner_cache["runner"] = reusable_runner
     else:
-        guide = auto_guide
-
-    if svi_config is None:
-        svi_config = SVIConfig()
-    optimizer = _build_optimizer(svi_config)
-    svi = SVI(model, guide, optimizer, loss=_build_elbo(svi_config))
+        svi = reusable_runner.svi
+        auto_guide = reusable_runner.auto_guide
 
     rng = jax.random.PRNGKey(1)
     rng, key = jax.random.split(rng)
@@ -2380,8 +2375,10 @@ def fit_perturbation_effects(
             pert_id,
             size_factors=size_factors if use_observed_size_factors else None,
             covariates=covariates,
+            cell_mask=data.cell_mask,
             progress=progress,
             progress_chunk_size=progress_chunk_size,
+            reusable_runner=reusable_runner,
             num_cells=counts.shape[0],
             num_perts=num_perts,
             num_guides=num_guides,
@@ -2391,7 +2388,6 @@ def fit_perturbation_effects(
             prior=prior,
             guide_matrix=data.guide_matrix if use_guide_shared_model else None,
             guide_to_element=data.guide_to_element if use_guide_shared_model else None,
-            effect_indices=effect_indices,
             guide_effect_strategy=guide_effect_strategy,
             guide_random_effects=random_effects_in_model,
             **dispersion_kwargs,
@@ -2406,6 +2402,7 @@ def fit_perturbation_effects(
             pert_id,
             size_factors=size_factors if use_observed_size_factors else None,
             covariates=covariates,
+            cell_mask=data.cell_mask,
             progress=progress,
             progress_chunk_size=progress_chunk_size,
             batch_size=minibatch_size,
@@ -2418,23 +2415,14 @@ def fit_perturbation_effects(
             prior=prior,
             guide_matrix=data.guide_matrix if use_guide_shared_model else None,
             guide_to_element=data.guide_to_element if use_guide_shared_model else None,
-            effect_indices=effect_indices,
             guide_effect_strategy=guide_effect_strategy,
             guide_random_effects=random_effects_in_model,
             **dispersion_kwargs,
             **count_censoring_kwargs,
         )
 
-    loc_raw = result.params["beta_auto_loc"]
-    scale_raw = jnp.clip(result.params["beta_auto_scale"], 1e-6, None)
-    if effect_indices is None:
-        loc = loc_raw
-        scale = scale_raw
-    else:
-        loc = jnp.full((num_perts, num_genes), jnp.nan, dtype=loc_raw.dtype)
-        scale = jnp.full((num_perts, num_genes), jnp.nan, dtype=scale_raw.dtype)
-        loc = loc.at[effect_indices[:, 0], effect_indices[:, 1]].set(loc_raw)
-        scale = scale.at[effect_indices[:, 0], effect_indices[:, 1]].set(scale_raw)
+    loc = result.params["beta_auto_loc"]
+    scale = jnp.clip(result.params["beta_auto_scale"], 1e-6, None)
     if apply_scale_inflation_fallback:
         tau = jnp.asarray(control_fit.guide_random_effect_tau, dtype=scale.dtype)
         if tau.ndim != 1 or tau.shape[0] != num_genes:
@@ -2447,11 +2435,11 @@ def fit_perturbation_effects(
     dispersion_excess_inverse = None
     guide_dispersion_excess_inverse = None
     if fit_perturbation_dispersion:
-        posterior = auto_guide.median(result.params)
+        dispersion_posterior = auto_guide.median(result.params)
         if has_guide_mapping:
-            guide_dispersion_excess_inverse = posterior["guide_dispersion_excess_inverse"]
+            guide_dispersion_excess_inverse = dispersion_posterior["guide_dispersion_excess_inverse"]
         else:
-            dispersion_excess_inverse = posterior["dispersion_excess_inverse"]
+            dispersion_excess_inverse = dispersion_posterior["dispersion_excess_inverse"]
     guide_summary = _summarize_stage2_guide_posteriors(
         result.params,
         data=data,
@@ -2473,7 +2461,6 @@ def fit_perturbation_effects(
         guide_offset_scale=guide_summary.get("guide_offset_scale"),
         dispersion_excess_inverse=dispersion_excess_inverse,
         guide_dispersion_excess_inverse=guide_dispersion_excess_inverse,
-        effect_indices=effect_indices,
     )
 
 
@@ -2671,6 +2658,7 @@ def _construct_perturbation_chunks(
             n_cells = max(n_cells, int(rows_arr.max()) + 1)
 
     chunks: list[_PerturbationChunk] = []
+    oversized: list[tuple[str, int]] = []
     marks = np.zeros(n_cells if n_cells > 0 else 1, dtype=np.int32)
     token = 1
     current_names: list[str] = []
@@ -2729,20 +2717,32 @@ def _construct_perturbation_chunks(
             candidate_cells = _new_cells_for(rows)
 
         if candidate_cells > max_chunk_size:
-            raise ValueError(
-                f"Perturbation '{name}' has {candidate_cells} cells, exceeding "
-                f"--max-chunk-size={max_chunk_size}. Increase --max-chunk-size or use minibatching."
-            )
+            # A single perturbation larger than the cap cannot be split: every one
+            # of its cells is needed to estimate its own effect. Refusing the run
+            # would make the cap a hard limit on the screens the tool accepts, and
+            # screens do exist with tens of thousands of cells behind one
+            # perturbation. It gets a chunk to itself instead, and the caller is
+            # told, because that chunk's peak memory is the run's peak memory.
+            oversized.append((name, candidate_cells))
 
         current_names.append(name)
         current_indices.append(pert_idx)
         current_cells += _add_rows(rows)
 
     _finalize_current()
+    if oversized:
+        worst = max(count for _, count in oversized)
+        listed = ", ".join(f"{name} ({count:,} cells)" for name, count in oversized[:3])
+        more = f" and {len(oversized) - 3} more" if len(oversized) > 3 else ""
+        print(
+            f"[perturbo] {len(oversized)} perturbation(s) exceed --max-chunk-size={max_chunk_size:,} "
+            f"and each takes a chunk of its own: {listed}{more}. Peak memory follows the largest "
+            f"({worst:,} cells); lower --crt-gene-chunk-size or --minibatch-size if that does not fit."
+        )
     return chunks
 
 
-def _subset_perturbo_data_for_chunk(
+def _subset_cortado_data_for_chunk(
     data: PerTurboData,
     chunk: _PerturbationChunk,
 ) -> PerTurboData:
@@ -2800,28 +2800,106 @@ def _subset_perturbo_data_for_chunk(
         guide_to_element_chunk = jnp.asarray(guide_to_element_chunk_full[guide_keep], dtype=jnp.float32)
         guide_names_chunk = [str(name) for keep, name in zip(guide_keep.tolist(), data.guide_names, strict=True) if keep]
 
-    effect_indices_chunk = None
-    if data.effect_indices is not None:
-        global_effect_indices = np.asarray(data.effect_indices, dtype=np.int32)
-        global_to_local = np.full((len(data.pert_names),), -1, dtype=np.int32)
-        global_to_local[chunk_indices] = np.arange(chunk_indices.size, dtype=np.int32)
-        keep_effect = global_to_local[global_effect_indices[:, 0]] >= 0
-        selected_effects = global_effect_indices[keep_effect].copy()
-        selected_effects[:, 0] = global_to_local[selected_effects[:, 0]]
-        effect_indices_chunk = jnp.asarray(selected_effects, dtype=jnp.int32)
-
     return PerTurboData(
         counts=counts_chunk,
         pert_id=pert_id_chunk,
         pert_names=pert_names_chunk,
         gene_names=list(data.gene_names),
+        cell_mask=data.cell_mask[row_idx] if data.cell_mask is not None else None,
         size_factors=size_factors_chunk,
         covariates=covariates_chunk,
         covariate_names=None if data.covariate_names is None else list(data.covariate_names),
         guide_matrix=guide_matrix_chunk,
         guide_names=guide_names_chunk,
         guide_to_element=guide_to_element_chunk,
-        effect_indices=effect_indices_chunk,
+        library_size_center_log_mean=data.library_size_center_log_mean,
+    )
+
+
+def _pad_cortado_data_for_chunk(
+    data: PerTurboData,
+    *,
+    cell_capacity: int,
+    pert_capacity: int,
+    guide_capacity: int | None = None,
+) -> PerTurboData:
+    """Pad one perturbation chunk into a fixed-shape inference buffer.
+
+    Padded cells are marked through ``cell_mask`` and are excluded by the
+    model's mask handler. Perturbation and guide padding is all-zero, so no
+    padded effect is referenced by a real observation.
+    """
+
+    n_cells = int(data.counts.shape[0])
+    n_perts = len(data.pert_names)
+    if n_cells > cell_capacity:
+        raise ValueError(f"Chunk has {n_cells} cells but cell_capacity is {cell_capacity}.")
+    if n_perts > pert_capacity:
+        raise ValueError(f"Chunk has {n_perts} perturbations but pert_capacity is {pert_capacity}.")
+
+    cell_pad = cell_capacity - n_cells
+    pert_pad = pert_capacity - n_perts
+    counts = jnp.pad(data.counts, ((0, cell_pad), (0, 0)))
+
+    pert_arr = jnp.asarray(data.pert_id)
+    if pert_arr.ndim == 1:
+        # Padded rows are masked, so assigning them to the first real
+        # perturbation keeps indexing valid without affecting the likelihood.
+        pert_id = jnp.pad(pert_arr, ((0, cell_pad),), constant_values=0)
+    elif pert_arr.ndim == 2:
+        pert_id = jnp.pad(pert_arr, ((0, cell_pad), (0, pert_pad)))
+    else:
+        raise ValueError("pert_id must be 1D or 2D.")
+
+    if data.cell_mask is None:
+        real_mask = jnp.ones((n_cells,), dtype=bool)
+    else:
+        real_mask = jnp.asarray(data.cell_mask, dtype=bool).reshape((-1,))
+    cell_mask = jnp.pad(real_mask, ((0, cell_pad),), constant_values=False)
+
+    def _pad_cell_axis(values: jnp.ndarray | None) -> jnp.ndarray | None:
+        if values is None:
+            return None
+        return jnp.pad(values, ((0, cell_pad),) + ((0, 0),) * (values.ndim - 1))
+
+    # Preserve the unpadded initialization statistic. Recomputing it after
+    # appending all-zero rows would shift every real cell's centered factor.
+    real_size_factors = data.size_factors
+    if real_size_factors is None:
+        real_size_factors = compute_size_factors(data.counts)
+    size_factors = _pad_cell_axis(real_size_factors)
+    covariates = _pad_cell_axis(data.covariates)
+
+    guide_matrix = None
+    guide_to_element = None
+    guide_names = None
+    if data.guide_matrix is not None:
+        n_guides = int(data.guide_matrix.shape[1])
+        if guide_capacity is None:
+            guide_capacity = n_guides
+        if n_guides > guide_capacity:
+            raise ValueError(f"Chunk has {n_guides} guides but guide_capacity is {guide_capacity}.")
+        guide_pad = guide_capacity - n_guides
+        guide_matrix = jnp.pad(data.guide_matrix, ((0, cell_pad), (0, guide_pad)))
+        if data.guide_to_element is None:
+            raise ValueError("guide_to_element is required when guide_matrix is provided.")
+        guide_to_element = jnp.pad(data.guide_to_element, ((0, guide_pad), (0, pert_pad)))
+        source_names = data.guide_names or [f"guide_{idx}" for idx in range(n_guides)]
+        guide_names = list(source_names) + [f"{_PADDING_GUIDE_PREFIX}{idx}" for idx in range(guide_pad)]
+
+    pert_names = list(data.pert_names) + [f"__padding_pert_{idx}" for idx in range(pert_pad)]
+    return PerTurboData(
+        counts=counts,
+        pert_id=pert_id,
+        pert_names=pert_names,
+        gene_names=list(data.gene_names),
+        cell_mask=cell_mask,
+        size_factors=size_factors,
+        covariates=covariates,
+        covariate_names=None if data.covariate_names is None else list(data.covariate_names),
+        guide_matrix=guide_matrix,
+        guide_names=guide_names,
+        guide_to_element=guide_to_element,
         library_size_center_log_mean=data.library_size_center_log_mean,
     )
 
@@ -2844,6 +2922,8 @@ def _fit_perturbation_effects_chunked(
     guide_effect_strategy: str = "shared",
     guide_activity_mode: str = "always_on",
     guide_random_effects: bool = False,
+    fit_perturbation_dispersion: bool = False,
+    perturbation_dispersion_prior_rate: float = 10.0,
     max_chunk_size: int = 50_000,
     max_perturbations_per_chunk: int | None = None,
 ) -> BetaFit:
@@ -2872,6 +2952,9 @@ def _fit_perturbation_effects_chunked(
     posterior_mean = np.zeros((n_perts, n_genes), dtype=np.float32)
     posterior_scale = np.zeros((n_perts, n_genes), dtype=np.float32)
     z_values = np.zeros((n_perts, n_genes), dtype=np.float32)
+    dispersion_excess_inverse = (
+        np.zeros((n_perts, n_genes), dtype=np.float32) if fit_perturbation_dispersion else None
+    )
     losses_parts: list[jnp.ndarray] = []
     last_state = None
 
@@ -2881,10 +2964,27 @@ def _fit_perturbation_effects_chunked(
         guide_name_to_global = {str(name): idx for idx, name in enumerate(data.guide_names)}
         guide_eff_global = np.full((len(data.guide_names), n_genes), np.nan, dtype=np.float32)
 
-    for chunk in chunks:
-        chunk_data = _subset_perturbo_data_for_chunk(data, chunk)
-        chunk_fit = fit_perturbation_effects(
+    prepared_chunks = [(chunk, _subset_cortado_data_for_chunk(data, chunk)) for chunk in chunks]
+    cell_capacity = max(int(chunk_data.counts.shape[0]) for _, chunk_data in prepared_chunks)
+    pert_capacity = max(len(chunk_data.pert_names) for _, chunk_data in prepared_chunks)
+    guide_capacity = None
+    if data.guide_matrix is not None:
+        guide_capacity = max(
+            int(chunk_data.guide_matrix.shape[1])
+            for _, chunk_data in prepared_chunks
+            if chunk_data.guide_matrix is not None
+        )
+
+    runner_cache: dict[str, _ReusableSVIRunner] = {}
+    for chunk, chunk_data in prepared_chunks:
+        padded_chunk_data = _pad_cortado_data_for_chunk(
             chunk_data,
+            cell_capacity=cell_capacity,
+            pert_capacity=pert_capacity,
+            guide_capacity=guide_capacity,
+        )
+        chunk_fit = fit_perturbation_effects(
+            padded_chunk_data,
             control_fit,
             num_steps=num_steps,
             prior=prior,
@@ -2900,10 +3000,18 @@ def _fit_perturbation_effects_chunked(
             guide_effect_strategy=guide_effect_strategy,
             guide_activity_mode=guide_activity_mode,
             guide_random_effects=guide_random_effects,
+            fit_perturbation_dispersion=fit_perturbation_dispersion,
+            perturbation_dispersion_prior_rate=perturbation_dispersion_prior_rate,
+            _runner_cache=runner_cache,
         )
-        posterior_mean[np.asarray(chunk.pert_indices)] = np.asarray(chunk_fit.posterior_mean)
-        posterior_scale[np.asarray(chunk.pert_indices)] = np.asarray(chunk_fit.posterior_scale)
-        z_values[np.asarray(chunk.pert_indices)] = np.asarray(chunk_fit.z_values)
+        n_chunk_perts = len(chunk_data.pert_names)
+        posterior_mean[np.asarray(chunk.pert_indices)] = np.asarray(chunk_fit.posterior_mean)[:n_chunk_perts]
+        posterior_scale[np.asarray(chunk.pert_indices)] = np.asarray(chunk_fit.posterior_scale)[:n_chunk_perts]
+        z_values[np.asarray(chunk.pert_indices)] = np.asarray(chunk_fit.z_values)[:n_chunk_perts]
+        if dispersion_excess_inverse is not None and chunk_fit.dispersion_excess_inverse is not None:
+            dispersion_excess_inverse[np.asarray(chunk.pert_indices)] = np.asarray(
+                chunk_fit.dispersion_excess_inverse
+            )[:n_chunk_perts]
         last_state = chunk_fit.svi_result
         if chunk_fit.losses.size > 0:
             losses_parts.append(chunk_fit.losses)
@@ -2932,4 +3040,7 @@ def _fit_perturbation_effects_chunked(
         losses=losses,
         svi_result=last_state,
         guide_relative_efficiency_mean=guide_efficiency,
+        dispersion_excess_inverse=(
+            None if dispersion_excess_inverse is None else jnp.asarray(dispersion_excess_inverse)
+        ),
     )

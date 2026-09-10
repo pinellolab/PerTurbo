@@ -4,10 +4,10 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 import json
+import warnings
 from pathlib import Path
 import re
 from typing import Any
-import warnings
 
 import anndata as ad
 import mudata as md
@@ -17,6 +17,8 @@ import scipy.sparse as sp
 
 
 _SETUP_UNS_KEY = "_perturbo_setup"
+# Bundles written by the Cortado prototype carry the old key. They are read and
+# upgraded in memory rather than refused, so existing MuData files keep working.
 _LEGACY_SETUP_UNS_KEY = "_cortado_setup"
 
 
@@ -129,7 +131,7 @@ def setup_mudata(
     """Register MuData metadata for perturbo workflows.
 
     This mutates the in-memory object to ensure basic fields exist and stores the
-    registration payload in ``mdata.uns["_perturbo_setup"]``.
+    registration payload in ``mdata.uns["_cortado_setup"]``.
     """
     if modalities is None:
         raise ValueError("modalities must be provided.")
@@ -268,13 +270,13 @@ def save_fit_bundle(
 ) -> Path:
     bundle_dir = Path(out_dir)
     bundle_dir.mkdir(parents=True, exist_ok=True)
-    if _SETUP_UNS_KEY in mdata.uns or _LEGACY_SETUP_UNS_KEY in mdata.uns:
-        get_mudata_setup(mdata)
+    mdata.write_h5mu(bundle_dir / "mdata.h5mu")
+    # Bundles declare who wrote them and in what shape, so a reader can tell a v2
+    # bundle from a Cortado-prototype one without guessing from its contents.
     payload = dict(metadata)
     payload["producer"] = "perturbo"
     payload["bundle_format"] = "fit_bundle"
     payload["bundle_version"] = 2
-    mdata.write_h5mu(bundle_dir / "mdata.h5mu")
     write_json(bundle_dir / "metadata.json", payload)
     save_array_bundle(bundle_dir / "control_fit.npz", control_arrays)
     save_array_bundle(bundle_dir / "beta_fit.npz", beta_arrays)

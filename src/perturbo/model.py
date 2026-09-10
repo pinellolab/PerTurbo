@@ -14,20 +14,18 @@ def create_plates(
     pert_id: jnp.ndarray | None,
     covariates: jnp.ndarray | None = None,
     guide_matrix: jnp.ndarray | None = None,
-    effect_indices: jnp.ndarray | None = None,
     num_cells: int | None = None,
     num_genes: int | None = None,
     num_perts: int | None = None,
     num_guides: int | None = None,
     num_factors: int | None = None,
     num_covariates: int | None = None,
-    num_effects: int | None = None,
     subsample_size: int | None = None,
     cell_idx: jnp.ndarray | None = None,
     **kwargs,
 ):
     del kwargs
-    Plates = namedtuple("Plates", ["cells", "genes", "perts", "guides", "factors", "covariates", "effects"])
+    Plates = namedtuple("Plates", ["cells", "genes", "perts", "guides", "factors", "covariates"])
     if counts is not None:
         inferred_cells, inferred_genes = counts.shape
         if num_cells is None:
@@ -38,8 +36,6 @@ def create_plates(
         num_perts = int(pert_id.shape[1])
     if num_guides is None and guide_matrix is not None and getattr(guide_matrix, "ndim", None) == 2:
         num_guides = int(guide_matrix.shape[1])
-    if num_effects is None and effect_indices is not None:
-        num_effects = int(effect_indices.shape[0])
     if num_factors is None:
         num_factors = 1
     if num_covariates is None and covariates is not None and getattr(covariates, "ndim", None) == 2:
@@ -53,7 +49,6 @@ def create_plates(
         plate("guides", int(num_guides) if num_guides is not None and int(num_guides) > 0 else 1, dim=-2),
         plate("factors", num_factors, dim=-3),
         covariate_plate,
-        plate("effects", int(num_effects) if num_effects is not None and int(num_effects) > 0 else 1, dim=-1),
     )
 
 
@@ -174,7 +169,7 @@ def BaseModel(
     covariates=None,
     guide_matrix=None,
     guide_to_element=None,
-    effect_indices=None,
+    cell_mask=None,
     num_cells=None,
     num_genes=None,
     num_perts=None,
@@ -202,7 +197,6 @@ def BaseModel(
         num_perts=num_perts,
         num_guides=num_guides,
         num_factors=num_factors,
-        num_effects=None if effect_indices is None else int(effect_indices.shape[0]),
         subsample_size=subsample_size,
         cell_idx=cell_idx,
     )
@@ -212,7 +206,6 @@ def BaseModel(
     guide_plate = plates.guides
     factor_plate = plates.factors
     covariate_plate = plates.covariates
-    effect_plate = plates.effects
     full_num_cells = int(num_cells) if num_cells is not None else (int(counts.shape[0]) if counts is not None else None)
     uses_mixture_nb = likelihood in {"mixture_nb"}
 
@@ -255,27 +248,13 @@ def BaseModel(
         if uses_mixture_nb:
             theta_outlier = numpyro.sample("theta_outlier", dist.LogNormal(0.0, 2.0))
             outlier_mean_shift = numpyro.sample("outlier_mean_shift", dist.HalfNormal(1.0))
-        if effect_indices is None:
-            with pert_plate:
-                beta = _sample_effect_site("beta", prior)
-                if fit_perturbation_dispersion:
-                    dispersion_excess_inverse = numpyro.sample(
-                        "dispersion_excess_inverse", dist.Exponential(perturbation_dispersion_prior_rate)
-                    )
-
-    if effect_indices is not None:
-        if fit_perturbation_dispersion:
-            raise ValueError("Pair-restricted effects are not yet compatible with fitted perturbation dispersion.")
-        effect_indices = jnp.asarray(effect_indices, dtype=jnp.int32)
-        with effect_plate:
-            beta_values = _sample_effect_site("beta", prior)
-        # Keep the variational parameterization restricted to the requested
-        # pairs, but assemble a dense matrix for the downstream matmul.  The
-        # perturbation-by-gene map is small even in high-MOI screens (e.g.
-        # 431 x 381 in Gasperini), while JAX's CPU BCOO matmul becomes much
-        # slower once a control is tested against many genes.
-        beta = jnp.zeros((int(num_perts), int(num_genes)), dtype=beta_values.dtype)
-        beta = beta.at[effect_indices[:, 0], effect_indices[:, 1]].set(beta_values)
+        with pert_plate:
+            beta = _sample_effect_site("beta", prior)
+            if fit_perturbation_dispersion:
+                dispersion_excess_inverse = numpyro.sample(
+                    "dispersion_excess_inverse",
+                    dist.Exponential(perturbation_dispersion_prior_rate),
+                )
 
     covariate_coef = None
     if covariates is not None:
@@ -308,61 +287,80 @@ def BaseModel(
             num_cells=full_num_cells,
             name="guide_matrix",
         )
-        size_factor = numpyro.sample("size_factor", dist.Normal(0.0, 2.0), obs=size_factor_obs)
-
-        if num_factors is not None:
-            with factor_plate:
-                factor_scores = numpyro.sample("factor_scores", dist.Normal(0, 1.0))
-
-        if pert_id is None:
-            raise ValueError("pert_id must be provided.")
-        if pert_id.ndim == 1:
-            pert_effect = beta[pert_id, :]
-            if fit_perturbation_dispersion:
-                effective_theta = jnp.reciprocal(jnp.reciprocal(theta)[None, :] + dispersion_excess_inverse[pert_id, :])
-        elif pert_id.ndim == 2:
-            pert_matrix = jnp.asarray(pert_id, dtype=beta.dtype)
-            pert_effect = pert_matrix @ beta
-            if fit_perturbation_dispersion:
-                effective_theta = jnp.reciprocal(jnp.reciprocal(theta)[None, :] + pert_matrix @ dispersion_excess_inverse)
+        cell_mask = _subsample_cell_axis(
+            cell_mask,
+            sampled_cell_idx,
+            num_cells=full_num_cells,
+            name="cell_mask",
+        )
+        if cell_mask is None:
+            cell_mask = jnp.ones((sampled_cell_idx.shape[0], 1), dtype=bool)
         else:
-            raise ValueError("pert_id must be 1D (indices) or 2D (binary matrix).")
+            cell_mask = jnp.asarray(cell_mask, dtype=bool).reshape((-1, 1))
 
-        mu = beta_0 + pert_effect + size_factor
-        # Outlier component is a right-shifted baseline mode and does not
-        # depend on perturbation beta.
-        mu_outlier = beta_0 + size_factor
-        if covariate_coef is not None and covariates is not None:
-            covariate_contrib = covariates @ covariate_coef
-            mu = mu + covariate_contrib
-            mu_outlier = mu_outlier + covariate_contrib
-        if num_factors is not None:
-            factor_contrib = jnp.einsum("fig,fcj->cg", factor_loadings, factor_scores)
-            mu = mu + factor_contrib
-            mu_outlier = mu_outlier + factor_contrib
-        if guide_random_effect is not None and guide_matrix is not None:
-            guide_random_effect_contrib = jnp.asarray(guide_matrix, dtype=guide_random_effect.dtype) @ guide_random_effect
-            mu = mu + guide_random_effect_contrib
-            mu_outlier = mu_outlier + guide_random_effect_contrib
+        # The mask covers cell-local latent sites as well as observations. This
+        # lets fixed-shape padded chunk buffers contribute exactly the same
+        # likelihood terms as their unpadded counterparts.
+        with numpyro.handlers.mask(mask=cell_mask):
+            size_factor = numpyro.sample("size_factor", dist.Normal(0.0, 2.0), obs=size_factor_obs)
 
-        theta_for_observations = effective_theta if fit_perturbation_dispersion else theta
-        logits = mu - jnp.log(theta_for_observations)
-        logits_outlier = (mu_outlier + outlier_mean_shift) - jnp.log(theta_outlier) if uses_mixture_nb else None
-        if skip_obs_sampling:
-            return None
+            if num_factors is not None:
+                with factor_plate:
+                    factor_scores = numpyro.sample("factor_scores", dist.Normal(0, 1.0))
 
-        with gene_plate:
-            return _sample_observations(
-                counts=counts,
-                likelihood=likelihood,
-                logits=logits,
-                theta=theta_for_observations,
-                noise_scale=noise_scale if likelihood in {"lnnb", "lognormal_nb"} else None,
-                logits_outlier=logits_outlier,
-                theta_outlier=theta_outlier if uses_mixture_nb else None,
-                pi_outlier=pi_outlier if uses_mixture_nb else None,
-                count_censoring_threshold=count_censoring_threshold,
-            )
+            if pert_id is None:
+                raise ValueError("pert_id must be provided.")
+            if pert_id.ndim == 1:
+                pert_effect = beta[pert_id, :]
+                if fit_perturbation_dispersion:
+                    effective_theta = jnp.reciprocal(
+                        jnp.reciprocal(theta)[None, :] + dispersion_excess_inverse[pert_id, :]
+                    )
+            elif pert_id.ndim == 2:
+                pert_matrix = jnp.asarray(pert_id, dtype=beta.dtype)
+                pert_effect = pert_matrix @ beta
+                if fit_perturbation_dispersion:
+                    effective_theta = jnp.reciprocal(
+                        jnp.reciprocal(theta)[None, :] + pert_matrix @ dispersion_excess_inverse
+                    )
+            else:
+                raise ValueError("pert_id must be 1D (indices) or 2D (binary matrix).")
+
+            mu = beta_0 + pert_effect + size_factor
+            # Outlier component is a right-shifted baseline mode and does not
+            # depend on perturbation beta.
+            mu_outlier = beta_0 + size_factor
+            if covariate_coef is not None and covariates is not None:
+                covariate_contrib = covariates @ covariate_coef
+                mu = mu + covariate_contrib
+                mu_outlier = mu_outlier + covariate_contrib
+            if num_factors is not None:
+                factor_contrib = jnp.einsum("fig,fcj->cg", factor_loadings, factor_scores)
+                mu = mu + factor_contrib
+                mu_outlier = mu_outlier + factor_contrib
+            if guide_random_effect is not None and guide_matrix is not None:
+                guide_random_effect_contrib = jnp.asarray(guide_matrix, dtype=guide_random_effect.dtype) @ guide_random_effect
+                mu = mu + guide_random_effect_contrib
+                mu_outlier = mu_outlier + guide_random_effect_contrib
+
+            theta_for_observations = effective_theta if fit_perturbation_dispersion else theta
+            logits = mu - jnp.log(theta_for_observations)
+            logits_outlier = (mu_outlier + outlier_mean_shift) - jnp.log(theta_outlier) if uses_mixture_nb else None
+            if skip_obs_sampling:
+                return None
+
+            with gene_plate:
+                return _sample_observations(
+                    counts=counts,
+                    likelihood=likelihood,
+                    logits=logits,
+                    theta=theta_for_observations,
+                    noise_scale=noise_scale if likelihood in {"lnnb", "lognormal_nb"} else None,
+                    logits_outlier=logits_outlier,
+                    theta_outlier=theta_outlier if uses_mixture_nb else None,
+                    pi_outlier=pi_outlier if uses_mixture_nb else None,
+                    count_censoring_threshold=count_censoring_threshold,
+                )
 
 
 def GuideSharedEffectModel(
@@ -372,7 +370,7 @@ def GuideSharedEffectModel(
     covariates=None,
     guide_matrix=None,
     guide_to_element=None,
-    effect_indices=None,
+    cell_mask=None,
     num_cells=None,
     num_genes=None,
     num_perts=None,
@@ -402,7 +400,6 @@ def GuideSharedEffectModel(
         num_perts=num_perts,
         num_guides=num_guides,
         num_factors=num_factors,
-        num_effects=None if effect_indices is None else int(effect_indices.shape[0]),
         subsample_size=subsample_size,
         cell_idx=cell_idx,
     )
@@ -412,7 +409,6 @@ def GuideSharedEffectModel(
     guide_plate = plates.guides
     factor_plate = plates.factors
     covariate_plate = plates.covariates
-    effect_plate = plates.effects
     full_num_cells = int(num_cells) if num_cells is not None else (int(counts.shape[0]) if counts is not None else None)
     uses_mixture_nb = likelihood in {"mixture_nb"}
 
@@ -455,25 +451,14 @@ def GuideSharedEffectModel(
         if uses_mixture_nb:
             theta_outlier = numpyro.sample("theta_outlier", dist.LogNormal(0.0, 2.0))
             outlier_mean_shift = numpyro.sample("outlier_mean_shift", dist.HalfNormal(1.0))
-        if effect_indices is None:
-            with pert_plate:
-                beta = _sample_effect_site("beta", prior)
+        with pert_plate:
+            beta = _sample_effect_site("beta", prior)
         if fit_perturbation_dispersion:
             with guide_plate:
                 guide_dispersion_excess_inverse = numpyro.sample(
-                    "guide_dispersion_excess_inverse", dist.Exponential(perturbation_dispersion_prior_rate)
+                    "guide_dispersion_excess_inverse",
+                    dist.Exponential(perturbation_dispersion_prior_rate),
                 )
-
-    if effect_indices is not None:
-        if fit_perturbation_dispersion:
-            raise ValueError("Pair-restricted effects are not yet compatible with fitted perturbation dispersion.")
-        effect_indices = jnp.asarray(effect_indices, dtype=jnp.int32)
-        with effect_plate:
-            beta_values = _sample_effect_site("beta", prior)
-        # As above, only requested pairs are parameters; materializing the
-        # compact perturbation-by-gene map makes high-MOI dense matmul fast.
-        beta = jnp.zeros((int(num_perts), int(num_genes)), dtype=beta_values.dtype)
-        beta = beta.at[effect_indices[:, 0], effect_indices[:, 1]].set(beta_values)
 
     covariate_coef = None
     if covariates is not None:
@@ -527,52 +512,65 @@ def GuideSharedEffectModel(
             num_cells=full_num_cells,
             name="covariates",
         )
-        size_factor = numpyro.sample("size_factor", dist.Normal(0.0, 2.0), obs=size_factor_obs)
+        cell_mask = _subsample_cell_axis(
+            cell_mask,
+            sampled_cell_idx,
+            num_cells=full_num_cells,
+            name="cell_mask",
+        )
+        if cell_mask is None:
+            cell_mask = jnp.ones((sampled_cell_idx.shape[0], 1), dtype=bool)
+        else:
+            cell_mask = jnp.asarray(cell_mask, dtype=bool).reshape((-1, 1))
 
-        if num_factors is not None:
-            with factor_plate:
-                factor_scores = numpyro.sample("factor_scores", dist.Normal(0, 1.0))
+        with numpyro.handlers.mask(mask=cell_mask):
+            size_factor = numpyro.sample("size_factor", dist.Normal(0.0, 2.0), obs=size_factor_obs)
 
-        guide_effect_matrix = jnp.asarray(guide_matrix, dtype=guide_effect.dtype) @ guide_effect
-        if fit_perturbation_dispersion:
-            effective_theta = jnp.reciprocal(
-                jnp.reciprocal(theta)[None, :] + jnp.asarray(guide_matrix, dtype=theta.dtype) @ guide_dispersion_excess_inverse
-            )
-        mu = beta_0 + guide_effect_matrix + size_factor
-        # Outlier component is a right-shifted baseline mode and does not
-        # depend on guide/element effect beta.
-        mu_outlier = beta_0 + size_factor
-        if covariate_coef is not None and covariates is not None:
-            covariate_contrib = covariates @ covariate_coef
-            mu = mu + covariate_contrib
-            mu_outlier = mu_outlier + covariate_contrib
-        if num_factors is not None:
-            factor_contrib = jnp.einsum("fig,fcj->cg", factor_loadings, factor_scores)
-            mu = mu + factor_contrib
-            mu_outlier = mu_outlier + factor_contrib
-        if guide_random_effect is not None:
-            guide_random_effect_contrib = jnp.asarray(guide_matrix, dtype=guide_random_effect.dtype) @ guide_random_effect
-            mu = mu + guide_random_effect_contrib
-            mu_outlier = mu_outlier + guide_random_effect_contrib
+            if num_factors is not None:
+                with factor_plate:
+                    factor_scores = numpyro.sample("factor_scores", dist.Normal(0, 1.0))
 
-        theta_for_observations = effective_theta if fit_perturbation_dispersion else theta
-        logits = mu - jnp.log(theta_for_observations)
-        logits_outlier = (mu_outlier + outlier_mean_shift) - jnp.log(theta_outlier) if uses_mixture_nb else None
-        if skip_obs_sampling:
-            return None
+            guide_effect_matrix = jnp.asarray(guide_matrix, dtype=guide_effect.dtype) @ guide_effect
+            if fit_perturbation_dispersion:
+                effective_theta = jnp.reciprocal(
+                    jnp.reciprocal(theta)[None, :]
+                    + jnp.asarray(guide_matrix, dtype=theta.dtype) @ guide_dispersion_excess_inverse
+                )
+            mu = beta_0 + guide_effect_matrix + size_factor
+            # Outlier component is a right-shifted baseline mode and does not
+            # depend on guide/element effect beta.
+            mu_outlier = beta_0 + size_factor
+            if covariate_coef is not None and covariates is not None:
+                covariate_contrib = covariates @ covariate_coef
+                mu = mu + covariate_contrib
+                mu_outlier = mu_outlier + covariate_contrib
+            if num_factors is not None:
+                factor_contrib = jnp.einsum("fig,fcj->cg", factor_loadings, factor_scores)
+                mu = mu + factor_contrib
+                mu_outlier = mu_outlier + factor_contrib
+            if guide_random_effect is not None:
+                guide_random_effect_contrib = jnp.asarray(guide_matrix, dtype=guide_random_effect.dtype) @ guide_random_effect
+                mu = mu + guide_random_effect_contrib
+                mu_outlier = mu_outlier + guide_random_effect_contrib
 
-        with gene_plate:
-            return _sample_observations(
-                counts=counts,
-                likelihood=likelihood,
-                logits=logits,
-                theta=theta_for_observations,
-                noise_scale=noise_scale if likelihood in {"lnnb", "lognormal_nb"} else None,
-                logits_outlier=logits_outlier,
-                theta_outlier=theta_outlier if uses_mixture_nb else None,
-                pi_outlier=pi_outlier if uses_mixture_nb else None,
-                count_censoring_threshold=count_censoring_threshold,
-            )
+            theta_for_observations = effective_theta if fit_perturbation_dispersion else theta
+            logits = mu - jnp.log(theta_for_observations)
+            logits_outlier = (mu_outlier + outlier_mean_shift) - jnp.log(theta_outlier) if uses_mixture_nb else None
+            if skip_obs_sampling:
+                return None
+
+            with gene_plate:
+                return _sample_observations(
+                    counts=counts,
+                    likelihood=likelihood,
+                    logits=logits,
+                    theta=theta_for_observations,
+                    noise_scale=noise_scale if likelihood in {"lnnb", "lognormal_nb"} else None,
+                    logits_outlier=logits_outlier,
+                    theta_outlier=theta_outlier if uses_mixture_nb else None,
+                    pi_outlier=pi_outlier if uses_mixture_nb else None,
+                    count_censoring_threshold=count_censoring_threshold,
+                )
 
 
 NegBinModel = partial(BaseModel, likelihood="nb")

@@ -6,7 +6,6 @@ from dataclasses import replace
 
 import anndata as ad
 import perturbo.api as api_module
-import perturbo.core as core_module
 import jax.numpy as jnp
 import numpy as np
 import pandas as pd
@@ -58,58 +57,6 @@ def _make_guide_shared_data() -> PerTurboData:
         guide_names=["guide_a_1", "guide_a_2", "ntc_1"],
         guide_to_element=guide_to_element,
     )
-
-
-def test_stage2_guide_summary_uses_analytic_shared_moments() -> None:
-    data = _make_guide_shared_data()
-    params = {
-        "beta_auto_loc": jnp.array([[1.0, -2.0, 3.0], [4.0, 5.0, -6.0]]),
-        "beta_auto_scale": jnp.array([[0.2, 0.3, 0.4], [0.5, 0.6, 0.7]]),
-    }
-
-    summary = core_module._summarize_stage2_guide_posteriors(
-        params,
-        data=data,
-        guide_effect_strategy="shared",
-    )
-
-    mapping = np.asarray(data.guide_to_element)
-    np.testing.assert_allclose(summary["guide_effect_mean"], mapping @ np.asarray(params["beta_auto_loc"]))
-    np.testing.assert_allclose(
-        summary["guide_effect_scale"],
-        np.sqrt(np.square(mapping) @ np.square(np.asarray(params["beta_auto_scale"]))),
-    )
-
-
-def test_stage2_relative_guide_summary_samples_in_small_guide_blocks(monkeypatch: pytest.MonkeyPatch) -> None:
-    data = _make_guide_shared_data()
-    params = {
-        "beta_auto_loc": jnp.zeros((2, 3)),
-        "beta_auto_scale": jnp.ones((2, 3)),
-        "guide_relative_efficiency_auto_loc": jnp.zeros((3, 3)),
-        "guide_relative_efficiency_auto_scale": jnp.ones((3, 3)),
-    }
-    sample_shapes: list[tuple[int, ...]] = []
-    original_normal = core_module.jax.random.normal
-
-    def record_sample_shape(*args, **kwargs):
-        sample_shapes.append(tuple(kwargs["shape"]))
-        return original_normal(*args, **kwargs)
-
-    monkeypatch.setattr(core_module.jax.random, "normal", record_sample_shape)
-    summary = core_module._summarize_stage2_guide_posteriors(
-        params,
-        data=data,
-        guide_effect_strategy="relative",
-        num_samples=8,
-        guide_block_size=1,
-        element_block_size=1,
-    )
-
-    assert all(shape != (8, 2, 3) for shape in sample_shapes)
-    assert max(shape[1] for shape in sample_shapes if len(shape) == 3) == 1
-    assert summary["guide_effect_mean"].shape == (3, 3)
-    assert np.all(np.isfinite(summary["guide_effect_scale"]))
 
 
 def test_two_stage_fit_with_factors_conditions_loadings() -> None:
@@ -201,32 +148,30 @@ def test_two_stage_fit_with_baseline_uncertainty_marginalization() -> None:
     assert jnp.all(jnp.isfinite(beta_fit.posterior_scale))
 
 
-def test_pair_restricted_fit_has_one_variational_parameter_per_pair() -> None:
+def test_two_stage_fit_estimates_nonnegative_perturbation_dispersion() -> None:
     counts = jnp.array(
-        [[0, 1, 0], [2, 0, 1], [0, 0, 3], [1, 0, 0]],
+        [[0, 1], [2, 0], [0, 3], [4, 0], [1, 2], [3, 0]],
         dtype=jnp.int32,
     )
     data = PerTurboData(
         counts=counts,
-        pert_id=jnp.array([0, 1, 0, 1], dtype=jnp.int32),
+        pert_id=jnp.array([0, 1, 0, 1, 0, 1]),
         pert_names=["ctrl", "pert"],
-        gene_names=["g1", "g2", "g3"],
-        effect_indices=jnp.array([[0, 1], [1, 2]], dtype=jnp.int32),
+        gene_names=["g1", "g2"],
     )
-    control_fit = fit_control(data, num_steps=2, model_name="negbin", minibatch_size=2)
+    control_fit = fit_control(data, num_steps=2, model_name="negbin")
     beta_fit = fit_perturbation_effects(
         data,
         control_fit,
         num_steps=2,
         model_name="negbin",
-        minibatch_size=2,
+        fit_perturbation_dispersion=True,
+        perturbation_dispersion_prior_rate=5.0,
     )
-
-    assert beta_fit.effect_indices.shape == (2, 2)
-    assert int(jnp.isfinite(beta_fit.posterior_mean).sum()) == 2
-    assert int(jnp.isfinite(beta_fit.posterior_scale).sum()) == 2
-    assert jnp.isnan(beta_fit.posterior_mean[0, 0])
-    assert jnp.isfinite(beta_fit.posterior_mean[0, 1])
+    assert beta_fit.dispersion_excess_inverse is not None
+    assert beta_fit.dispersion_excess_inverse.shape == (2, 2)
+    assert jnp.all(jnp.isfinite(beta_fit.dispersion_excess_inverse))
+    assert jnp.all(beta_fit.dispersion_excess_inverse >= 0.0)
 
 
 def test_two_stage_fit_supports_mixture_nb() -> None:
@@ -422,6 +367,61 @@ def test_chunked_fit_forwards_guide_random_effects() -> None:
     assert np.all(np.isfinite(np.asarray(beta_fit.posterior_scale)))
 
 
+def test_chunked_fit_pads_chunks_and_reuses_the_full_batch_runner(monkeypatch) -> None:
+    """Low-MOI chunks share one padded full-batch executable within a fit."""
+    import perturbo.core as core
+
+    counts = jnp.array(
+        [
+            [0, 1],
+            [1, 0],
+            [0, 2],
+            [2, 0],
+            [1, 1],
+            [0, 1],
+            [3, 0],
+            [1, 2],
+            [0, 0],
+        ],
+        dtype=jnp.int32,
+    )
+    data = PerTurboData(
+        counts=counts,
+        pert_id=jnp.array([0, 0, 1, 1, 1, 1, 2, 2, 2]),
+        pert_names=["pert_a", "pert_b", "pert_c"],
+        gene_names=["g1", "g2"],
+    )
+    control_fit = fit_control(data, num_steps=1, prior="normal", model_name="negbin")
+
+    observed: list[tuple[tuple[int, ...], int, int]] = []
+    original_run_svi = core._run_svi
+
+    def capture_run_svi(*args, **kwargs):
+        observed.append(
+            (
+                tuple(args[3].shape),
+                int(np.asarray(kwargs["cell_mask"]).sum()),
+                id(kwargs["reusable_runner"]),
+            )
+        )
+        return original_run_svi(*args, **kwargs)
+
+    monkeypatch.setattr(core, "_run_svi", capture_run_svi)
+    beta_fit = core._fit_perturbation_effects_chunked(
+        data,
+        control_fit,
+        num_steps=1,
+        prior="normal",
+        model_name="negbin",
+        max_perturbations_per_chunk=1,
+    )
+
+    assert beta_fit.posterior_mean.shape == (3, 2)
+    assert [shape for shape, _, _ in observed] == [(4, 2), (4, 2), (4, 2)]
+    assert [active_cells for _, active_cells, _ in observed] == [2, 4, 3]
+    assert len({runner_id for _, _, runner_id in observed}) == 1
+
+
 def test_stage2_guide_random_effects_fallback_inflates_scale_without_mapping() -> None:
     counts = jnp.array(
         [
@@ -531,6 +531,18 @@ def test_two_stage_fit_supports_relative_guide_sharing() -> None:
     assert beta_fit.guide_effect_mean.shape == (3, data.counts.shape[1])
     assert beta_fit.guide_relative_efficiency_mean is not None
     assert beta_fit.guide_relative_efficiency_mean.shape == (3, data.counts.shape[1])
+
+
+def test_two_stage_fit_estimates_guide_specific_perturbation_dispersion() -> None:
+    data = _make_guide_shared_data()
+    control_fit = fit_control(data, num_steps=1, prior="normal", model_name="negbin")
+    beta_fit = fit_perturbation_effects(
+        data, control_fit, num_steps=1, prior="normal", model_name="negbin",
+        fit_perturbation_dispersion=True,
+    )
+    assert beta_fit.guide_dispersion_excess_inverse is not None
+    assert beta_fit.guide_dispersion_excess_inverse.shape == (3, data.counts.shape[1])
+    assert jnp.all(beta_fit.guide_dispersion_excess_inverse >= 0)
 
 
 def test_two_stage_fit_rejects_offset_guide_sharing() -> None:

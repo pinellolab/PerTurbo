@@ -229,21 +229,6 @@ def test_load_controls_high_moi_defaults_to_all_rows() -> None:
     assert controls.pert_names == ["pertA", "pertB", "pertC"]
 
 
-def test_load_controls_can_discard_unused_high_moi_design() -> None:
-    data = _make_mudata()
-    controls = load_controls(
-        data,
-        perturbation_key=None,
-        control_selector=None,
-        modality_key="rna",
-        perturbation_modality_key="pert",
-        retain_perturbation_design=False,
-    )
-    assert controls.pert_id.shape == (4,)
-    assert np.array_equal(np.asarray(controls.pert_id), np.zeros(4, dtype=np.int32))
-    assert controls.pert_names == ["control"]
-
-
 def test_load_analysis_cells_high_moi_subset_filters_cells() -> None:
     data = _make_mudata()
     analysis_data = load_analysis_cells(
@@ -272,30 +257,6 @@ def test_load_analysis_cells_high_moi_subset_filters_cells() -> None:
             [
                 [2, 0, 1],
                 [0, 0, 3],
-            ],
-            dtype=np.int32,
-        ),
-    )
-
-
-def test_load_analysis_cells_subsets_gene_union_before_jax_transfer() -> None:
-    data = _make_mudata()
-    analysis_data = load_analysis_cells(
-        data,
-        perturbation_key=None,
-        modality_key="rna",
-        perturbation_modality_key="pert",
-        selected_perturbations=["pertA"],
-        selected_genes=["g3", "g1"],
-    )
-    assert analysis_data.gene_names == ["g3", "g1"]
-    assert analysis_data.counts.shape == (2, 2)
-    assert np.array_equal(
-        np.asarray(analysis_data.counts),
-        np.array(
-            [
-                [1, 2],
-                [3, 0],
             ],
             dtype=np.int32,
         ),
