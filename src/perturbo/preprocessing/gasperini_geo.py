@@ -236,7 +236,6 @@ def plot_gasperini_element_gene_histogram(
     ``element_name``.
     """
     import matplotlib.pyplot as plt
-    import seaborn as sns
 
     background_frame, guide_frame = _build_gasperini_element_gene_histogram_frames(
         mdata,
@@ -252,26 +251,30 @@ def plot_gasperini_element_gene_histogram(
     if ax is None:
         _, ax = plt.subplots(figsize=(7, 4))
 
-    sns.histplot(
-        data=background_frame,
-        x="count",
-        stat="density",
+    # Plain matplotlib rather than seaborn: this is the only plot in the shipped
+    # package, and a lazily imported dependency that a fresh install does not have
+    # is a function that raises the first time somebody calls it.
+    counts = background_frame["count"].to_numpy()
+    bins = np.histogram_bin_edges(counts, bins="auto")
+    ax.hist(
+        counts,
+        bins=bins,
+        density=True,
         color="0.75",
         alpha=0.5,
-        edgecolor=None,
         label=f"random cells (n={len(background_frame)})",
-        ax=ax,
     )
-    sns.histplot(
-        data=guide_frame,
-        x="count",
-        hue="guide",
-        stat="density",
-        common_norm=False,
-        element="step",
-        fill=False,
-        ax=ax,
-    )
+    # Each guide is normalised on its own, as seaborn's common_norm=False did.
+    for guide, frame in guide_frame.groupby("guide", sort=True):
+        ax.hist(
+            frame["count"].to_numpy(),
+            bins=bins,
+            density=True,
+            histtype="step",
+            fill=False,
+            label=str(guide),
+        )
+    ax.legend(fontsize="small")
     ax.set_xlabel(f"{gene_id} count")
     ax.set_ylabel("Density")
     ax.set_title(f"{element_name}: {gene_id}")
