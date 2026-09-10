@@ -54,21 +54,47 @@ perturbo --input screen.h5mu --out-dir perturbo_outputs/run --modality-key rna \
   --perturbation-modality-key grna --perturbation-element-varm-key element_targeted
 ```
 
-For a CIS-only or otherwise preselected analysis, pass a CSV, TSV, or Parquet
-table whose required columns are `element` and `gene`:
+### The conditional randomization test
+
+`--crt` adds a conditional randomization test alongside the Bayesian effect
+estimates. It asks whether a gene's expression differs by more than it would had
+the guide landed in a different set of cells with the same covariates, and it
+evaluates that null in closed form rather than by resampling, so a genome-scale
+screen can be tested against every gene:
 
 ```bash
-perturbo --input screen.h5mu --out-dir perturbo_outputs/cis --modality-key rna \
+perturbo --input screen.h5mu --out-dir perturbo_outputs/run --modality-key rna \
   --perturbation-modality-key grna --perturbation-element-varm-key element_targeted \
-  --pairs-to-test cis_pairs.parquet --minibatch-size-betas 1024
+  --crt --crt-mechanism propensity --crt-tail-families saddlepoint \
+  --crt-saddlepoint-only --crt-polish-baseline
 ```
 
-Only those exact coefficients are sampled; the pair list is not expanded to
-an element-by-gene Cartesian product. PerTurbo subsets the RNA genes and
-perturbation elements to the pair-list union before transfer to JAX. A beta
-minibatch uses one global compiled fit by default. Use
-`--perturbation-chunk-size` explicitly only when the full design does not fit
-in device memory, since each distinct chunk shape can require compilation.
+Add `--crt-only` to stop after the test and skip the effect estimates, which is
+the cheaper path for calibration checks and power calculations. The test serves
+both screen designs: with one perturbation per cell each target is tested inside
+the control pool plus its own cells, and with many perturbations per cell each
+element is tested as a marginal association over all cells. See
+`docs/crt_quickstart.md`.
+
+### Reporting a subset of pairs
+
+A cis window, or any other preselected pair set, is a question about the
+multiple-testing family rather than about the fit: the estimates and p-values for
+a pair do not depend on which other pairs were requested. Pass a CSV, TSV or
+Parquet table with columns `element` and `gene`:
+
+```bash
+perturbo --input screen.h5mu --out-dir perturbo_outputs/run --modality-key rna \
+  --perturbation-modality-key grna --perturbation-element-varm-key element_targeted \
+  --pairs-to-test cis_pairs.parquet
+```
+
+The run is unchanged; every pair is still fitted and tested. Beside
+`element_effects.parquet` PerTurbo writes `element_effects_requested_pairs.parquet`,
+holding the requested rows with Benjamini-Hochberg recomputed within that set. One
+run therefore yields both a cis-scale comparison and the transcriptome-wide
+analysis. In PerTurbo 2.0 this flag restricted the fit itself; it no longer does,
+and the command line says so at startup.
 
 The main Python entry points are `PERTURBO` / `PerTurboModel`, `fit_from_path`,
 `setup_mudata`, `fit_control`, `fit_perturbation_effects`, and the posterior
@@ -98,6 +124,10 @@ uv run pytest
 uv build
 ```
 
-The v2 production source was ported from Cortado commit `efc923e`. The Cortado
-repository remains the home for experiments, benchmarks, notebooks, apps, and
-paper analyses.
+The v2 production source is ported from the Cortado repository, which remains the
+home for experiments, benchmarks, notebooks, apps and paper analyses. What ships
+here is the analysis package: the models, the two-stage fit, the conditional
+randomization test, the result tables, preprocessing and the simulation entry
+points. The benchmark harness, the evaluation scorers, the Streamlit applications
+and the research diagnostics stay in Cortado, which is why a default install needs
+neither statsmodels nor scikit-learn.
