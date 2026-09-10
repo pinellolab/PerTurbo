@@ -36,16 +36,27 @@ computed the way `bin/merge_sceptre_chunk_results.py` computes SCEPTRE's:
 the table, leaving the rest missing. `tests/test_pairs_to_test_tables.py` asserts
 the two agree to 1e-12, missing-value handling included.
 
-## What the pipeline should change
+## What changed in the pipeline (branch `perturbo-v2-single-run`)
 
-1. Delete the cis PerTurbo process. One `inference_perturbo` process remains.
-2. Point the container at the new image.
-3. In `perturbo_v2_pipeline_adapter.py`, keep writing the pairs file and keep passing
-   it, but read the restricted table from the run's output instead of launching a
-   second fit. The two fits that remain are the element fit and the guide fit, which
-   differ in their guide map and are both still required: the per-guide table comes
-   from a fit in which each guide is its own unit, not from a derived summary.
-4. `--test-all-pairs` becomes the only behaviour of the fit itself.
+1. The cis-only `inference_perturbo` run and the separate `inference_perturbo_global`
+   process are replaced by one `inference_perturbo` process on `concat_mudata`. It
+   takes the prepared inference input as a second file, for its `pairs_to_test`, and
+   emits the local and the global per-element and per-guide tables together.
+2. `perturbo_v2_pipeline_adapter.py` makes one invocation (still an element fit and a
+   guide-identity fit, in parallel when configured), passes the requested pairs
+   through `--pairs-to-test`, and writes the global tables from
+   `element_effects.parquet` and the local ones from
+   `element_effects_requested_pairs.parquet`.
+3. The conditional randomization test runs beside the effect estimates
+   (`INFERENCE_PERTURBO_CRT`, default true). Its saddlepoint p-value becomes
+   `perturbo_p_value`; the posterior probability is kept as
+   `perturbo_posterior_prob`.
+4. Which cells a perturbation is tested against follows the pipeline's own
+   `Multiplicity_of_infection` setting (`INFERENCE_PERTURBO_CRT_POOL = from-moi`:
+   `high` is every cell, `low` the pure control cells plus the perturbation's own),
+   so the decision lives in IGVF's configuration and changes there if it changes.
+   `auto` lets PerTurbo measure the design; a pool can also be named outright.
+5. The container is `ghcr.io/pinellolab/perturbo:v2.0.0rc1`.
 
 ## Effect sizes and their uncertainty
 
