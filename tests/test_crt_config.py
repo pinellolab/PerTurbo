@@ -52,7 +52,6 @@ def test_latent_size_factors_are_rejected_with_the_reason_and_the_remedy() -> No
         ({"likelihood": "censored_nb"}, "likelihood"),
         ({"num_factors": 5}, "num_factors"),
         ({"guide_random_effects": True}, "guide_random_effects"),
-        ({"retain_guide_structure": True}, "one perturbation assignment per cell"),
     ],
 )
 def test_unsupported_options_are_rejected(kwargs: dict, expected: str) -> None:
@@ -73,7 +72,13 @@ def test_every_problem_is_reported_at_once() -> None:
             retain_guide_structure=True,
         )
     message = str(excinfo.value)
-    assert message.count("  - ") == 5
+    assert message.count("  - ") == 4
+
+
+def test_an_element_map_is_accepted_by_the_control_anchored_test() -> None:
+    """Guide-structured designs are collapsed to elements and cells carrying more than
+    one are set aside, so the map is no longer a configuration problem."""
+    validate_crt_config(**{**SUPPORTED, "retain_guide_structure": True})
 
 
 def test_zero_and_none_factors_both_mean_no_factors() -> None:

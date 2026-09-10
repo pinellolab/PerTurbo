@@ -282,7 +282,10 @@ def test_padded_chunk_cells_are_excluded_from_the_control_pool() -> None:
     )
 
 
-def test_multi_assignment_cells_are_rejected() -> None:
+def test_multi_assignment_cells_are_set_aside(capsys) -> None:
+    """A cell carrying two perturbations has no place in a one-label-per-cell null.
+    It is set aside and counted, not reinterpreted and not fatal: a low-MOI screen at
+    a realised MOI a little above one arrives with such cells in every chunk."""
     control_data, chunk_data, theta, _ = _simulate_screen()
     baseline = prepare_crt_baseline(control_data, _fitted_control_fit(control_data, theta))
     matrix = np.zeros((240, 6), dtype=np.int8)
@@ -298,8 +301,14 @@ def test_multi_assignment_cells_are_rejected() -> None:
         covariate_names=chunk_data.covariate_names,
         library_size_center_log_mean=0.0,
     )
-    with pytest.raises(ValueError, match="at most one perturbation assignment per cell"):
-        build_chunk_design(baseline, doubled, control_data=control_data)
+    design = build_chunk_design(baseline, doubled, control_data=control_data)
+    assert design is not None
+    assert "setting aside 1 of 240 chunk cells" in capsys.readouterr().out
+    result = run_crt_for_chunk(
+        baseline, doubled, control_data=control_data, num_resamples=8, seed=0,
+        tail_families=("saddlepoint",), resampling_mechanism="propensity", saddlepoint_only=True,
+    )
+    assert result.num_multi_assignment_cells_dropped == 1
 
 
 def test_the_production_path_matches_the_research_path() -> None:

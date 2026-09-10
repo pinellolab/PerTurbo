@@ -24,10 +24,16 @@ and this project adheres to [Semantic Versioning][].
 -   Both screen designs are served by the same test: one perturbation per cell
     tested inside a pool of control cells, and many perturbations per cell tested
     as marginal associations over all cells (`--crt-pool`). The default `auto`
-    measures the design from the data: a control pool when the median guides per
-    cell is below 3 (`--crt-auto-moi-threshold`) and at least 100 cells carry only
-    control guides (`--crt-auto-min-control-cells`), all cells otherwise. It prints
-    the measurement and the decision; an explicit `--crt-pool` always wins.
+    measures the design from the data: all cells when the median guides per cell
+    exceeds 3 (`--crt-auto-moi-threshold`), the control pool otherwise. It prints
+    the measurement and the decision, reports how many cells carry only control
+    guides, and warns below `--crt-min-control-cells` (1,000) or 1%; an explicit
+    `--crt-pool` always wins.
+-   The control-anchored test accepts a guide-to-element map. The assignment is
+    collapsed to elements, the pool is the cells carrying nothing but control
+    guides, and cells carrying two or more elements are set aside and counted
+    rather than reinterpreted. Previously such designs were refused, which left a
+    low-MOI screen analysed through the pipeline with only the all-cells pool.
 -   `--pairs-to-test` writes `element_effects_requested_pairs.parquet` beside the
     transcriptome-wide table, holding the requested pairs with Benjamini-Hochberg
     recomputed within that family, so one run yields both a preselected-pair

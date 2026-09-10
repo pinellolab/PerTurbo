@@ -1,4 +1,4 @@
-"""Core Cortado model fitting and data-loading routines."""
+"""Core PerTurbo model fitting and data-loading routines."""
 
 from __future__ import annotations
 
@@ -1554,6 +1554,7 @@ def load_controls(
     batch_covariate: str | None = None,
     return_covariate_transform_state: bool = False,
     infer_control_guides: bool = False,
+    only_control_guides: bool = False,
 ) -> PerTurboData | tuple[PerTurboData, CovariateTransformState | None]:
     print("[perturbo] Loading controls...")
     adata = _resolve_adata(data, modality_key)
@@ -1599,7 +1600,20 @@ def load_controls(
             perturbation_modality_key=perturbation_modality_key,
         )
         if control_cols is not None:
-            mask = pert_id[:, control_cols].sum(axis=1) > 0
+            control_cols = np.asarray(control_cols, dtype=bool)
+            has_control = np.asarray(pert_id[:, control_cols].sum(axis=1) > 0).reshape(-1)
+            mask = has_control
+            if only_control_guides:
+                # A control pool for a one-perturbation-per-cell design is the cells
+                # that carry nothing else. A cell with a control guide beside a
+                # targeting one is perturbed, and belongs on the analysed side.
+                carries_other = np.asarray(pert_id[:, ~control_cols].sum(axis=1) > 0).reshape(-1)
+                mask = has_control & ~carries_other
+                print(
+                    f"[perturbo] Control pool: {int(mask.sum())} cells carry only control guides; "
+                    f"{int(np.count_nonzero(has_control & carries_other))} cells carrying a control guide "
+                    "beside a targeting one are treated as perturbed, not as controls."
+                )
             obs_idx = obs_idx[mask]
             pert_id = np.asarray(pert_id)[np.ix_(mask, control_cols)]
             pert_names = [n for n, c in zip(pert_names, control_cols) if c]

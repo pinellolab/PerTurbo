@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import asdict
 import json
+import warnings
 from pathlib import Path
 import time
 from typing import Any
@@ -122,7 +123,7 @@ def main(argv: list[str] | None = None) -> None:
     import argparse
 
     parser = argparse.ArgumentParser(
-        description="Run Cortado end-to-end on an AnnData/MuData file.",
+        description="Run PerTurbo end-to-end on an AnnData/MuData file.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument("--input", required=True, help="Path to .h5ad or .h5mu file")
@@ -265,19 +266,20 @@ def main(argv: list[str] | None = None) -> None:
         type=float,
         default=3.0,
         help=(
-            "With --crt-pool auto, the median guides per cell below which the screen counts as low "
-            "MOI. Default 3: a screen whose constructs carry two guides each still reads as one "
-            "perturbation per cell, while a screen at a true high MOI (tens of guides per cell) does not."
+            "With --crt-pool auto, the screen is high MOI (all-cells pool) when the median guides per "
+            "cell exceeds this, low MOI (control-anchored pool) otherwise. Default 3: a screen whose "
+            "constructs carry two guides each still reads as one perturbation per cell, while a screen "
+            "at a true high MOI (tens of guides per cell) does not."
         ),
     )
     parser.add_argument(
-        "--crt-auto-min-control-cells",
+        "--crt-min-control-cells",
         type=int,
-        default=100,
+        default=1000,
         help=(
-            "With --crt-pool auto, the number of cells carrying nothing but control guides (or no guide) "
-            "needed to count as an identifiable control population. Default 100. In a true high-MOI "
-            "screen every cell carries targeting guides beside its controls, so this population is empty."
+            "Warn when fewer cells than this carry nothing but control guides, or when they are under "
+            "1%% of all cells. The pool choice does not depend on it; a thin control population makes "
+            "the control-anchored null noisy and the all-cells null uninformative. Default 1000."
         ),
     )
     parser.add_argument(
@@ -656,14 +658,10 @@ def main(argv: list[str] | None = None) -> None:
         crt_pool = args.crt_pool
         if crt_pool == "auto":
             # Decide on the design the data actually has, not on how the file was
-            # written. The two pools answer different questions: all-cells tests a
-            # marginal association and keeps every cell, control-anchored contrasts
-            # against unperturbed cells and drops any cell carrying two perturbations.
-            # So a screen is tested against a control pool when cells carry about one
-            # perturbation each *and* there are enough unperturbed cells to be a pool;
-            # otherwise every cell is used. Both thresholds are flags, and an explicit
-            # --crt-pool always wins, so a caller who knows the design records that
-            # choice in their own configuration rather than inheriting ours.
+            # written: high MOI when cells carry more than a few guides each, low MOI
+            # otherwise. The control population does not enter the decision - a thin
+            # one is reported as a warning either way, because it makes the
+            # control-anchored null noisy and the all-cells null uninformative.
             moi = measure_realized_moi(
                 data,
                 perturbation_modality_key=args.perturbation_modality_key,
@@ -674,32 +672,47 @@ def main(argv: list[str] | None = None) -> None:
                 perturbation_element_names_uns_key=args.perturbation_element_names_uns_key,
                 modality_key=args.modality_key,
             )
-            low_moi = moi["median_guides_per_cell"] < args.crt_auto_moi_threshold
-            has_controls = moi["n_control_cells"] >= args.crt_auto_min_control_cells
-            crt_pool = "control-anchored" if (low_moi and has_controls) else "all-cells"
-            reason = (
-                f"median {moi['median_guides_per_cell']:.2f} guides per cell "
-                f"({'<' if low_moi else '>='} {args.crt_auto_moi_threshold:g}), "
-                f"{int(moi['n_control_cells']):,} control-only cells "
-                f"({'>=' if has_controls else '<'} {args.crt_auto_min_control_cells:,})"
-            )
+            high_moi = moi["median_guides_per_cell"] > args.crt_auto_moi_threshold
+            crt_pool = "all-cells" if high_moi else "control-anchored"
             print(
-                f"[perturbo] --crt-pool auto resolved to '{crt_pool}': {reason}. "
-                f"Measured from {moi['source']}; pass --crt-pool to decide explicitly."
+                f"[perturbo] --crt-pool auto resolved to '{crt_pool}': median {moi['median_guides_per_cell']:.2f} "
+                f"guides per cell ({'>' if high_moi else '<='} {args.crt_auto_moi_threshold:g}), measured from "
+                f"{moi['source']}. Pass --crt-pool to decide explicitly."
             )
-            if crt_pool == "all-cells" and args.perturbation_element_varm_key is None:
+            if high_moi and args.perturbation_element_varm_key is None:
                 raise ValueError(
-                    "--crt-pool auto chose the all-cells pool but there is no guide-to-element map to run "
-                    f"it with. The reason was: {reason}. "
-                    + (
-                        "The screen reads as low MOI without an identifiable control population, so "
-                        "check --control-substring against the guide names, or pass --crt-pool "
-                        "control-anchored to test against the controls that were found."
-                        if low_moi
-                        else "The screen reads as high MOI; pass --perturbation-element-varm-key so each "
-                        "element can be tested as a marginal association over all cells."
-                    )
+                    "--crt-pool auto chose the all-cells pool (high MOI) but there is no guide-to-element "
+                    "map to run it with; pass --perturbation-element-varm-key so each element can be tested "
+                    "as a marginal association over all cells, or --crt-pool control-anchored."
                 )
+        else:
+            moi = measure_realized_moi(
+                data,
+                perturbation_modality_key=args.perturbation_modality_key,
+                perturbation_layer=args.perturbation_layer,
+                perturbation_key=args.perturbation_key,
+                control_substring=args.control_substring,
+                perturbation_element_varm_key=args.perturbation_element_varm_key,
+                perturbation_element_names_uns_key=args.perturbation_element_names_uns_key,
+                modality_key=args.modality_key,
+            )
+        n_controls = int(moi["n_control_cells"])
+        control_fraction = n_controls / max(float(moi["n_cells"]), 1.0)
+        print(
+            f"[perturbo] CRT pool '{crt_pool}': {n_controls:,} of {int(moi['n_cells']):,} cells "
+            f"({100 * control_fraction:.2f}%) carry only control guides."
+        )
+        if n_controls < args.crt_min_control_cells or control_fraction < 0.01:
+            warnings.warn(
+                f"Only {n_controls:,} cells ({100 * control_fraction:.2f}%) carry nothing but control guides "
+                f"(threshold {args.crt_min_control_cells:,} cells or 1%). "
+                + (
+                    "The control-anchored null is fit on these cells alone, so it will be noisy."
+                    if crt_pool == "control-anchored"
+                    else "Control elements are the only calibration negatives the all-cells test has."
+                ),
+                stacklevel=1,
+            )
         if crt_pool == "all-cells":
             if args.perturbation_element_varm_key is None:
                 raise ValueError("--crt-pool all-cells needs the guide-to-element map (--perturbation-element-varm-key).")
@@ -885,6 +898,7 @@ def main(argv: list[str] | None = None) -> None:
         batch_covariate=batch_covariate,
         return_covariate_transform_state=True,
         infer_control_guides=bool(args.guide_random_effects and args.perturbation_modality_key is not None),
+        only_control_guides=bool(args.crt and crt_pool == "control-anchored" and args.perturbation_modality_key is not None),
     )
     if isinstance(controls_loaded, tuple):
         controls, covariate_transform_state = controls_loaded
@@ -1365,6 +1379,26 @@ def main(argv: list[str] | None = None) -> None:
         # hypothesis at once, and each chunk was by construction only part of
         # the family.
         crt_columns = crt_accumulator.finalize()
+        if crt_accumulator.num_multi_assignment_cells_dropped:
+            print(
+                f"[perturbo] CRT: {crt_accumulator.num_multi_assignment_cells_dropped:,} analysed cells carried more "
+                "than one perturbation and were set aside by the control-anchored test."
+            )
+        # A small record of how the test was configured and what it measured, so a
+        # pipeline can see which pool ran without parsing the log.
+        crt_metadata = {
+            "pool": crt_pool,
+            "pool_requested": args.crt_pool,
+            "auto_moi_threshold": args.crt_auto_moi_threshold,
+            "min_control_cells_warning": args.crt_min_control_cells,
+            "measured": {key: value for key, value in moi.items()},
+            "mechanism": args.crt_mechanism,
+            "tail_families": list(args.crt_tail_families),
+            "saddlepoint_only": bool(args.crt_saddlepoint_only),
+            "two_sided": args.crt_two_sided,
+            "multi_assignment_cells_set_aside": int(crt_accumulator.num_multi_assignment_cells_dropped),
+        }
+        (out_dir / "crt_metadata.json").write_text(json.dumps(crt_metadata, indent=2, default=str))
         tested = int(crt_accumulator.tested.sum())
         primary = (
             f"crt_{CRT_SADDLEPOINT_FAMILY}_p_value" if args.crt_saddlepoint_only else "crt_p_value"
@@ -1559,6 +1593,7 @@ def main(argv: list[str] | None = None) -> None:
                 "perturbation_element_varm_key": args.perturbation_element_varm_key,
                 "perturbation_element_names_uns_key": args.perturbation_element_names_uns_key,
                 "control_substring": args.control_substring,
+                "crt_pool": (crt_pool if args.crt else None),
                 "batch_covariate": batch_covariate,
                 "size_factor_key": size_factor_key_for_loading,
                 "library_size_key": library_size_key_for_loading,

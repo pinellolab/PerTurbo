@@ -3,7 +3,7 @@
 This is the user-facing guide to perturbo's conditional randomization test
 (CRT). It covers what the test is, which of its two designs applies to a
 screen, the commands, the outputs, and the limits worth knowing before
-reading a p-value. The research notes under `docs/research/` in the Cortado research repository hold the
+reading a p-value. The research notes under `docs/research/` in the PerTurbo research repository hold the
 derivations and the calibration record - its `README.md` indexes
 them, `14_saddlepoint_crt_exposition.md` is the method write-up and
 `15_run_ledger.md` the list of runs; `AGENTS.md` holds the implementation map.
@@ -54,32 +54,47 @@ gene's elements into most cells will mislead it.
 ### Letting the data choose: `--crt-pool auto`
 
 The default, `auto`, measures the design instead of inferring it from how the
-file was written. A screen is tested against a control pool when both hold:
-
-- the median number of guides per cell is below `--crt-auto-moi-threshold`
-  (default 3, so a screen whose constructs carry two guides each still reads as
-  one perturbation per cell, while a true high-MOI screen at tens of guides per
-  cell does not);
-- at least `--crt-auto-min-control-cells` cells (default 100) carry nothing but
-  control guides, so a control population exists to anchor to.
-
-Otherwise every cell is used. An AnnData input has one label per cell and is
-low MOI by construction. The command line prints the measurement and the
+file was written: the screen is high MOI, and every cell is used, when the
+median number of guides per cell exceeds `--crt-auto-moi-threshold` (default
+3, so a screen whose constructs carry two guides each still reads as one
+perturbation per cell); otherwise it is low MOI and each perturbation is
+tested against the control pool. An AnnData input has one label per cell and
+is low MOI by construction. The command line prints the measurement and the
 decision, and an explicit `--crt-pool` always wins, so a pipeline that has
-already decided its design should say so rather than let the measurement decide.
+already decided its design should say so rather than let the measurement
+decide.
 
-Both conditions are needed. Measured on the screens this package has been run
-on (`docs/crt_pool_auto_litmus.csv`), the Gasperini screens keep
-a few hundred cells that happen to carry only non-targeting guides, so the
-control count alone would not exclude them; the guide count does:
+Whichever pool is chosen, the run reports how many cells carry nothing but
+control guides and warns when they are fewer than `--crt-min-control-cells`
+(default 1,000) or under 1% of all cells: a thin control population makes
+the control-anchored null noisy and leaves the all-cells test few
+calibration negatives.
+
+Measured on the screens this package has been run on
+(`docs/crt_pool_auto_litmus.csv`):
 
 | screen | median guides per cell | control-only cells | `auto` |
 |---|---|---|---|
 | Replogle K562 essential, IGVF pipeline reprocessing | 1 | 10,176 | control-anchored |
 | Replogle K562 essential, released matrix | 1 | 10,691 | control-anchored |
+| Hon lab WTC11 TF screen, IGVF pipeline processing | 1-2 | 2,302 | control-anchored |
 | Gasperini pilot | 15 | 462 | all-cells |
 | Gasperini at-scale, released matrix | 28 | 1,527 | all-cells |
 | Gasperini at-scale, IGVF pipeline processing | 14 | 415 | all-cells |
+
+### Element maps on the control-anchored pool
+
+A low-MOI screen usually arrives with a guide-to-element map, since that is
+how the pipeline groups guides. The control-anchored test collapses each
+cell's assignment to elements, takes as its pool the cells that carry
+nothing but control guides (a cell with a control guide beside a targeting
+one is perturbed, and is analysed as such), and sets aside any cell that
+carries two or more elements rather than reinterpret it: the null resamples
+one label per cell. The run prints the count set aside. On a screen at a
+realised MOI well above one this can be a large share of the cells, and
+`--crt-pool all-cells` is the test that keeps them, at the cost of testing
+each element as a marginal association over every cell. The Bayesian effect
+estimates use every analysed cell in either case.
 
 
 ## Commands
@@ -163,7 +178,7 @@ Flags worth knowing:
   equally and, on the benchmark, matches SCEPTRE on up-regulation and beats it
   by 1-6 points on knockdowns. Results recorded before 7 September 2026 used
   the symmetric convention; the run ledger
-  (`docs/research/15_run_ledger.md` in the Cortado repository) marks each run either way.
+  (`docs/research/15_run_ledger.md` in the research repository) marks each run either way.
 - A batch covariate on its own (`--batch-covariate`, with no continuous
   covariates) takes a categorical kernel rather than the dense nuisance
   design: the batch codes are kept, the kernel fits its per-batch intercepts at

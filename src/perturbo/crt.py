@@ -213,13 +213,12 @@ def validate_crt_config(
             "design the score test projects out. Re-run without --guide-random-effects."
         )
 
-    if retain_guide_structure:
-        problems.append(
-            "Guide-structured (element) designs are not supported by the low-MOI CRT, which "
-            "requires at most one perturbation assignment per cell. The high-MOI score test is a "
-            "different null and is not yet lifted over. Re-run without "
-            "--perturbation-element-varm-key."
-        )
+    # A guide-to-element map is fine for the control-anchored test: the chunk's
+    # assignment matrix is collapsed to elements, and a cell that then carries more
+    # than one element is set aside (counted and reported) rather than reinterpreted,
+    # because the null needs one assignment per cell. `retain_guide_structure` is
+    # accepted for that reason and no longer refused.
+    del retain_guide_structure
 
     if problems:
         raise ValueError(
@@ -774,16 +773,22 @@ def build_chunk_design(
     chunk_labels = np.asarray(chunk_data.pert_id)
     if chunk_labels.ndim == 2:
         assignments = np.asarray(chunk_labels > 0).sum(axis=1)
-        if np.any(assignments > 1):
-            raise ValueError(
-                "The low-MOI CRT requires at most one perturbation assignment per cell; "
-                f"{int(np.count_nonzero(assignments > 1))} chunk cells carry more than one."
+        num_multi_dropped = int(np.count_nonzero(assignments > 1))
+        if num_multi_dropped:
+            # The control-anchored null resamples one label per cell, so a cell with
+            # two perturbations has no place in it. It is set aside, not split or
+            # reassigned; the all-cells pool is the test that keeps such cells.
+            print(
+                f"[perturbo] CRT: setting aside {num_multi_dropped} of {num_chunk} chunk cells that carry "
+                "more than one perturbation; the control-anchored test needs one per cell "
+                "(--crt-pool all-cells keeps them)."
             )
         codes = np.where(assignments == 1, np.argmax(np.asarray(chunk_labels > 0), axis=1), -1)
-        unassigned = assignments == 0
+        unassigned = assignments != 1
     elif chunk_labels.ndim == 1:
         codes = chunk_labels.astype(np.int64)
         unassigned = np.zeros(num_chunk, dtype=bool)
+        num_multi_dropped = 0
     else:
         raise ValueError("chunk_data.pert_id must be a label vector or an assignment matrix.")
 
@@ -912,6 +917,9 @@ class ChunkCRTResult:
     null_summaries: dict[str, np.ndarray]
     resampling_mechanism: str = "permutation"
     saddlepoint_only: bool = False
+    # Cells the control-anchored test set aside because they carried more than one
+    # perturbation; zero on the all-cells pool and on label-vector inputs.
+    num_multi_assignment_cells_dropped: int = 0
 
 
 def _categorical_batch_applies(design) -> bool:
@@ -969,6 +977,18 @@ def run_crt_for_chunk(
     once, and a chunk is by construction only part of the family, so the
     correction belongs to whoever concatenates the chunks.
     """
+
+    # Counted here, on the chunk as it arrives, so the result can report how many
+
+    # cells the control-anchored test set aside; the design builder prints it.
+
+    _labels = np.asarray(chunk_data.pert_id)
+
+    num_multi_dropped = (
+
+        int(np.count_nonzero(np.asarray(_labels > 0).sum(axis=1) > 1)) if _labels.ndim == 2 else 0
+
+    )
 
     design = build_chunk_design(baseline, chunk_data, control_data=control_data)
     categorical_batch = design.batch_codes is not None and _categorical_batch_applies(design)
@@ -1121,6 +1141,7 @@ def run_crt_for_chunk(
         num_resamples=num_resamples,
         parametric=parametric,
         null_summaries=null_summaries,
+        num_multi_assignment_cells_dropped=num_multi_dropped,
         resampling_mechanism=resampling_mechanism,
         saddlepoint_only=saddlepoint_only,
     )
@@ -1423,6 +1444,7 @@ class CRTAccumulator:
     def __post_init__(self) -> None:
         shape = (len(self.element_names), len(self.gene_names))
         self._index = {name: position for position, name in enumerate(self.element_names)}
+        self.num_multi_assignment_cells_dropped = 0
         self.observed_score = np.full(shape, np.nan, dtype=np.float64)
         self.p_value = np.full(shape, np.nan, dtype=np.float64)
         self.null_converged = np.zeros(shape, dtype=bool)
@@ -1446,6 +1468,7 @@ class CRTAccumulator:
         if unknown:
             raise ValueError(f"Chunk reported elements absent from the screen: {unknown[:5]}")
         rows = np.asarray([self._index[name] for name in result.target_names])
+        self.num_multi_assignment_cells_dropped += int(getattr(result, "num_multi_assignment_cells_dropped", 0))
         self.observed_score[rows] = result.observed_score
         self.p_value[rows] = result.p_value
         self.null_converged[rows] = result.null_converged

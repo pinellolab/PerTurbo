@@ -64,13 +64,27 @@ The CRT has two pools and the choice is a flag, `--crt-pool`:
   cell, with the null fit on all cells. It needs the guide-to-element map and no
   control cells. This is the high-MOI design.
 - `auto` measures the design from the data rather than from how the file was
-  written: the screen is tested against a control pool when the median number of
-  guides per cell is below `--crt-auto-moi-threshold` (default 3, so a dual-guide
-  construct still reads as one perturbation) *and* at least
-  `--crt-auto-min-control-cells` cells (default 100) carry nothing but control
-  guides. Otherwise every cell is used. An AnnData input carries one label per
-  cell and is low MOI by construction. The command line prints the measurement
-  and the decision.
+  written: every cell is used when the median number of guides per cell exceeds
+  `--crt-auto-moi-threshold` (default 3, so a dual-guide construct still reads
+  as one perturbation), the control pool otherwise. An AnnData input carries one
+  label per cell and is low MOI by construction. The command line prints the
+  measurement and the decision, reports how many cells carry only control
+  guides, and warns when they are fewer than `--crt-min-control-cells` (1,000)
+  or under 1% of cells.
+
+With an element map on the control-anchored pool, the assignment is collapsed to
+elements, the pool is the cells that carry nothing but control guides, and a cell
+carrying two or more elements is set aside and counted. On the Hon lab WTC11 TF
+screen as the pipeline processes it (69,647 cells, median 1-2 guides per cell,
+labelled `moi = high` by the pipeline's default), that is half the cells; the
+all-cells pool keeps them at the cost of testing each element over every cell.
+Measured on one A100 40 GB with `--crt-only`: all-cells 6:01 wall and 37 GB of
+host memory for 703,888 pairs (1,907 at q<0.05); control-anchored 2:57 and 10 GB
+for 656,328 pairs (670 at q<0.05, 31,619 cells set aside). The two agree on 580
+pairs at q<0.05 and recover the element's own TF gene as the top hit equally
+often (51% vs 53% of elements). Neither pool is free: one discards cells, the
+other tests a marginal question over every cell. Choose on the design, and let
+the run say which it chose.
 
 The pipeline today runs everything in the high-MOI design, by passing the element
 map, and its own `Multiplicity_of_infection` setting (stored in

@@ -73,9 +73,17 @@ def test_all_cells_pool_refuses_resampling_configurations(tmp_path):
         _run(tmp_path, "--crt-pool", "all-cells", "--crt-mechanism", "permutation", "--crt-tail-families", "skew_normal")
 
 
-def test_control_anchored_pool_on_an_element_design_is_refused(tmp_path):
-    with pytest.raises(ValueError, match="Guide-structured"):
-        _run(tmp_path, "--crt-pool", "control-anchored", "--control-substring", "non-targeting")
+def test_control_anchored_pool_on_an_element_design_sets_aside_multi_element_cells(tmp_path, capsys):
+    """An element map is no longer refused by the control-anchored test. The assignment is
+    collapsed to elements and a cell carrying more than one is set aside, not reinterpreted;
+    on this high-MOI fixture that is most cells, and the run says so."""
+    frame = _run(tmp_path, "--crt-pool", "control-anchored", "--control-substring", "non-targeting")
+    out = capsys.readouterr().out
+    assert "carry only control guides" in out          # the pool is the pure controls
+    assert "more than one perturbation" in out          # and the set-aside count was reported
+    assert "crt_saddlepoint_p_value" in frame.columns
+    tested = frame[np.isfinite(frame["crt_saddlepoint_p_value"])]["element"].unique()
+    assert not any(str(e).startswith("non-targeting") for e in tested)  # controls are the pool, not targets
 
 
 def test_crt_only_skips_stage_two_and_keeps_the_crt_columns(tmp_path):

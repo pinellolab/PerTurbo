@@ -75,10 +75,13 @@ both screen designs, chosen with `--crt-pool`: with one perturbation per cell
 (`control-anchored`) each target is tested inside the control pool plus its own
 cells, and with many perturbations per cell (`all-cells`) each element is tested
 as a marginal association over all cells. The default, `auto`, measures the
-design from the data: a control pool is used when the median guides per cell is
-below 3 and at least 100 cells carry only control guides, and the command line
-prints what it measured and what it chose. Both thresholds are flags. See
-`docs/crt_quickstart.md`.
+design from the data: every cell is used when the median guides per cell
+exceeds 3, the control pool otherwise, and the command line prints what it
+measured and what it chose. Either way it reports how many cells carry only
+control guides and warns when they are fewer than 1,000 or under 1%. A
+low-MOI screen may arrive with a guide-to-element map; the control-anchored
+test collapses the assignment to elements and sets aside cells carrying more
+than one, reporting the count. See `docs/crt_quickstart.md`.
 
 ### Reporting a subset of pairs
 
