@@ -1,4 +1,4 @@
-"""Core PerTurbo model fitting and data-loading routines."""
+"""Core Cortado model fitting and data-loading routines."""
 
 from __future__ import annotations
 
@@ -948,6 +948,85 @@ def _resolve_adata(data, modality_key: str | None):
             raise KeyError(f"modality_key '{modality_key}' not found in MuData.mod. Available modalities: {available}")
         return data.mod[modality_key]
     return data
+
+
+def measure_realized_moi(
+    data,
+    *,
+    perturbation_modality_key: str | None,
+    perturbation_layer: str | None,
+    perturbation_key: str | None = None,
+    control_substring: str | None = None,
+    perturbation_element_varm_key: str | None = None,
+    perturbation_element_names_uns_key: str | None = None,
+    modality_key: str | None = None,
+) -> dict[str, float]:
+    """Guides per cell and the size of the unperturbed pool, as the data has them.
+
+    The two CRT pools suit different designs, and the design is a property of the
+    experiment rather than of how the file was written. This measures it: the median
+    and mean number of perturbations a cell carries, and how many cells carry none or
+    a control label.
+
+    An AnnData input carries one perturbation label per cell, so its multiplicity is
+    one by construction and only the control count has to be counted.
+    """
+    if perturbation_modality_key is None or not hasattr(data, "mod"):
+        # One label per cell, read from the same obs frame the fit itself uses: the
+        # analysed modality's when the input is a MuData, the object's own otherwise.
+        adata = _resolve_adata(data, modality_key) if hasattr(data, "mod") else data
+        n_cells = int(adata.n_obs)
+        controls = 0
+        if perturbation_key is not None and perturbation_key in adata.obs:
+            labels = adata.obs[perturbation_key].astype(str).to_numpy()
+            if control_substring is not None:
+                controls = int(np.sum(np.char.find(labels.astype(str), str(control_substring)) >= 0))
+        return {
+            "median_guides_per_cell": 1.0,
+            "mean_guides_per_cell": 1.0,
+            "n_cells": float(n_cells),
+            "n_control_cells": float(controls),
+            "source": "anndata: one label per cell",
+        }
+
+    pert_adata = _resolve_perturbation_modality(data, perturbation_modality_key)
+    matrix = _get_layer_matrix(pert_adata, perturbation_layer)
+    if hasattr(matrix, "tocsr"):
+        per_cell = np.asarray((matrix > 0).sum(axis=1)).reshape(-1)
+    else:
+        per_cell = np.asarray(np.asarray(matrix) > 0).sum(axis=1).reshape(-1)
+    per_cell = per_cell.astype(np.float64)
+    n_control = int(np.sum(per_cell == 0))
+    if control_substring is not None:
+        # A guide is a control when its own name carries the substring, or when the
+        # element it maps to does: the CLI matches the substring against the per-cell
+        # label, which is the element name whenever an element map is in use.
+        names = np.asarray(_extract_pert_names(pert_adata), dtype=str)
+        is_control_guide = np.char.find(names, str(control_substring)) >= 0
+        if perturbation_element_varm_key is not None and perturbation_element_varm_key in pert_adata.varm:
+            mapping = pert_adata.varm[perturbation_element_varm_key]
+            mapping = mapping.to_numpy() if hasattr(mapping, "to_numpy") else mapping
+            mapping = mapping.toarray() if hasattr(mapping, "toarray") else np.asarray(mapping)
+            element_names = None
+            if perturbation_element_names_uns_key is not None and perturbation_element_names_uns_key in pert_adata.uns:
+                element_names = np.asarray(pert_adata.uns[perturbation_element_names_uns_key], dtype=str)
+            elif hasattr(pert_adata.varm[perturbation_element_varm_key], "columns"):
+                element_names = np.asarray(pert_adata.varm[perturbation_element_varm_key].columns, dtype=str)
+            if element_names is not None and element_names.size == mapping.shape[1]:
+                control_elements = np.char.find(element_names, str(control_substring)) >= 0
+                is_control_guide |= np.asarray(mapping[:, control_elements].sum(axis=1)).reshape(-1) > 0
+        if is_control_guide.any():
+            control_matrix = matrix[:, np.flatnonzero(is_control_guide)]
+            carried = np.asarray((control_matrix > 0).sum(axis=1)).reshape(-1)
+            # A cell counts as a control when everything it carries is a control guide.
+            n_control = int(np.sum((carried > 0) & (carried == per_cell)))
+    return {
+        "median_guides_per_cell": float(np.median(per_cell)),
+        "mean_guides_per_cell": float(np.mean(per_cell)),
+        "n_cells": float(per_cell.size),
+        "n_control_cells": float(n_control),
+        "source": f"mudata: guides per cell from '{perturbation_modality_key}'",
+    }
 
 
 def _resolve_perturbation_modality(data, perturbation_modality_key: str):

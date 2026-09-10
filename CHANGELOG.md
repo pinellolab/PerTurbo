@@ -23,7 +23,11 @@ and this project adheres to [Semantic Versioning][].
     after the test and skips the effect estimates.
 -   Both screen designs are served by the same test: one perturbation per cell
     tested inside a pool of control cells, and many perturbations per cell tested
-    as marginal associations over all cells (`--crt-pool`).
+    as marginal associations over all cells (`--crt-pool`). The default `auto`
+    measures the design from the data: a control pool when the median guides per
+    cell is below 3 (`--crt-auto-moi-threshold`) and at least 100 cells carry only
+    control guides (`--crt-auto-min-control-cells`), all cells otherwise. It prints
+    the measurement and the decision; an explicit `--crt-pool` always wins.
 -   `--pairs-to-test` writes `element_effects_requested_pairs.parquet` beside the
     transcriptome-wide table, holding the requested pairs with Benjamini-Hochberg
     recomputed within that family, so one run yields both a preselected-pair

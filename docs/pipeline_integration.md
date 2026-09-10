@@ -52,3 +52,31 @@ the two agree to 1e-12, missing-value handling included.
 Both tables carry `posterior_mean` and `posterior_scale`, the stage-two posterior
 mean and its standard deviation, alongside `z_value` and `posterior_prob`. No
 CRT-based interval is needed for the pipeline's outputs.
+
+## Which cells a perturbation is tested against
+
+The CRT has two pools and the choice is a flag, `--crt-pool`:
+
+- `control-anchored` tests each perturbation inside the control cells plus its own
+  cells, with the null fit on controls. It drops any cell carrying two
+  perturbations. This is the low-MOI design.
+- `all-cells` tests each element as a marginal association over every analysed
+  cell, with the null fit on all cells. It needs the guide-to-element map and no
+  control cells. This is the high-MOI design.
+- `auto` measures the design from the data rather than from how the file was
+  written: the screen is tested against a control pool when the median number of
+  guides per cell is below `--crt-auto-moi-threshold` (default 3, so a dual-guide
+  construct still reads as one perturbation) *and* at least
+  `--crt-auto-min-control-cells` cells (default 100) carry nothing but control
+  guides. Otherwise every cell is used. An AnnData input carries one label per
+  cell and is low MOI by construction. The command line prints the measurement
+  and the decision.
+
+The pipeline today runs everything in the high-MOI design, by passing the element
+map, and its own `Multiplicity_of_infection` setting (stored in
+`guide.uns["moi"]`) never reaches PerTurbo. Preserve that behaviour explicitly
+rather than by accident: the adapter should pass `--crt-pool all-cells` when the
+pipeline's setting is `high` and `--crt-pool control-anchored` when it is `low`,
+so the decision lives in IGVF's configuration and changes there if it changes.
+`auto` is the right default for a user running PerTurbo by hand, not for a
+pipeline that has already decided.

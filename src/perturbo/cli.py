@@ -66,6 +66,7 @@ from .crt import (
     run_crt_for_chunk,
     validate_crt_config,
 )
+from .core import measure_realized_moi
 from .results import (
     build_guide_efficiency_df,
     build_standard_element_effects_df,
@@ -257,6 +258,26 @@ def main(argv: list[str] | None = None) -> None:
             "Stop after stage one and the CRT: skip the stage-two effect fit. The element table "
             "then carries the CRT columns with missing effect estimates. This is the fast path when "
             "only the test is wanted (power calculations, calibration checks)."
+        ),
+    )
+    parser.add_argument(
+        "--crt-auto-moi-threshold",
+        type=float,
+        default=3.0,
+        help=(
+            "With --crt-pool auto, the median guides per cell below which the screen counts as low "
+            "MOI. Default 3: a screen whose constructs carry two guides each still reads as one "
+            "perturbation per cell, while a screen at a true high MOI (tens of guides per cell) does not."
+        ),
+    )
+    parser.add_argument(
+        "--crt-auto-min-control-cells",
+        type=int,
+        default=100,
+        help=(
+            "With --crt-pool auto, the number of cells carrying nothing but control guides (or no guide) "
+            "needed to count as an identifiable control population. Default 100. In a true high-MOI "
+            "screen every cell carries targeting guides beside its controls, so this population is empty."
         ),
     )
     parser.add_argument(
@@ -634,21 +655,51 @@ def main(argv: list[str] | None = None) -> None:
         # run to discover.
         crt_pool = args.crt_pool
         if crt_pool == "auto":
-            # The proxy is the presence of a guide-to-element map, not a measured
-            # multiplicity of infection: nothing here counts guides per cell. Both
-            # pools are valid for a screen whose realised MOI is a little above one,
-            # and they answer different questions - all-cells tests a marginal
-            # association and keeps every cell, control-anchored contrasts against
-            # unperturbed cells and drops any cell carrying two perturbations. A
-            # caller that knows its design should say so with --crt-pool rather than
-            # let this proxy decide, so the choice is recorded in their configuration
-            # and not inferred from ours.
-            crt_pool = "all-cells" if args.perturbation_element_varm_key is not None else "control-anchored"
-            print(
-                f"[perturbo] --crt-pool auto resolved to '{crt_pool}' because the guide-to-element map was "
-                + ("given" if args.perturbation_element_varm_key is not None else "not given")
-                + ". Pass --crt-pool explicitly to choose on the screen's design rather than on this proxy."
+            # Decide on the design the data actually has, not on how the file was
+            # written. The two pools answer different questions: all-cells tests a
+            # marginal association and keeps every cell, control-anchored contrasts
+            # against unperturbed cells and drops any cell carrying two perturbations.
+            # So a screen is tested against a control pool when cells carry about one
+            # perturbation each *and* there are enough unperturbed cells to be a pool;
+            # otherwise every cell is used. Both thresholds are flags, and an explicit
+            # --crt-pool always wins, so a caller who knows the design records that
+            # choice in their own configuration rather than inheriting ours.
+            moi = measure_realized_moi(
+                data,
+                perturbation_modality_key=args.perturbation_modality_key,
+                perturbation_layer=args.perturbation_layer,
+                perturbation_key=args.perturbation_key,
+                control_substring=args.control_substring,
+                perturbation_element_varm_key=args.perturbation_element_varm_key,
+                perturbation_element_names_uns_key=args.perturbation_element_names_uns_key,
+                modality_key=args.modality_key,
             )
+            low_moi = moi["median_guides_per_cell"] < args.crt_auto_moi_threshold
+            has_controls = moi["n_control_cells"] >= args.crt_auto_min_control_cells
+            crt_pool = "control-anchored" if (low_moi and has_controls) else "all-cells"
+            reason = (
+                f"median {moi['median_guides_per_cell']:.2f} guides per cell "
+                f"({'<' if low_moi else '>='} {args.crt_auto_moi_threshold:g}), "
+                f"{int(moi['n_control_cells']):,} control-only cells "
+                f"({'>=' if has_controls else '<'} {args.crt_auto_min_control_cells:,})"
+            )
+            print(
+                f"[perturbo] --crt-pool auto resolved to '{crt_pool}': {reason}. "
+                f"Measured from {moi['source']}; pass --crt-pool to decide explicitly."
+            )
+            if crt_pool == "all-cells" and args.perturbation_element_varm_key is None:
+                raise ValueError(
+                    "--crt-pool auto chose the all-cells pool but there is no guide-to-element map to run "
+                    f"it with. The reason was: {reason}. "
+                    + (
+                        "The screen reads as low MOI without an identifiable control population, so "
+                        "check --control-substring against the guide names, or pass --crt-pool "
+                        "control-anchored to test against the controls that were found."
+                        if low_moi
+                        else "The screen reads as high MOI; pass --perturbation-element-varm-key so each "
+                        "element can be tested as a marginal association over all cells."
+                    )
+                )
         if crt_pool == "all-cells":
             if args.perturbation_element_varm_key is None:
                 raise ValueError("--crt-pool all-cells needs the guide-to-element map (--perturbation-element-varm-key).")

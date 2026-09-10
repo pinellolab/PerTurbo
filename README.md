@@ -71,9 +71,13 @@ perturbo --input screen.h5mu --out-dir perturbo_outputs/run --modality-key rna \
 
 Add `--crt-only` to stop after the test and skip the effect estimates, which is
 the cheaper path for calibration checks and power calculations. The test serves
-both screen designs: with one perturbation per cell each target is tested inside
-the control pool plus its own cells, and with many perturbations per cell each
-element is tested as a marginal association over all cells. See
+both screen designs, chosen with `--crt-pool`: with one perturbation per cell
+(`control-anchored`) each target is tested inside the control pool plus its own
+cells, and with many perturbations per cell (`all-cells`) each element is tested
+as a marginal association over all cells. The default, `auto`, measures the
+design from the data: a control pool is used when the median guides per cell is
+below 3 and at least 100 cells carry only control guides, and the command line
+prints what it measured and what it chose. Both thresholds are flags. See
 `docs/crt_quickstart.md`.
 
 ### Reporting a subset of pairs
