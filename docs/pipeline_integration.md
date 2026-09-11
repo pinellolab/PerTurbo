@@ -36,7 +36,7 @@ computed the way `bin/merge_sceptre_chunk_results.py` computes SCEPTRE's:
 the table, leaving the rest missing. `tests/test_pairs_to_test_tables.py` asserts
 the two agree to 1e-12, missing-value handling included.
 
-## What changed in the pipeline (branch `perturbo-v2-single-run`)
+## What changed in the pipeline (branch `perturbo-v2-single-run-telemetry`)
 
 1. The cis-only `inference_perturbo` run and the separate `inference_perturbo_global`
    process are replaced by one `inference_perturbo` process on `concat_mudata`. It
@@ -51,15 +51,58 @@ the two agree to 1e-12, missing-value handling included.
    (`INFERENCE_PERTURBO_CRT`, default true). Its saddlepoint p-value becomes
    `perturbo_p_value`; the posterior probability is kept as
    `perturbo_posterior_prob`.
-4. Which cells a perturbation is tested against follows the pipeline's own
-   `Multiplicity_of_infection` setting (`INFERENCE_PERTURBO_CRT_POOL = from-moi`:
-   `high` is every cell, `low` the pure control cells plus the perturbation's own),
-   so the decision lives in IGVF's configuration and changes there if it changes.
-   `auto` lets PerTurbo measure the design; a pool can also be named outright.
-5. The container is `ghcr.io/pinellolab/perturbo:v2.0.0rc1`.
+4. Which cells a perturbation is tested against (`INFERENCE_PERTURBO_CRT_POOL =
+   from-moi`) follows one rule, applied identically by the PerTurbo adapter and by
+   the SCEPTRE driver: a screen whose cells each carry at most one perturbation is
+   low-MOI whatever the samplesheet declared, and otherwise the declared
+   `Multiplicity_of_infection` stands. Low means PerTurbo's control-anchored pool
+   and SCEPTRE's `control_group = "nt_cells"`; high means PerTurbo's all-cells pool
+   and SCEPTRE's complement. The rule matters on Replogle-style screens, where the
+   guide assignment yields exactly one construct per cell while the samplesheet says
+   `high`: before it, PerTurbo tested against every cell and SCEPTRE against the
+   complement, and neither used the 10,176 pure control cells. Under a declared low
+   with a few double-assigned cells both methods set those cells aside. `auto` lets
+   PerTurbo measure the design; a pool can also be named outright.
+5. The container is `ghcr.io/pinellolab/perturbo:v2.0.0rc4`. rc1 to rc3 carry a
+   regression in the float32 pin that restarted every variational scale at exp of
+   its value (`svi.get_params` returns constrained values); stage one began 40%
+   above its reference loss and its dispersion posteriors never tightened. Do not
+   compare their effect tables or p-values with rc4's.
 6. Stage two runs at Adam step size 0.01 for 500 steps (`INFERENCE_PERTURBO_STEP_SIZE`,
    `INFERENCE_PERTURBO_NUM_STEPS_BETAS`), the setting a ground-truth sweep showed to
    match 2,500 steps at 0.003; the previous 300 steps at 0.003 under-converged.
+   Stage one runs at the same setting; on the Replogle essential controls it ends
+   within 0.03% of the 2,500-step loss once the pin is fixed.
+7. Both methods condition on the same covariates. `bin/inference_covariates.py`
+   names the set once (the mitochondrial fraction, under whichever name the QC
+   gave it, and the batch); the preparation step copies them into the MuData's
+   top-level `obs`, which SCEPTRE's reader exposes as `colData`, and into the gene
+   modality for PerTurbo. Before this SCEPTRE received no covariates at all,
+   because that frame was empty on the pipeline's own inputs. SCEPTRE drops any
+   factor with fifteen or more levels, so on Replogle's 48 batches it declines the
+   batch term PerTurbo uses; that is SCEPTRE's behaviour to own.
+8. SCEPTRE's low-MOI mode needs its control gRNAs under the reserved label
+   `non-targeting`, so the driver collapses the pipeline's `non-targeting|k`
+   buckets when it takes that mode and drops any requested pair on a bucket
+   (SCEPTRE refuses them as discovery targets; the calibration check is its tool
+   for them). Verified in the pipeline's SCEPTRE image on synthetic screens, with
+   and without double-assigned cells.
+9. PerTurbo tests the control pseudo-elements too (`--crt-test-control-elements`,
+   on by default in the adapter), each against a pool that contains its own cells,
+   so its p-value is conservative. It is what gives the controls-versus-targets
+   evaluation a p-value to score; SCEPTRE never tests control pairs.
+10. The catalogs carry three sets of columns: `sceptre_*` over the requested
+    pairs, `perturbo_cis_*` over the same requested pairs (the like-for-like
+    comparison), and the unprefixed `perturbo_*` over every pair in the screen.
+    Comparing `perturbo_q_value` with `sceptre_q_value` compares a correction
+    over 2.7 million hypotheses with one over 91 thousand.
+11. The evaluation no longer scores blank identifiers as direct-target positives,
+    matches its two classes after dropping untested pairs, and writes
+    `controls_evaluation_summary.txt` with the class counts behind its areas.
+12. The per-chunk MuData writes are gone: PerTurbo's and SCEPTRE's processes emit
+    tables, `mergedResults` reads the base MuData backed, and the patched MuData is
+    one optional final step (`INFERENCE_PERTURBO_WRITE_MUDATA`,
+    `INFERENCE_SCEPTRE_WRITE_MUDATA`).
 
 ## Effect sizes and their uncertainty
 
