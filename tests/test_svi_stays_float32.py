@@ -55,3 +55,47 @@ def test_control_and_effect_parameters_are_float32(tmp_path):
                 if value.dtype.kind == "f" and value.dtype != np.float32 and "loss" not in key:
                     offenders.append(f"{path.name}:{key}:{value.dtype}")
     assert not offenders, "float64 leaked into saved SVI parameters: " + ", ".join(offenders[:8])
+
+
+def test_the_pin_changes_dtypes_and_nothing_else():
+    """The pin must leave every parameter's value where initialisation put it.
+
+    Reading the constrained parameters and handing them back to the optimizer as if
+    they were unconstrained moved every positive scale from s to exp(s): a guide
+    initialised with scale 0.1 restarted at 1.1, the initial loss rose by 40% on the
+    Replogle essential controls and stage one needed thousands of steps to recover.
+    """
+    import jax
+    import jax.numpy as jnp
+    import numpyro
+    import numpyro.distributions as dist
+    from numpyro.infer import SVI, Trace_ELBO
+    from numpyro.infer.autoguide import AutoNormal
+
+    from perturbo.core import _pin_svi_params_float32
+
+    def model(y):
+        mu = numpyro.sample("mu", dist.Normal(0.0, 10.0))
+        theta = numpyro.sample("theta", dist.LogNormal(0.0, 2.0))
+        numpyro.sample("y", dist.Normal(mu, theta), obs=y)
+
+    y = jnp.asarray([1.0, 2.0, 3.0])
+    guide = AutoNormal(model, init_scale=0.1)
+    svi = SVI(model, guide, numpyro.optim.Adam(0.01), Trace_ELBO())
+    state = svi.init(jax.random.PRNGKey(0), y)
+    before = svi.get_params(state)
+    after_state = _pin_svi_params_float32(svi, state)
+    after = svi.get_params(after_state)
+
+    assert set(before) == set(after)
+    for name in before:
+        assert after[name].dtype == jnp.float32, name
+        assert jnp.allclose(jnp.asarray(before[name], jnp.float32), after[name], rtol=1e-6), (
+            name, before[name], after[name]
+        )
+    scales = [after[n] for n in after if n.endswith("_scale")]
+    assert scales and all(float(jnp.max(s)) < 0.2 for s in scales), "scales must stay at their 0.1 initialisation"
+    # and the objective is untouched by the pin
+    loss_before = svi.evaluate(state, y)
+    loss_after = svi.evaluate(after_state, y)
+    assert jnp.allclose(loss_before, loss_after, rtol=1e-4), (loss_before, loss_after)

@@ -614,7 +614,13 @@ def _pin_svi_params_float32(svi: SVI, svi_state):
     right after initialisation, keeps the whole fit in float32; Adam preserves
     the dtype of what it updates.
     """
-    params = svi.get_params(svi_state)
+    # The optimizer holds the *unconstrained* parameters. ``svi.get_params`` would
+    # return them pushed through their constraints (a positive scale comes back as
+    # exp of what the optimizer holds), and feeding those back through
+    # ``optim.init`` would silently move every constrained parameter: an
+    # AutoNormal scale initialised at 0.1 would restart at exp(0.1), ten times too
+    # wide, and the fit would spend its first thousand steps shrinking it back.
+    params = svi.optim.get_params(svi_state.optim_state)
     pinned = {
         name: (jnp.asarray(value, dtype=jnp.float32) if jnp.issubdtype(jnp.asarray(value).dtype, jnp.floating) else value)
         for name, value in params.items()
