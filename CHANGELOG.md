@@ -10,6 +10,13 @@ and this project adheres to [Semantic Versioning][].
 
 ## [Unreleased]
 
+### Fixed
+
+-   The float32 pin read the variational parameters through their constraints and
+    handed them back to the optimizer unconstrained, so every positive scale
+    restarted at exp of its value and stage one began 40% above its reference
+    loss. rc1 and rc2 carry this; the pin now works in the optimizer's own space.
+
 ### Added
 
 -   PerTurbo 2.0 replaces the default implementation with NumPyro/JAX.
