@@ -56,8 +56,8 @@ perturbo --input screen.h5mu --out-dir perturbo_outputs/run --modality-key rna \
 
 ### The conditional randomization test
 
-`--crt` adds a conditional randomization test alongside the Bayesian effect
-estimates. It asks whether a gene's expression differs by more than it would had
+The conditional randomization test runs alongside the Bayesian effect estimates
+by default (`--no-crt` opts out). It asks whether a gene's expression differs by more than it would had
 the guide landed in a different set of cells with the same covariates, and it
 evaluates that null in closed form rather than by resampling, so a genome-scale
 screen can be tested against every gene:

@@ -119,6 +119,27 @@ def _guide_efficacy_for_cli(
     return np.clip(arr.reshape(int(n_guides), -1).mean(axis=1), a_min=0.0, a_max=None).astype(np.float32)
 
 
+def _crt_configuration_problem(args, size_factor_mode) -> str | None:
+    """Why this run cannot carry the CRT, or None when it can.
+
+    The same conditions ``validate_crt_config`` enforces, checked before any
+    fitting so that a default-on test can decline quietly instead of wasting a
+    stage-one fit to discover the conflict.
+    """
+    if args.likelihood not in ("nb", "negbin"):
+        return f"--likelihood {args.likelihood} is not the plain negative binomial the test requires."
+    if size_factor_mode not in ("observed", "none"):
+        return (
+            f"size_factor_mode={size_factor_mode!r} is not supported: the test conditions on a fixed "
+            "offset, and a per-cell offset fit jointly with the effect would depend on the cell's own label."
+        )
+    if args.num_factors:
+        return f"--num-factors {args.num_factors} adds latent factors, which can absorb perturbation signal."
+    if args.guide_random_effects:
+        return "--guide-random-effects adds a per-guide latent outside the nuisance design."
+    return None
+
+
 def main(argv: list[str] | None = None) -> None:
     import argparse
 
@@ -220,12 +241,15 @@ def main(argv: list[str] | None = None) -> None:
     )
     parser.add_argument(
         "--crt",
-        action="store_true",
+        action=argparse.BooleanOptionalAction,
+        default=None,
         help=(
-            "Also run the conditional randomization test against the stage-1 baseline, adding "
-            "crt_p_value/crt_q_value/crt_z_value to element_effects.parquet. Requires "
-            "--size-factor-mode observed (or none), --likelihood nb, --num-factors 0, no "
-            "--guide-random-effects, and one perturbation per cell."
+            "Run the conditional randomization test against the stage-1 baseline, adding "
+            "crt_p_value/crt_q_value/crt_z_value to element_effects.parquet. On by default; "
+            "--no-crt fits the effects alone. It needs --size-factor-mode observed (or none), "
+            "--likelihood nb, --num-factors 0, no --guide-random-effects, and one perturbation "
+            "per cell: left to the default it steps aside with a message when the configuration "
+            "is unsupported, while an explicit --crt reports the problem and stops."
         ),
     )
     parser.add_argument("--crt-num-resamples", type=int, default=999)
@@ -672,8 +696,23 @@ def main(argv: list[str] | None = None) -> None:
     if _is_censored_model_name(args.likelihood) and clip_percentile >= 100.0:
         raise ValueError("--likelihood=censored_nb requires --clip-gene-expression-percentile < 100.")
 
-    if args.crt_only and not args.crt:
-        raise ValueError("--crt-only requires --crt.")
+    if args.crt_only and args.crt is False:
+        raise ValueError("--crt-only cannot be combined with --no-crt.")
+    # Tri-state: True asked for it, False refused it, None is the default. On the
+    # default an unsupported configuration steps aside rather than failing a run
+    # that never mentioned the test; asked for explicitly, it is an error.
+    crt_requested = args.crt is True or bool(args.crt_only)
+    if args.crt is False:
+        args.crt = False
+    else:
+        unsupported = _crt_configuration_problem(args, size_factor_mode)
+        if unsupported is None:
+            args.crt = True
+        elif crt_requested:
+            raise ValueError(unsupported)
+        else:
+            print(f"[perturbo] Skipping the conditional randomization test: {unsupported}")
+            args.crt = False
     if args.crt:
         # Deliberately before any fitting: a CRT run sits behind a full stage-1
         # fit, so surfacing an unsupported flag afterwards would cost a training

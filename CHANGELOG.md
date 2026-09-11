@@ -57,6 +57,11 @@ and this project adheres to [Semantic Versioning][].
     to 500 steps: with the baseline polished onto the null mode the CRT is unchanged
     at any stage-one setting, and the effect fit matches its reference from 500.
 -   The command-line entry point is `perturbo`.
+-   **The conditional randomization test runs by default.** `--no-crt` fits the
+    perturbation effects alone. Left at the default it steps aside with a message
+    when the configuration cannot carry it (a latent size factor, latent factors,
+    guide random effects, a likelihood other than the plain negative binomial);
+    an explicit `--crt` reports the conflict and stops instead.
 -   **`--pairs-to-test` no longer restricts the fit.** It previously sampled effects
     only for the requested pairs; it now selects the rows of a second output table
     while the fit and the test still cover every pair. Callers that relied on the

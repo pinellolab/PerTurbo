@@ -165,8 +165,9 @@ def _run_cli(tmp_path, *extra: str) -> pd.DataFrame:
     return pd.read_parquet(out / "element_effects.parquet")
 
 
-def test_the_crt_columns_are_absent_unless_requested(tmp_path) -> None:
-    frame = _run_cli(tmp_path)
+def test_the_crt_columns_are_absent_only_when_refused(tmp_path) -> None:
+    """The test is on by default now; --no-crt is how a run opts out."""
+    frame = _run_cli(tmp_path, "--no-crt")
     assert not [column for column in frame.columns if column.startswith("crt_")]
 
 
@@ -395,3 +396,21 @@ def test_categorical_batch_path_matches_the_dense_design(tmp_path, monkeypatch) 
     assert np.corrcoef(lp_c[ok], lp_d[ok])[0, 1] > 0.995
     planted = categorical[(categorical.element == "t0") & (categorical.gene == "gene_1")].crt_saddlepoint_p_value.iloc[0]
     assert planted < 1e-4
+
+
+def test_the_crt_runs_by_default(tmp_path) -> None:
+    """It is the point of the tool now, so a plain run carries it."""
+    frame = _run_cli(tmp_path)            # no --crt anywhere
+    assert [column for column in frame.columns if column.startswith("crt_")]
+
+
+def test_an_unsupported_default_steps_aside_but_an_explicit_request_stops(tmp_path, capsys):
+    """Latent factors are incompatible with the test. A run that never asked for it
+    should still fit; a run that asked should hear why it cannot."""
+    frame = _run_cli(tmp_path, "--num-factors", "2")
+    out = capsys.readouterr().out
+    assert "Skipping the conditional randomization test" in out and "latent factors" in out
+    assert not [c for c in frame.columns if c.startswith("crt_")]
+    explicit = tmp_path / "explicit"; explicit.mkdir()
+    with pytest.raises(ValueError, match="latent factors"):
+        _run_cli(explicit, "--num-factors", "2", "--crt")
