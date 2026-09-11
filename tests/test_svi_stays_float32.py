@@ -4,6 +4,7 @@ float64 is enabled at import for the CRT's tails. If it leaked into the SVI
 parameters, every cells-by-genes intermediate of the likelihood would double,
 and a chunk that fits on a 40 GB card would not.
 """
+import shutil
 from pathlib import Path
 
 import anndata as ad
@@ -33,7 +34,12 @@ def test_control_and_effect_parameters_are_float32(tmp_path):
     import jax
     assert jax.config.jax_enable_x64, "the package is expected to enable float64 at import"
     screen = tmp_path / "screen.h5ad"; _write_screen(screen)
+    # The repository pins a fixed pytest temp base, so this directory survives between
+    # runs; inspecting a previous run's parameter bundles would fail on artefacts this
+    # run never wrote.
     out = tmp_path / "out"
+    if out.exists():
+        shutil.rmtree(out)
     fit_from_path(
         str(screen), out_dir=str(out), perturbation_key="pert", control_substring="non-targeting",
         library_size_key="total_umis", size_factor_mode="observed", likelihood="nb",
