@@ -135,3 +135,22 @@ def test_auto_picks_the_control_pool_and_warns_about_a_thin_one(screen, capsys):
     assert meta["pool"] == "control-anchored" and meta["pool_requested"] == "auto"
     assert meta["measured"]["median_guides_per_cell"] == 1.0
     assert meta["multi_assignment_cells_set_aside"] == int((screen["membership"][:, :N_ELEMENTS - 2].sum(axis=1) > 1).sum())
+
+
+def test_control_elements_can_be_tested_too(screen, capsys):
+    """`--crt-test-control-elements` turns the run's own negative controls into tested
+    targets, which is how the pipeline's control evaluation gets p-values to score. They
+    are tested against a pool holding their own cells, so the run says they are
+    conservative rather than pretending otherwise."""
+    root = screen["root"]
+    frame, out_dir = _run(root, "with_controls", "--input", str(root / "screen.h5mu"), "--modality-key", "gene",
+                          "--perturbation-modality-key", "guide", "--perturbation-element-varm-key", "element_map",
+                          "--perturbation-element-names-uns-key", "element_names", "--crt-pool", "control-anchored",
+                          "--crt-test-control-elements")
+    out = capsys.readouterr().out
+    assert "control element(s) as targets too" in out and "conservative" in out
+    tested = frame[np.isfinite(frame["crt_saddlepoint_p_value"])]["element"].astype(str).unique()
+    controls = [e for e in tested if e.startswith("non-targeting")]
+    assert len(controls) == 2, f"both control elements should be tested, got {controls}"
+    meta = json.loads((Path(out_dir) / "crt_metadata.json").read_text())
+    assert meta["tested_control_elements"] is True

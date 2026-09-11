@@ -283,6 +283,17 @@ def main(argv: list[str] | None = None) -> None:
         ),
     )
     parser.add_argument(
+        "--crt-test-control-elements",
+        action="store_true",
+        help=(
+            "Also test the control elements themselves, against the same control pool. They are "
+            "skipped by default because their cells are that pool, so a control element would be "
+            "tested against a set containing itself: the test stays valid but is conservative. "
+            "Turn it on to get p-values for a run's own negative controls as a calibration "
+            "diagnostic; a clean calibration needs controls held out of the pool."
+        ),
+    )
+    parser.add_argument(
         "--crt-pool",
         choices=("auto", "control-anchored", "all-cells"),
         default="auto",
@@ -1001,12 +1012,20 @@ def main(argv: list[str] | None = None) -> None:
             )
             if is_control
         ]
-        testable = exclude_targets(chunk_source, control_names)
-        if testable is None:
-            print("[perturbo] CRT: chunk holds only control elements; nothing to test.")
-            return
-        if control_names:
-            print(f"[perturbo] CRT: skipping {len(control_names)} control element(s) as targets.")
+        if args.crt_test_control_elements:
+            testable = chunk_source
+            if control_names:
+                print(
+                    f"[perturbo] CRT: testing {len(control_names)} control element(s) as targets too; each is"
+                    " tested against a pool that contains its own cells, so its p-value is conservative."
+                )
+        else:
+            testable = exclude_targets(chunk_source, control_names)
+            if testable is None:
+                print("[perturbo] CRT: chunk holds only control elements; nothing to test.")
+                return
+            if control_names:
+                print(f"[perturbo] CRT: skipping {len(control_names)} control element(s) as targets.")
         accumulator.absorb(
             run_crt_for_chunk(
                 crt_baseline,
@@ -1407,6 +1426,7 @@ def main(argv: list[str] | None = None) -> None:
             "mechanism": args.crt_mechanism,
             "tail_families": list(args.crt_tail_families),
             "saddlepoint_only": bool(args.crt_saddlepoint_only),
+            "tested_control_elements": bool(args.crt_test_control_elements),
             "two_sided": args.crt_two_sided,
             "multi_assignment_cells_set_aside": int(crt_accumulator.num_multi_assignment_cells_dropped),
         }

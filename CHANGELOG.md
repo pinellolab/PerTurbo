@@ -34,6 +34,10 @@ and this project adheres to [Semantic Versioning][].
     guides, and cells carrying two or more elements are set aside and counted
     rather than reinterpreted. Previously such designs were refused, which left a
     low-MOI screen analysed through the pipeline with only the all-cells pool.
+-   `--crt-test-control-elements` tests the control elements as targets too, against
+    the same control pool, so a run can score its own negative controls. They are
+    skipped by default because a control element is then tested against a pool
+    holding its own cells, which is valid but conservative.
 -   `--pairs-to-test` writes `element_effects_requested_pairs.parquet` beside the
     transcriptome-wide table, holding the requested pairs with Benjamini-Hochberg
     recomputed within that family, so one run yields both a preselected-pair
