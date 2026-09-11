@@ -299,6 +299,10 @@ def test_cli_saves_model_params_by_default_and_supports_opt_out(monkeypatch, tmp
             "umi_count",
             "--size-factor-mode",
             "observed",
+            # This test stubs the loader, so the fabricated data carries no size
+            # factors and the conditional randomization test cannot run on it. The
+            # contract under test is which files a run writes.
+            "--no-crt",
         ]
     )
 
@@ -330,6 +334,10 @@ def test_cli_saves_model_params_by_default_and_supports_opt_out(monkeypatch, tmp
             "umi_count",
             "--size-factor-mode",
             "observed",
+            # This test stubs the loader, so the fabricated data carries no size
+            # factors and the conditional randomization test cannot run on it. The
+            # contract under test is which files a run writes.
+            "--no-crt",
             "--no-save-model-params",
         ]
     )
