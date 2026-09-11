@@ -46,6 +46,10 @@ and this project adheres to [Semantic Versioning][].
 ### Changed
 
 -   Python 3.11 is now the minimum supported version.
+-   The Adam step size defaults to 0.01 (was 0.003) and stage two to 500 steps
+    (was 2,500). On simulated screens with known effects, 0.003 needed all 2,500
+    steps to converge and 300 steps at that rate left effects 27% shrunk; 0.01
+    with 500 steps matches the converged fit within 2-3%. Stage one keeps 2,500.
 -   The command-line entry point is `perturbo`.
 -   **`--pairs-to-test` no longer restricts the fit.** It previously sampled effects
     only for the requested pairs; it now selects the rows of a second output table

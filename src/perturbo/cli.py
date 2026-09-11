@@ -493,7 +493,16 @@ def main(argv: list[str] | None = None) -> None:
         default=1,
         help="Number of ELBO particles for Monte Carlo integration.",
     )
-    parser.add_argument("--step-size", type=float, default=0.003, help="SVI step size / learning rate")
+    parser.add_argument(
+        "--step-size",
+        type=float,
+        default=0.01,
+        help=(
+            "Adam learning rate for both SVI stages. Adam moves a coefficient by about this much per step, so the "
+            "rate times the step count must exceed the largest effect in nats: 0.01 with 500 beta steps recovers "
+            "simulated effects as well as 0.003 with 2,500, and 0.003 with 300 under-converges."
+        ),
+    )
     parser.add_argument(
         "--num-factors",
         type=int,
@@ -920,7 +929,7 @@ def main(argv: list[str] | None = None) -> None:
         control_epochs=args.num_epochs_control,
         beta_epochs=args.num_epochs_betas,
         default_control_steps=2500,
-        default_beta_steps=2500,
+        default_beta_steps=500,
     )
 
     if args.num_factors < 0:

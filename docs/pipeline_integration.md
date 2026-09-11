@@ -57,6 +57,9 @@ the two agree to 1e-12, missing-value handling included.
    so the decision lives in IGVF's configuration and changes there if it changes.
    `auto` lets PerTurbo measure the design; a pool can also be named outright.
 5. The container is `ghcr.io/pinellolab/perturbo:v2.0.0rc1`.
+6. Stage two runs at Adam step size 0.01 for 500 steps (`INFERENCE_PERTURBO_STEP_SIZE`,
+   `INFERENCE_PERTURBO_NUM_STEPS_BETAS`), the setting a ground-truth sweep showed to
+   match 2,500 steps at 0.003; the previous 300 steps at 0.003 under-converged.
 
 ## Effect sizes and their uncertainty
 
