@@ -28,7 +28,7 @@ Two properties matter for interpretation:
 - The null is fit on the baseline and reused, never refit per pair. Stage one
   of perturbo's two-stage model supplies it; the CRT then moves the nuisance
   coefficients onto the exact null mode by Fisher scoring
-  (`--crt-polish-baseline`, always on for the all-cells design).
+  (`--crt-polish-baseline`, on by default; always on for the all-cells design). The polish is what makes the test insensitive to how long stage one trained: measured on the simulation, the null false-positive rate and the power are unchanged from 100 stage-one steps to 2,500.
 - The statistic is a score test at the null. It is calibrated and matches
   SCEPTRE's power, but a Wald test that refits the alternative (an NB GLM) can
   be two to four points more powerful when many guides of mixed efficacy share

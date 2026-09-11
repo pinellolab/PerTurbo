@@ -251,6 +251,7 @@ def _run_svi(
             skip_obs_sampling=True,
             **static_kwargs,
         )
+        svi_state = _pin_svi_params_float32(svi, svi_state)
     else:
         svi_state = init_state
 
@@ -400,6 +401,7 @@ def _run_svi_minibatch(
             skip_obs_sampling=True,
             **static_kwargs,
         )
+        svi_state = _pin_svi_params_float32(svi, svi_state)
     else:
         svi_state = init_state
 
@@ -599,6 +601,45 @@ _to_dense = to_dense_array
 _compute_gene_outlier_thresholds = compute_gene_clip_thresholds
 _count_gene_outliers_per_cell = count_gene_outliers_per_cell
 _winsorize_counts_to_gene_thresholds = winsorize_counts_to_gene_thresholds
+
+
+def _pin_svi_params_float32(svi: SVI, svi_state):
+    """Rebuild the optimizer state with every floating parameter in float32.
+
+    ``AutoNormal`` initialises its scale parameters with ``jnp.full``, which under
+    the package's float64 setting produces float64 whatever the initial locations
+    are. A float64 scale promotes the reparameterised sample, and with it every
+    cells-by-genes intermediate of the likelihood, to float64: twice the memory
+    of the float32 fit the earlier releases ran. Pinning the parameters once,
+    right after initialisation, keeps the whole fit in float32; Adam preserves
+    the dtype of what it updates.
+    """
+    params = svi.get_params(svi_state)
+    pinned = {
+        name: (jnp.asarray(value, dtype=jnp.float32) if jnp.issubdtype(jnp.asarray(value).dtype, jnp.floating) else value)
+        for name, value in params.items()
+    }
+    # numpyro's SVIState is (optim_state, mutable_state, rng_key); only the
+    # optimizer state carries the parameters.
+    return svi_state._replace(optim_state=svi.optim.init(pinned))
+
+
+def _float32_init_values(values: dict[str, Any]) -> dict[str, Any]:
+    """Pin every floating initial value to float32.
+
+    The package enables float64 at import for the CRT's tails, and under that
+    setting ``jnp.zeros`` and ``jnp.log`` produce float64. The SVI guides take their
+    parameter dtypes from these initial values and the model casts its design
+    matrices to the parameters' dtype, so a float64 initial value doubles every
+    cells-by-genes intermediate of the likelihood. On the Replogle pipeline input
+    (20,000-cell chunks, 21,629 genes) that was the difference between a 40 GB
+    card fitting and running out of memory.
+    """
+    out: dict[str, Any] = {}
+    for name, value in values.items():
+        arr = jnp.asarray(value)
+        out[name] = arr.astype(jnp.float32) if jnp.issubdtype(arr.dtype, jnp.floating) else value
+    return out
 
 
 def _to_jax(x: Any, device: Any | None, dtype: Any | None = None) -> jnp.ndarray:
@@ -1681,7 +1722,7 @@ def load_controls(
         pert_id=_to_jax(pert_id_arr, device_obj, dtype=pert_dtype),
         pert_names=pert_names,
         gene_names=gene_names,
-        size_factors=_to_jax(size_factors, device_obj) if size_factors is not None else None,
+        size_factors=_to_jax(size_factors, device_obj, dtype=jnp.float32) if size_factors is not None else None,
         covariates=covariates,
         covariate_names=covariate_names,
         library_size_center_log_mean=library_size_center_log_mean,
@@ -1854,7 +1895,7 @@ def load_analysis_cells(
         pert_id=_to_jax(pert_id_arr, device_obj, dtype=pert_dtype),
         pert_names=pert_names,
         gene_names=gene_names,
-        size_factors=_to_jax(size_factors, device_obj) if size_factors is not None else None,
+        size_factors=_to_jax(size_factors, device_obj, dtype=jnp.float32) if size_factors is not None else None,
         covariates=covariates,
         covariate_names=covariate_names,
         guide_matrix=_to_jax(guide_matrix, device_obj, dtype=jnp.float32) if guide_matrix is not None else None,
@@ -1961,7 +2002,7 @@ def fit_control(
         init_values["factor_scores"] = factor_scores_init
     if factor_loadings_init is not None:
         init_values["factor_loadings"] = factor_loadings_init
-    init_value_fn = numpyro.infer.init_to_value(values=init_values)
+    init_value_fn = numpyro.infer.init_to_value(values=_float32_init_values(init_values))
     model_cls = _resolve_model(model_name)
     model = numpyro.handlers.condition(
         model_cls,
@@ -2029,6 +2070,9 @@ def fit_control(
     )
     med = guide.median(result.params)
     noise_scale = med.get("noise_scale", noise_scale_init)
+    if noise_scale is not None:
+        # Keep the saved fit in the dtype the likelihood runs in.
+        noise_scale = jnp.asarray(noise_scale, dtype=jnp.float32)
     pi_outlier = med.get("pi_outlier")
     theta_outlier = med.get("theta_outlier")
     outlier_mean_shift = med.get("outlier_mean_shift")
@@ -2402,7 +2446,7 @@ def fit_perturbation_effects(
             )
         if is_lognormal_model:
             init_values["noise_scale"] = control_fit.noise_scale
-        init_value_fn = numpyro.infer.init_to_value(values=init_values)
+        init_value_fn = numpyro.infer.init_to_value(values=_float32_init_values(init_values))
 
         if propagate_baseline_uncertainty:
             if control_fit.baseline_posterior is None:

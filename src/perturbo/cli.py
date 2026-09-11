@@ -347,12 +347,15 @@ def main(argv: list[str] | None = None) -> None:
     )
     parser.add_argument(
         "--crt-polish-baseline",
-        action="store_true",
+        action=argparse.BooleanOptionalAction,
+        default=True,
         help=(
             "Before the CRT, move the stage-1 nuisance coefficients onto the control-cell null "
             "mode by Fisher scoring at the stage-1 dispersion. The resampling null is exact either "
             "way; this restores the efficiency of the score statistic when stage one sits off the "
-            "mode, as it does with a batch covariate."
+            "mode, as it does with a batch covariate, and it is what makes the test insensitive to "
+            "how long stage one trained. On by default; --no-crt-polish-baseline tests the "
+            "stage-one coefficients as they came out of SVI."
         ),
     )
     parser.add_argument("--gene-name-key", default=None, help="Var field for gene names")
