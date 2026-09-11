@@ -71,6 +71,12 @@ and this project adheres to [Semantic Versioning][].
 
 ### Fixed
 
+-   The SVI stages keep their parameters in float32. Enabling float64 at import for
+    the conditional randomization test's tails also promoted the variational
+    parameters, and with them every cells-by-genes intermediate of the likelihood,
+    so a chunk that fitted on a 40 GB card before the port no longer did. Found by
+    an end-to-end pipeline run on 233,000 cells and 21,629 genes.
+
 -   A perturbation with more cells than `--max-chunk-size` no longer aborts the
     run. It takes a chunk of its own, and the run reports which perturbations did
     so and which one sets peak memory. Screens exist with tens of thousands of
