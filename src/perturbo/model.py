@@ -6,7 +6,7 @@ import numpyro
 import numpyro.distributions as dist
 
 from perturbo.log_normal_negative_binomial import LogNormalNegativeBinomial
-from perturbo.plate import plate
+import perturbo.plate  # noqa: F401  installs the subsample-aware plate as numpyro.plate
 
 
 def create_plates(
@@ -41,13 +41,13 @@ def create_plates(
     if num_covariates is None and covariates is not None and getattr(covariates, "ndim", None) == 2:
         num_covariates = int(covariates.shape[1])
     covariate_plate_size = int(num_covariates) if num_covariates is not None and int(num_covariates) > 0 else 1
-    covariate_plate = plate("covariates", covariate_plate_size, dim=-2)
+    covariate_plate = numpyro.plate("covariates", covariate_plate_size, dim=-2)
     return Plates(
-        plate("cells", num_cells, dim=-2, subsample_size=subsample_size, subsample=cell_idx),
-        plate("genes", num_genes, dim=-1),
-        plate("perts", num_perts, dim=-2),
-        plate("guides", int(num_guides) if num_guides is not None and int(num_guides) > 0 else 1, dim=-2),
-        plate("factors", num_factors, dim=-3),
+        numpyro.plate("cells", num_cells, dim=-2, subsample_size=subsample_size, subsample=cell_idx),
+        numpyro.plate("genes", num_genes, dim=-1),
+        numpyro.plate("perts", num_perts, dim=-2),
+        numpyro.plate("guides", int(num_guides) if num_guides is not None and int(num_guides) > 0 else 1, dim=-2),
+        numpyro.plate("factors", num_factors, dim=-3),
         covariate_plate,
     )
 
