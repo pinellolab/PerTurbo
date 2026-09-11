@@ -928,7 +928,7 @@ def main(argv: list[str] | None = None) -> None:
         beta_steps=args.num_steps_betas,
         control_epochs=args.num_epochs_control,
         beta_epochs=args.num_epochs_betas,
-        default_control_steps=2500,
+        default_control_steps=500,
         default_beta_steps=500,
     )
 
