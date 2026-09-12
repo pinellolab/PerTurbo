@@ -771,7 +771,7 @@ def main(argv: list[str] | None = None) -> None:
         help=(
             "Adam learning rate for both SVI stages. Convergence depends on the data, effect sizes, and "
             "minibatch size. Compare longer fits before interpreting effect magnitudes; the default "
-            "500 steps can underestimate strong knockdowns."
+            "simulated effects as well as 0.003 with 2,500, and 0.003 with 300 under-converges."
         ),
     )
     parser.add_argument(
@@ -1279,9 +1279,14 @@ def main(argv: list[str] | None = None) -> None:
     svi_cfg = SVIConfig(step_size=args.step_size, num_particles=args.num_particles)
     minibatch_control = args.minibatch_size_control or args.minibatch_size or None
     minibatch_betas = args.minibatch_size_betas or args.minibatch_size or None
-    if gene_chunk_size is not None and minibatch_betas is None:
-        minibatch_betas = min(1024, int(n_analysis_cells))
-        print(f"[perturbo] Gene blocks use {minibatch_betas} cells per SVI step; override with --minibatch-size-betas.")
+    # Gene blocks are not a reason to minibatch. A block's cells-by-genes
+    # intermediate is the block's width, not the panel's: at 256 genes and
+    # 233,000 cells that is under a quarter of a gigabyte in float32, so a full
+    # batch fits comfortably on the cards this runs on. Minibatching here would
+    # instead silently change the training budget the step-size default was
+    # measured against - 500 steps of 1,024 cells is about two passes over a
+    # screen-sized dataset - and trade a measured convergence rule for a
+    # hyperparameter. Callers who want it still have --minibatch-size-betas.
     schedule = resolve_training_schedule(
         shared_steps=args.num_steps,
         shared_epochs=args.num_epochs,
@@ -1296,10 +1301,16 @@ def main(argv: list[str] | None = None) -> None:
         planned_steps = schedule.resolve_stage_steps(
             stage="beta", num_cells=int(n_analysis_cells), minibatch_size=minibatch_betas,
         )
-        expected_passes = planned_steps * min(int(minibatch_betas), int(n_analysis_cells)) / int(n_analysis_cells)
+        # Full batch unless the caller asked for minibatches, in which case each
+        # step sees a sample and the coverage is worth stating.
+        cells_per_step = int(n_analysis_cells) if minibatch_betas is None else min(
+            int(minibatch_betas), int(n_analysis_cells)
+        )
+        expected_passes = planned_steps * cells_per_step / int(n_analysis_cells)
         print(
-            f"[perturbo] Each gene block: {planned_steps} SVI steps, {expected_passes:.2f} expected cell passes. "
-            "Set --num-epochs-betas to specify training coverage."
+            f"[perturbo] Each gene block: {planned_steps} SVI steps over "
+            f"{'every cell' if minibatch_betas is None else f'{cells_per_step} cells per step'}, "
+            f"{expected_passes:.2f} expected cell passes. Set --num-epochs-betas to specify training coverage."
         )
 
     if args.num_factors < 0:
