@@ -7,6 +7,7 @@ import numpyro.distributions as dist
 
 from perturbo.log_normal_negative_binomial import LogNormalNegativeBinomial
 import perturbo.plate  # noqa: F401  installs the subsample-aware plate as numpyro.plate
+from perturbo.sparse_design import IndexedDesignMatrix, design_matrix_product
 
 
 def create_plates(
@@ -86,6 +87,26 @@ def _subsample_cell_axis(
         return values
     if num_cells is not None and values.shape[0] == num_cells:
         return values[sampled_cell_idx, ...]
+    raise ValueError(
+        f"{name} has incompatible shape {values.shape}; expected leading axis {batch_size} "
+        f"(already subsampled) or {num_cells} (full dataset)."
+    )
+
+
+def _subsample_design_rows(
+    values,
+    sampled_cell_idx: jnp.ndarray,
+    *,
+    num_cells: int | None,
+    name: str,
+):
+    if not isinstance(values, IndexedDesignMatrix):
+        return _subsample_cell_axis(values, sampled_cell_idx, num_cells=num_cells, name=name)
+    batch_size = int(sampled_cell_idx.shape[0])
+    if values.shape[0] == batch_size:
+        return values
+    if num_cells is not None and values.shape[0] == num_cells:
+        return values.take_rows(sampled_cell_idx)
     raise ValueError(
         f"{name} has incompatible shape {values.shape}; expected leading axis {batch_size} "
         f"(already subsampled) or {num_cells} (full dataset)."
@@ -268,7 +289,7 @@ def BaseModel(
 
     with cell_plate as sampled_cell_idx:
         counts = _subsample_cell_axis(counts, sampled_cell_idx, num_cells=full_num_cells, name="counts")
-        pert_id = _subsample_cell_axis(pert_id, sampled_cell_idx, num_cells=full_num_cells, name="pert_id")
+        pert_id = _subsample_design_rows(pert_id, sampled_cell_idx, num_cells=full_num_cells, name="pert_id")
         size_factor_obs = _subsample_cell_axis(
             size_factors,
             sampled_cell_idx,
@@ -281,7 +302,7 @@ def BaseModel(
             num_cells=full_num_cells,
             name="covariates",
         )
-        guide_matrix = _subsample_cell_axis(
+        guide_matrix = _subsample_design_rows(
             guide_matrix,
             sampled_cell_idx,
             num_cells=full_num_cells,
@@ -317,11 +338,11 @@ def BaseModel(
                         jnp.reciprocal(theta)[None, :] + dispersion_excess_inverse[pert_id, :]
                     )
             elif pert_id.ndim == 2:
-                pert_matrix = jnp.asarray(pert_id, dtype=beta.dtype)
-                pert_effect = pert_matrix @ beta
+                pert_effect = design_matrix_product(pert_id, beta)
                 if fit_perturbation_dispersion:
                     effective_theta = jnp.reciprocal(
-                        jnp.reciprocal(theta)[None, :] + pert_matrix @ dispersion_excess_inverse
+                        jnp.reciprocal(theta)[None, :]
+                        + design_matrix_product(pert_id, dispersion_excess_inverse)
                     )
             else:
                 raise ValueError("pert_id must be 1D (indices) or 2D (binary matrix).")
@@ -339,7 +360,7 @@ def BaseModel(
                 mu = mu + factor_contrib
                 mu_outlier = mu_outlier + factor_contrib
             if guide_random_effect is not None and guide_matrix is not None:
-                guide_random_effect_contrib = jnp.asarray(guide_matrix, dtype=guide_random_effect.dtype) @ guide_random_effect
+                guide_random_effect_contrib = design_matrix_product(guide_matrix, guide_random_effect)
                 mu = mu + guide_random_effect_contrib
                 mu_outlier = mu_outlier + guide_random_effect_contrib
 
@@ -494,7 +515,13 @@ def GuideSharedEffectModel(
 
     with cell_plate as sampled_cell_idx:
         counts = _subsample_cell_axis(counts, sampled_cell_idx, num_cells=full_num_cells, name="counts")
-        guide_matrix = _subsample_cell_axis(
+        pert_id = _subsample_design_rows(
+            pert_id,
+            sampled_cell_idx,
+            num_cells=full_num_cells,
+            name="pert_id",
+        )
+        guide_matrix = _subsample_design_rows(
             guide_matrix,
             sampled_cell_idx,
             num_cells=full_num_cells,
@@ -530,11 +557,17 @@ def GuideSharedEffectModel(
                 with factor_plate:
                     factor_scores = numpyro.sample("factor_scores", dist.Normal(0, 1.0))
 
-            guide_effect_matrix = jnp.asarray(guide_matrix, dtype=guide_effect.dtype) @ guide_effect
+            # Shared guide effects are element effects. Use the binary grouped
+            # element design so two guides aimed at the same element do not
+            # duplicate that element's mean contribution.
+            if guide_effect_strategy == "shared":
+                guide_effect_matrix = design_matrix_product(pert_id, beta)
+            else:
+                guide_effect_matrix = design_matrix_product(guide_matrix, guide_effect)
             if fit_perturbation_dispersion:
                 effective_theta = jnp.reciprocal(
                     jnp.reciprocal(theta)[None, :]
-                    + jnp.asarray(guide_matrix, dtype=theta.dtype) @ guide_dispersion_excess_inverse
+                    + design_matrix_product(guide_matrix, guide_dispersion_excess_inverse)
                 )
             mu = beta_0 + guide_effect_matrix + size_factor
             # Outlier component is a right-shifted baseline mode and does not
@@ -549,7 +582,7 @@ def GuideSharedEffectModel(
                 mu = mu + factor_contrib
                 mu_outlier = mu_outlier + factor_contrib
             if guide_random_effect is not None:
-                guide_random_effect_contrib = jnp.asarray(guide_matrix, dtype=guide_random_effect.dtype) @ guide_random_effect
+                guide_random_effect_contrib = design_matrix_product(guide_matrix, guide_random_effect)
                 mu = mu + guide_random_effect_contrib
                 mu_outlier = mu_outlier + guide_random_effect_contrib
 

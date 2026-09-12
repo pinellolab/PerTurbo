@@ -20,6 +20,7 @@ _SETUP_UNS_KEY = "_perturbo_setup"
 # Bundles written by the Cortado prototype carry the old key. They are read and
 # upgraded in memory rather than refused, so existing MuData files keep working.
 _LEGACY_SETUP_UNS_KEY = "_cortado_setup"
+_SAVED_SIZE_FACTOR_KEY = "_perturbo_saved_size_factor"
 
 
 @dataclass
@@ -37,6 +38,8 @@ class MuDataSetup:
     guide_element_uns_key: str | None = None
     gene_name_key: str | None = None
     control_substring: str | None = None
+    size_factor_mode: str | None = None
+    size_factor_provenance: str | None = None
 
     def to_json_dict(self) -> dict[str, Any]:
         payload = asdict(self)
@@ -127,6 +130,8 @@ def setup_mudata(
     control_substring: str | None = None,
     modalities: dict[str, str] | None = None,
     perturbation_layer: str | None = None,
+    size_factor_mode: str | None = None,
+    size_factor_provenance: str | None = None,
 ) -> MuDataSetup:
     """Register MuData metadata for perturbo workflows.
 
@@ -168,6 +173,8 @@ def setup_mudata(
         guide_element_uns_key=guide_element_uns_key,
         gene_name_key=gene_name_key,
         control_substring=control_substring,
+        size_factor_mode=size_factor_mode,
+        size_factor_provenance=size_factor_provenance,
     )
     if setup.control_substring is None:
         setup.control_substring = _infer_control_substring(
@@ -297,6 +304,7 @@ def save_light_fit_bundle(
     beta_arrays: dict[str, Any],
     guide_posteriors: dict[str, Any] | None = None,
     guide_efficacy: np.ndarray | None = None,
+    size_factors: np.ndarray | None = None,
     cell_keep_indices: np.ndarray | None = None,
 ) -> Path:
     bundle_dir = Path(out_dir)
@@ -309,6 +317,10 @@ def save_light_fit_bundle(
         keep = np.asarray(cell_keep_indices, dtype=np.int64).reshape(-1)
         np.save(bundle_dir / "cell_keep_indices.npy", keep)
         payload["cell_keep_indices_file"] = "cell_keep_indices.npy"
+    if size_factors is not None:
+        values = np.asarray(size_factors, dtype=np.float32).reshape(-1, 1)
+        np.save(bundle_dir / "size_factors.npy", values)
+        payload["size_factors_file"] = "size_factors.npy"
     write_json(bundle_dir / "metadata.json", payload)
     save_array_bundle(bundle_dir / "control_fit.npz", control_arrays)
     save_array_bundle(bundle_dir / "beta_fit.npz", beta_arrays)
@@ -440,9 +452,35 @@ def _load_light_bundle_mdata(root: Path, metadata: dict[str, Any], source_data: 
     source = _subset_source_by_obs_indices(source, setup, _read_cell_keep_indices(root, metadata))
     if setup.perturbation_modality in getattr(source, "mod", {}):
         mdata = source
-        mdata.uns[_SETUP_UNS_KEY] = setup.to_json_dict()
     else:
         mdata = _low_moi_source_to_mudata(source, metadata, setup)
+
+    size_factors_file = metadata.get("size_factors_file")
+    if size_factors_file is not None:
+        values_path = root / str(size_factors_file)
+        if not values_path.exists():
+            raise FileNotFoundError(f"Light fit bundle references missing size-factor file: {values_path}")
+        values = np.asarray(np.load(values_path), dtype=np.float32).reshape(-1)
+        rna = mdata[setup.rna_modality]
+        if values.shape[0] != rna.n_obs:
+            raise ValueError(
+                "Saved size-factor row count does not match the light bundle source data: "
+                f"{values.shape[0]} != {rna.n_obs}."
+            )
+        if not np.all(np.isfinite(values)):
+            raise ValueError("Saved size factors must contain only finite values.")
+        obs = rna.obs.copy()
+        obs[_SAVED_SIZE_FACTOR_KEY] = values
+        rna.obs = obs
+        setup.size_factor_key = _SAVED_SIZE_FACTOR_KEY
+        setup.library_size_key = None
+    if setup.size_factor_mode is None:
+        raw_mode = metadata.get("size_factor_mode")
+        setup.size_factor_mode = None if raw_mode is None else str(raw_mode)
+    if setup.size_factor_provenance is None:
+        raw_provenance = metadata.get("size_factor_provenance")
+        setup.size_factor_provenance = None if raw_provenance is None else str(raw_provenance)
+    mdata.uns[_SETUP_UNS_KEY] = setup.to_json_dict()
 
     expected_genes = metadata.get("gene_names")
     if expected_genes is not None:

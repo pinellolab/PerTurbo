@@ -20,23 +20,27 @@ cell's probability of carrying the perturbation given its covariates. Because
 that distribution is a sum of independent Bernoulli terms, its cumulant
 generating function is exact and the tail probability is evaluated with a
 saddlepoint approximation instead of resampling. No resamples are drawn, the
-p-values reach far below what any permutation count could resolve, and a
-transcriptome-wide screen finishes in minutes on one GPU.
+p-values can reach below the resolution of a finite resampling run. Runtime
+depends on the screen, covariates, and hardware; the cumulant generating
+function is exact under the fitted Bernoulli law, but its saddlepoint tail is
+an approximation. Estimating that law from data does not give an automatic
+finite-sample calibration guarantee.
 
 Two properties matter for interpretation:
 
 - The null is fit on the baseline and reused, never refit per pair. Stage one
   of perturbo's two-stage model supplies it; the CRT then moves the nuisance
-  coefficients onto the exact null mode by Fisher scoring
+  coefficients toward the null mode by Fisher scoring
   (`--crt-polish-baseline`, on by default; always on for the all-cells design). The polish is what makes the test insensitive to how long stage one trained: measured on the simulation, the null false-positive rate and the power are unchanged from 100 stage-one steps to 2,500.
-- The statistic is a score test at the null. It is calibrated and matches
-  SCEPTRE's power, but a Wald test that refits the alternative (an NB GLM) can
-  be two to four points more powerful when many guides of mixed efficacy share
-  an element. That is the price of an exact null.
+- The statistic is a score test at the null. Calibration and power depend on
+  the assignment model, covariates, and screen design. Compare negative-control
+  and label-shuffled results, including the far tail used for discoveries;
+  agreement near p=0.05 alone does not establish calibration at 1e-5.
 
 ## Which design
 
-Nothing in the package measures MOI; you choose the pool.
+The CLI measures guide multiplicity for `--crt-pool auto`; an explicit pool
+overrides that choice.
 
 | | Control-anchored (low MOI) | All cells (high MOI) |
 |---|---|---|
@@ -187,9 +191,16 @@ Flags worth knowing:
   digits reported) and the CRT chunks run 4.3x faster. Adding a continuous
   covariate beside the batch returns to the dense path. There is no flag: the
   choice follows the nuisance design.
-- `--crt-gene-chunk-size` bounds memory on wide panels; results do not depend
-  on it. Perturbation chunking (`--max-chunk-size`) never changes a target's
-  p-value either, because resamples are keyed on the target's name.
+- `--crt-gene-chunk-size` bounds the inner CRT gene calculation. Use
+  `--gene-chunk-size` to also bound the analysis counts loaded from disk and
+  stage-two fitting. Co-occurring assignments use gene blocks when the CLI
+  would otherwise split perturbations, preserving the joint effect model.
+  The all-cells propensity fit is shared across gene blocks, and BH correction
+  happens after all blocks. In the control-anchored test, the selection model's
+  covariate slopes are fitted once over every analysed cell and reused by every
+  chunk, each target's intercept is fitted against its own target-plus-control
+  pool, and resamples are keyed by target name, so unrelated targets in a
+  perturbation chunk do not change its test.
 - Supported configuration is deliberately narrow: plain negative-binomial
   likelihood, observed or fixed size factors, no latent factors, no guide
   random effects. Latent size factors are refused because a per-cell offset fit

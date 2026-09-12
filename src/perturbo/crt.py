@@ -58,8 +58,10 @@ from dataclasses import dataclass
 
 import jax.numpy as jnp
 import numpy as np
+import scipy.sparse as sp
 
 from perturbo.core import PerTurboData, ControlFit, _normalize_likelihood_name
+from perturbo.sparse_design import IndexedDesignMatrix
 from perturbo._internal.chunked_runner import iter_gene_chunks, replace_gene_axis
 from perturbo._internal.low_moi.design import prepare_low_moi_design
 from perturbo._internal.parametric_null import (
@@ -68,6 +70,7 @@ from perturbo._internal.parametric_null import (
 )
 from perturbo._internal.arrow_nuisance import batch_codes_from_one_hot, is_intercept_and_one_hot
 from perturbo._internal.score_resampling import (
+    TargetPermutations,
     _benjamini_hochberg,
     _nuisance_information,
     evaluate_nb_null_components,
@@ -79,6 +82,7 @@ from perturbo.utils import compute_size_factors
 
 __all__ = [
     "BaselineNullCheck",
+    "AllCellsPropensityFit",
     "ChunkCRTResult",
     "ControlBlock",
     "ControlNuisance",
@@ -99,6 +103,7 @@ __all__ = [
     "control_block_for_genes",
     "exclude_targets",
     "prepare_crt_baseline",
+    "prepare_all_cells_propensity",
     "polish_baseline_to_null_mode",
     "run_crt_for_chunk",
     "run_crt_all_cells",
@@ -262,7 +267,11 @@ def assemble_control_nuisance(
     size-factor mode those are zeros and this is still correct.
     """
 
-    counts = np.asarray(control_data.counts, dtype=np.float64)
+    # Keep the source dtype here. The baseline owns this panel for the whole
+    # CRT run, and eagerly widening a float32 count matrix to float64 doubles
+    # its resident CPU footprint. Numerical kernels cast only the active gene
+    # block to float64 when they need diagnostic precision.
+    counts = np.asarray(control_data.counts)
     if counts.ndim != 2:
         raise ValueError("control_data.counts must be a cells-by-genes matrix.")
     num_cells, num_genes = counts.shape
@@ -501,7 +510,7 @@ def polish_baseline_to_null_mode(
 
     from perturbo._internal.jax_kernels import fisher_nb_null
 
-    counts = np.asarray(nuisance.counts, dtype=np.float64)
+    counts = np.asarray(nuisance.counts)
     num_cells, num_genes = counts.shape
     if gene_block < 1 or max_iterations < 1:
         raise ValueError("gene_block and max_iterations must be positive.")
@@ -770,8 +779,24 @@ def build_chunk_design(
     num_control = control_counts.shape[0]
     num_chunk = chunk_counts.shape[0]
 
-    chunk_labels = np.asarray(chunk_data.pert_id)
-    if chunk_labels.ndim == 2:
+    chunk_labels = chunk_data.pert_id
+    if isinstance(chunk_labels, IndexedDesignMatrix):
+        indices = np.asarray(chunk_labels.indices, dtype=np.int64)
+        values = np.asarray(chunk_labels.values)
+        active = (indices >= 0) & (values > 0)
+        assignments = active.sum(axis=1)
+        num_multi_dropped = int(np.count_nonzero(assignments > 1))
+        if num_multi_dropped:
+            print(
+                f"[perturbo] CRT: setting aside {num_multi_dropped} of {num_chunk} chunk cells that carry "
+                "more than one perturbation; the control-anchored test needs one per cell "
+                "(--crt-pool all-cells keeps them)."
+            )
+        first = np.argmax(active, axis=1)
+        codes = np.where(assignments == 1, indices[np.arange(num_chunk), first], -1)
+        unassigned = assignments != 1
+    elif chunk_labels.ndim == 2:
+        chunk_labels = np.asarray(chunk_labels)
         assignments = np.asarray(chunk_labels > 0).sum(axis=1)
         num_multi_dropped = int(np.count_nonzero(assignments > 1))
         if num_multi_dropped:
@@ -786,6 +811,7 @@ def build_chunk_design(
         codes = np.where(assignments == 1, np.argmax(np.asarray(chunk_labels > 0), axis=1), -1)
         unassigned = assignments != 1
     elif chunk_labels.ndim == 1:
+        chunk_labels = np.asarray(chunk_labels)
         codes = chunk_labels.astype(np.int64)
         unassigned = np.zeros(num_chunk, dtype=bool)
         num_multi_dropped = 0
@@ -830,6 +856,14 @@ def build_chunk_design(
         ),
         covariate_names=None if control_data.covariate_names is None else list(control_data.covariate_names),
         library_size_center_log_mean=control_data.library_size_center_log_mean,
+        _analysis_design_token=(
+            control_data._analysis_design_token,
+            chunk_data._analysis_design_token,
+            tuple(str(name) for name in chunk_data.pert_names),
+        ) if (
+            control_data._analysis_design_token is not None
+            and chunk_data._analysis_design_token is not None
+        ) else None,
         **_stacked_batch_coding(control_data, chunk_data, control_covariates, chunk_covariates),
     )
     theta = baseline.nuisance.dispersion if dispersion is None else np.asarray(dispersion)
@@ -932,6 +966,171 @@ def _categorical_batch_applies(design) -> bool:
     return is_intercept_and_one_hot(np.asarray(design.nuisance_design))
 
 
+SHARED_SELECTION_FIT_BLOCK = 65_536
+"""Rows per block when projecting the screen-wide predictor back onto the design.
+
+Only the projection is blocked, not the fit. A float64 copy of a 300,000-cell
+design with a 48-level batch one-hot is 120 MB, and it is needed only to
+accumulate a (q x q) Gram matrix.
+"""
+
+
+def fit_shared_propensity_coefficients(
+    nuisance_design: np.ndarray,
+    targeting: np.ndarray,
+    *,
+    max_iterations: int = 25,
+    eta_clip: float = 30.0,
+) -> np.ndarray:
+    """Fit the control-anchored CRT's selection model once, over the whole screen.
+
+    ``nuisance_design`` is the CRT's own nuisance matrix - ``[intercept,
+    covariates]``, the layout :func:`prepare_low_moi_design` builds - with one
+    row per control-pool cell and one per cell that will be tested;
+    ``targeting`` is 1 on a cell carrying a targeting perturbation and 0 on a
+    control cell. The result is the covariate part of the selection model that
+    :func:`run_crt_for_chunk` then shares across every perturbation chunk,
+    fitting only each target's intercept locally.
+
+    The coefficients come back in that *original* parametrisation, one per
+    column, and that choice is load-bearing. The fit itself runs in a
+    rank-revealing orthonormal basis - with a full batch one-hot beside the
+    intercept the design is rank deficient, so the original parametrisation has
+    no unique maximiser - but each chunk builds its own basis from its own
+    cells, and basis coordinates therefore mean different things in different
+    chunks. Column identity is the one thing the screen and its chunks agree
+    on, so that is what the coefficients are expressed in.
+
+    Non-uniqueness is harmless here: two solutions of ``N beta = eta`` differ by
+    a vector in ``N``'s null space, and a chunk's design is a row subset of
+    ``N``, so both give the same linear predictor on every chunk's cells.
+    """
+
+    from perturbo._internal.high_moi.resampling import fit_propensity_coefficients
+
+    design = np.asarray(nuisance_design, dtype=np.float32)
+    response = np.asarray(targeting, dtype=np.float32).reshape(-1)
+    if design.ndim != 2 or design.shape[0] != response.shape[0]:
+        raise ValueError("nuisance_design and targeting must agree on the cell count.")
+    if design.shape[0] == 0:
+        raise ValueError("The screen-wide selection model needs at least one cell.")
+    coefficients, basis = fit_propensity_coefficients(
+        response[None, :],
+        design,
+        max_iterations=int(max_iterations),
+        eta_clip=float(eta_clip),
+    )
+    # The unclipped predictor on purpose. Clipping is a step-halving stand-in
+    # for separation, and a clipped vector need not lie in the design's column
+    # space at all, which is exactly what the projection below relies on.
+    eta = np.asarray(basis, dtype=np.float64) @ np.asarray(
+        coefficients, dtype=np.float64
+    ).reshape(-1)
+
+    num_columns = design.shape[1]
+    gram = np.zeros((num_columns, num_columns), dtype=np.float64)
+    rhs = np.zeros(num_columns, dtype=np.float64)
+    for start in range(0, design.shape[0], SHARED_SELECTION_FIT_BLOCK):
+        stop = start + SHARED_SELECTION_FIT_BLOCK
+        block = design[start:stop].astype(np.float64)
+        gram += block.T @ block
+        rhs += block.T @ eta[start:stop]
+    beta = np.linalg.lstsq(gram, rhs, rcond=None)[0]
+
+    residual = 0.0
+    for start in range(0, design.shape[0], SHARED_SELECTION_FIT_BLOCK):
+        stop = start + SHARED_SELECTION_FIT_BLOCK
+        block = design[start:stop].astype(np.float64)
+        residual = max(residual, float(np.max(np.abs(block @ beta - eta[start:stop]))))
+    scale = max(1.0, float(np.max(np.abs(eta))))
+    if residual > 1e-4 * scale:
+        raise ValueError(
+            "The screen-wide selection model's linear predictor could not be written in the "
+            f"nuisance columns (residual {residual:.3e} against a scale of {scale:.3e}). "
+            "The predictor is fitted in a basis for those columns' own span, so this should be "
+            "exact; a failure points at a design that changed between the fit and the projection."
+        )
+    return beta
+
+
+def _validate_cached_low_moi_permutations(
+    permutations: TargetPermutations,
+    design,
+    *,
+    strata: np.ndarray | None,
+    num_resamples: int,
+    seed: int,
+    resampling_mechanism: str,
+    draw_resamples: bool,
+    shared_propensity_coefficients: np.ndarray | None,
+) -> None:
+    """Refuse a gene-block selection plan when its cells or assignment law changed."""
+
+    if permutations._validation_target_names is None:
+        raise ValueError("Cached permutations lack design validation metadata; recompute them for this data.")
+    expected_strata = (
+        np.zeros(design.num_cells, dtype=np.int64)
+        if strata is None
+        else np.asarray(strata).reshape(-1)
+    )
+    checks = (
+        (permutations.num_resamples == int(num_resamples), "resample count"),
+        (permutations.seed == int(seed), "seed"),
+        (permutations.resampling_mechanism == resampling_mechanism, "resampling mechanism"),
+        (permutations._validation_draw_resamples == bool(draw_resamples), "draw mode"),
+        (permutations._validation_num_cells == int(design.num_cells), "cell count"),
+        (
+            permutations._validation_target_names == tuple(str(name) for name in design.target_names),
+            "target identity/order",
+        ),
+    )
+    for matches, label in checks:
+        if not matches:
+            raise ValueError(f"Cached low-MOI permutations do not match the current {label}.")
+
+    def _same(cached, current) -> bool:
+        if cached is None or current is None:
+            return cached is None and current is None
+        try:
+            return bool(np.array_equal(cached, current, equal_nan=True))
+        except TypeError:
+            return bool(np.array_equal(cached, current))
+
+    current_codes = getattr(design, "target_codes", None)
+    current_target_design = None if current_codes is not None else np.asarray(design.target_design, dtype=np.int8)
+    structural = (
+        (permutations._validation_target_codes, current_codes, "target assignments"),
+        (permutations._validation_target_design, current_target_design, "target assignments"),
+        (permutations._validation_control_mask, np.asarray(design.control_mask, dtype=bool), "control membership"),
+        (
+            permutations._validation_source_cell_indices,
+            np.asarray(getattr(design, "source_cell_indices", np.arange(design.num_cells)), dtype=np.int64),
+            "cell identity/order",
+        ),
+        (permutations._validation_strata, expected_strata, "strata"),
+        (
+            permutations._validation_shared_propensity_coefficients,
+            None
+            if shared_propensity_coefficients is None
+            else np.asarray(shared_propensity_coefficients, dtype=np.float64),
+            "shared propensity coefficients",
+        ),
+    )
+    for cached, current, label in structural:
+        if not _same(cached, None if current is None else np.asarray(current)):
+            raise ValueError(f"Cached low-MOI permutations do not match the current {label}.")
+
+    design_token = getattr(design, "_gene_independent_token", None)
+    if permutations._validation_design_token is not None:
+        if design_token != permutations._validation_design_token:
+            raise ValueError("Cached low-MOI permutations do not match the current nuisance design.")
+    elif not _same(
+        permutations._validation_nuisance_design,
+        np.asarray(design.nuisance_design, dtype=np.float32),
+    ):
+        raise ValueError("Cached low-MOI permutations do not match the current nuisance design.")
+
+
 def run_crt_for_chunk(
     baseline: CRTBaseline,
     chunk_data: PerTurboData,
@@ -948,7 +1147,10 @@ def run_crt_for_chunk(
     saddlepoint_only: bool = False,
     saddlepoint_screen_p_value: float = 0.05,
     saddlepoint_two_sided: str = "equal-tail",
-) -> ChunkCRTResult:
+    shared_propensity_coefficients: np.ndarray | None = None,
+    _permutations: TargetPermutations | None = None,
+    _return_permutations: bool = False,
+) -> ChunkCRTResult | tuple[ChunkCRTResult, TargetPermutations]:
     """Run the CRT for one perturbation chunk, looping inner gene chunks.
 
     ``resampling_mechanism`` chooses the null: ``"permutation"`` holds each
@@ -968,6 +1170,14 @@ def run_crt_for_chunk(
     Chunking genes is exact - every quantity here is independent across genes -
     so this changes cost, not answers.
 
+    ``shared_propensity_coefficients`` are the screen-wide logistic selection
+    coefficients, one per column of the chunk design's nuisance matrix and in
+    that order. Passing them keeps the covariate part of the selection model
+    fixed across chunks and fits only each target's intercept here, so a
+    target's p-value does not move when the chunk-size flag changes its
+    neighbours. Leaving them ``None`` fits a separate model per target on that
+    target's own pool.
+
     ``strata`` aligns with ``chunk_data``'s cells. Control cells are given their
     own stratum values from ``control_data`` implicitly: they are prepended, so
     the caller supplies control strata via ``control_data`` ordering. Passing
@@ -982,13 +1192,17 @@ def run_crt_for_chunk(
 
     # cells the control-anchored test set aside; the design builder prints it.
 
-    _labels = np.asarray(chunk_data.pert_id)
-
-    num_multi_dropped = (
-
-        int(np.count_nonzero(np.asarray(_labels > 0).sum(axis=1) > 1)) if _labels.ndim == 2 else 0
-
-    )
+    _labels = chunk_data.pert_id
+    if isinstance(_labels, IndexedDesignMatrix):
+        _active = (np.asarray(_labels.indices) >= 0) & (np.asarray(_labels.values) > 0)
+        num_multi_dropped = int(np.count_nonzero(_active.sum(axis=1) > 1))
+    else:
+        _labels = np.asarray(_labels)
+        num_multi_dropped = (
+            int(np.count_nonzero(np.asarray(_labels > 0).sum(axis=1) > 1))
+            if _labels.ndim == 2
+            else 0
+        )
 
     design = build_chunk_design(baseline, chunk_data, control_data=control_data)
     categorical_batch = design.batch_codes is not None and _categorical_batch_applies(design)
@@ -1058,14 +1272,29 @@ def run_crt_for_chunk(
 
     # Resamples never depend on genes, so they are drawn once for the whole
     # chunk rather than redrawn per gene slice.
-    permutations = precompute_low_moi_permutations(
-        design,
-        num_resamples=num_resamples,
-        strata=full_strata,
-        seed=seed,
-        resampling_mechanism=resampling_mechanism,
-        draw_resamples=not saddlepoint_only,
-    )
+    permutations = _permutations
+    if permutations is None:
+        permutations = precompute_low_moi_permutations(
+            design,
+            num_resamples=num_resamples,
+            strata=full_strata,
+            seed=seed,
+            resampling_mechanism=resampling_mechanism,
+            draw_resamples=not saddlepoint_only,
+            shared_propensity_coefficients=shared_propensity_coefficients,
+            _cache_validation=_return_permutations,
+        )
+    else:
+        _validate_cached_low_moi_permutations(
+            permutations,
+            design,
+            strata=full_strata,
+            num_resamples=num_resamples,
+            seed=seed,
+            resampling_mechanism=resampling_mechanism,
+            draw_resamples=not saddlepoint_only,
+            shared_propensity_coefficients=shared_propensity_coefficients,
+        )
 
     counts = np.asarray(design.counts)
     dispersion = np.asarray(design.dispersion)
@@ -1132,7 +1361,7 @@ def run_crt_for_chunk(
             if result.parametric_used_fallback is not None:
                 block["used_screen"][:, gene_slice] = np.asarray(result.parametric_used_fallback, dtype=bool)
 
-    return ChunkCRTResult(
+    result = ChunkCRTResult(
         observed_score=observed,
         p_value=p_values,
         null_converged=converged,
@@ -1145,6 +1374,7 @@ def run_crt_for_chunk(
         resampling_mechanism=resampling_mechanism,
         saddlepoint_only=saddlepoint_only,
     )
+    return (result, permutations) if _return_permutations else result
 
 
 CRT_POOLS = ("control-anchored", "all-cells")
@@ -1173,21 +1403,35 @@ def _element_membership(data: PerTurboData) -> tuple[np.ndarray, np.ndarray, int
             "The all-cells CRT needs the guide-to-element structure (guide_matrix and guide_to_element); "
             "load the data with the perturbation modality and its element map."
         )
-    guide_to_element = np.asarray(data.guide_to_element) > 0
+    if sp.issparse(data.guide_to_element):
+        guide_to_element = (data.guide_to_element > 0).tocsr()
+        guide_to_element.eliminate_zeros()
+    else:
+        guide_to_element = np.asarray(data.guide_to_element) > 0
     num_guides, num_elements = guide_to_element.shape
-    guide_matrix = np.asarray(data.guide_matrix)
+    guide_matrix = data.guide_matrix
     num_cells = int(guide_matrix.shape[0])
     if int(guide_matrix.shape[1]) != int(num_guides):
         raise ValueError(
             f"guide_matrix has {guide_matrix.shape[1]} guides but guide_to_element maps {num_guides}."
         )
-    cells, guides = np.nonzero(guide_matrix > 0)
-    del guide_matrix
+    if isinstance(guide_matrix, IndexedDesignMatrix):
+        indices = np.asarray(guide_matrix.indices, dtype=np.int64)
+        values = np.asarray(guide_matrix.values)
+        active = (indices >= 0) & (values > 0)
+        cells = np.broadcast_to(np.arange(num_cells)[:, None], indices.shape)[active]
+        guides = indices[active]
+    else:
+        cells, guides = np.nonzero(np.asarray(guide_matrix) > 0)
     # Expand each detected (cell, guide) to the guide's elements. The map's
     # non-zeros come out sorted by guide, so a guide's elements are one
     # contiguous run starting at offsets[guide].
-    map_guides, map_elements = np.nonzero(guide_to_element)
-    per_guide = np.bincount(map_guides, minlength=num_guides)
+    if sp.issparse(guide_to_element):
+        per_guide = np.diff(guide_to_element.indptr)
+        map_elements = guide_to_element.indices
+    else:
+        map_guides, map_elements = np.nonzero(guide_to_element)
+        per_guide = np.bincount(map_guides, minlength=num_guides)
     offsets = np.concatenate([np.zeros(1, dtype=np.int64), np.cumsum(per_guide, dtype=np.int64)])
     reps = per_guide[guides]
     total = int(reps.sum())
@@ -1205,6 +1449,110 @@ def _element_membership(data: PerTurboData) -> tuple[np.ndarray, np.ndarray, int
     return cell_index.astype(np.int64), element_index.astype(np.int64), int(num_elements)
 
 
+@dataclass(frozen=True)
+class AllCellsPropensityFit:
+    """Gene-independent state reused across gene blocks of an all-cells CRT."""
+
+    cell_index: np.ndarray
+    element_index: np.ndarray
+    element_names: tuple[str, ...]
+    testable: np.ndarray
+    coefficients: np.ndarray
+    basis: np.ndarray
+    num_cells: int
+
+
+def prepare_all_cells_propensity(
+    baseline: CRTBaseline,
+    data: PerTurboData,
+    *,
+    min_cells_per_element: int = 1,
+    include_guide_count: bool = True,
+    max_iterations: int = 25,
+    eta_clip: float = 30.0,
+    element_batch_size: int = 64,
+) -> AllCellsPropensityFit:
+    """Fit the all-cells assignment models once for reuse over gene blocks."""
+
+    from perturbo._internal.high_moi.resampling import (
+        fit_propensity_coefficients,
+        propensity_basis,
+    )
+
+    num_cells = int(np.asarray(data.counts).shape[0])
+    if baseline.num_control_cells != num_cells:
+        raise ValueError(
+            "The all-cells CRT baseline must be prepared on the analysed cells themselves "
+            f"(baseline holds {baseline.num_control_cells} cells, data holds {num_cells})."
+        )
+    cell_index, element_index, num_elements = _element_membership(data)
+    element_names = tuple(str(name) for name in data.pert_names)
+    if len(element_names) != num_elements:
+        raise ValueError(
+            f"pert_names has {len(element_names)} entries but guide_to_element maps to {num_elements} elements."
+        )
+    sizes = np.bincount(element_index, minlength=num_elements)
+    testable = sizes >= int(min_cells_per_element)
+    keep_pair = testable[element_index]
+    cell_index, element_index = cell_index[keep_pair], element_index[keep_pair]
+
+    nuisance_design = np.asarray(baseline.nuisance.nuisance_design, dtype=np.float32)
+    propensity_design = nuisance_design
+    if include_guide_count:
+        if isinstance(data.guide_matrix, IndexedDesignMatrix):
+            detected = np.sum(
+                (np.asarray(data.guide_matrix.indices) >= 0)
+                & (np.asarray(data.guide_matrix.values) > 0),
+                axis=1,
+                dtype=np.float64,
+            )
+        else:
+            detected = np.asarray(np.asarray(data.guide_matrix) > 0).sum(axis=1).astype(np.float64)
+        moi = np.log1p(detected)
+        moi = (moi - moi.mean()) / max(float(moi.std()), 1e-8)
+        propensity_design = np.concatenate(
+            [nuisance_design, moi.astype(np.float32)[:, None]], axis=1
+        )
+
+    coefficients_parts = []
+    basis = None
+    order = np.argsort(element_index, kind="stable")
+    sorted_elements = element_index[order]
+    sorted_cells = cell_index[order]
+    starts = np.searchsorted(sorted_elements, np.arange(num_elements + 1))
+    for start in range(0, num_elements, int(element_batch_size)):
+        stop = min(start + int(element_batch_size), num_elements)
+        indicators = np.zeros((stop - start, num_cells), dtype=np.float32)
+        for local, element in enumerate(range(start, stop)):
+            indicators[local, sorted_cells[starts[element] : starts[element + 1]]] = 1.0
+        coef, basis_batch = fit_propensity_coefficients(
+            indicators,
+            propensity_design,
+            max_iterations=int(max_iterations),
+            eta_clip=float(eta_clip),
+            basis=basis,
+        )
+        coefficients_parts.append(np.asarray(coef))
+        if basis is None:
+            basis = np.asarray(basis_batch)
+    if basis is None:
+        basis = np.asarray(propensity_basis(propensity_design))
+    coefficients = (
+        np.concatenate(coefficients_parts, axis=0)
+        if coefficients_parts
+        else np.zeros((0, basis.shape[1]), dtype=np.float32)
+    )
+    return AllCellsPropensityFit(
+        cell_index=cell_index,
+        element_index=element_index,
+        element_names=element_names,
+        testable=testable,
+        coefficients=coefficients,
+        basis=basis,
+        num_cells=num_cells,
+    )
+
+
 def run_crt_all_cells(
     baseline: CRTBaseline,
     data: PerTurboData,
@@ -1218,6 +1566,7 @@ def run_crt_all_cells(
     include_guide_count_in_propensity: bool = True,
     propensity_max_iterations: int = 25,
     eta_clip: float = 30.0,
+    propensity_fit: AllCellsPropensityFit | None = None,
 ) -> ChunkCRTResult:
     """The propensity saddlepoint CRT with every analysed cell as the pool (high MOI).
 
@@ -1240,7 +1589,6 @@ def run_crt_all_cells(
     the caller's, as for the chunked low-MOI path.
     """
 
-    from perturbo._internal.high_moi.resampling import fit_propensity_coefficients
     from perturbo._internal.saddlepoint import fit_high_moi_propensity_saddlepoint
 
     num_cells = int(np.asarray(data.counts).shape[0])
@@ -1254,46 +1602,26 @@ def run_crt_all_cells(
     if not 0.0 < screen_p_value <= 1.0:
         raise ValueError("screen_p_value must lie in (0, 1].")
 
-    cell_index, element_index, num_elements = _element_membership(data)
-    element_names = tuple(str(name) for name in data.pert_names)
-    if len(element_names) != num_elements:
-        raise ValueError(
-            f"pert_names has {len(element_names)} entries but guide_to_element maps to {num_elements} elements."
-        )
-    sizes = np.bincount(element_index, minlength=num_elements)
-    testable = sizes >= int(min_cells_per_element)
-    keep_pair = testable[element_index]
-    cell_index, element_index = cell_index[keep_pair], element_index[keep_pair]
-
     nuisance_design = np.asarray(baseline.nuisance.nuisance_design, dtype=np.float32)
-    propensity_design = nuisance_design
-    if include_guide_count_in_propensity:
-        detected = np.asarray(np.asarray(data.guide_matrix) > 0).sum(axis=1).astype(np.float64)
-        moi = np.log1p(detected)
-        moi = (moi - moi.mean()) / max(float(moi.std()), 1e-8)
-        propensity_design = np.concatenate([nuisance_design, moi.astype(np.float32)[:, None]], axis=1)
-
-    # Per-element selection models, in batches so the dense indicator block
-    # stays (batch, cells). The basis is the same QR of one design for every
-    # batch, so it is taken from the first.
-    coefficients_parts = []
-    basis = None
-    order = np.argsort(element_index, kind="stable")
-    sorted_elements = element_index[order]
-    sorted_cells = cell_index[order]
-    starts = np.searchsorted(sorted_elements, np.arange(num_elements + 1))
-    for start in range(0, num_elements, int(element_batch_size)):
-        stop = min(start + int(element_batch_size), num_elements)
-        indicators = np.zeros((stop - start, num_cells), dtype=np.float32)
-        for local, element in enumerate(range(start, stop)):
-            indicators[local, sorted_cells[starts[element] : starts[element + 1]]] = 1.0
-        coef, basis_batch = fit_propensity_coefficients(
-            indicators, propensity_design, max_iterations=int(propensity_max_iterations), eta_clip=float(eta_clip)
+    if propensity_fit is None:
+        propensity_fit = prepare_all_cells_propensity(
+            baseline,
+            data,
+            min_cells_per_element=int(min_cells_per_element),
+            include_guide_count=bool(include_guide_count_in_propensity),
+            max_iterations=int(propensity_max_iterations),
+            eta_clip=float(eta_clip),
+            element_batch_size=int(element_batch_size),
         )
-        coefficients_parts.append(np.asarray(coef))
-        if basis is None:
-            basis = np.asarray(basis_batch)
-    coefficients = np.concatenate(coefficients_parts, axis=0) if coefficients_parts else np.zeros((0, propensity_design.shape[1]))
+    element_names = tuple(str(name) for name in data.pert_names)
+    if propensity_fit.num_cells != num_cells or propensity_fit.element_names != element_names:
+        raise ValueError("propensity_fit does not match the all-cells CRT data.")
+    cell_index = propensity_fit.cell_index
+    element_index = propensity_fit.element_index
+    testable = propensity_fit.testable
+    coefficients = propensity_fit.coefficients
+    basis = propensity_fit.basis
+    num_elements = len(element_names)
 
     num_genes = baseline.num_genes
     width = num_genes if gene_chunk_size is None else int(gene_chunk_size)
@@ -1392,12 +1720,38 @@ def exclude_targets(chunk_data: PerTurboData, drop_names: Iterable[str]) -> PerT
     if keep_targets.all():
         return chunk_data
 
-    labels = np.asarray(chunk_data.pert_id)
+    labels = chunk_data.pert_id
     old_to_new = np.full(len(names), -1, dtype=np.int64)
     old_to_new[np.flatnonzero(keep_targets)] = np.arange(int(keep_targets.sum()))
-    if labels.ndim == 1:
-        keep_cells = keep_targets[labels.astype(np.int64)]
-        new_labels = old_to_new[labels.astype(np.int64)[keep_cells]]
+    if isinstance(labels, IndexedDesignMatrix):
+        indices = np.asarray(labels.indices, dtype=np.int64)
+        values = np.asarray(labels.values)
+        safe = np.maximum(indices, 0)
+        mapped = old_to_new[safe]
+        active = (indices >= 0) & (values != 0) & (mapped >= 0)
+        keep_cells = active.any(axis=1)
+        kept_active = active[keep_cells]
+        kept_mapped = mapped[keep_cells]
+        kept_values = values[keep_cells]
+        widths = kept_active.sum(axis=1)
+        width = max(1, int(widths.max(initial=0)))
+        new_indices = np.full((int(keep_cells.sum()), width), -1, dtype=np.int32)
+        new_values = np.zeros((int(keep_cells.sum()), width), dtype=np.float32)
+        for row in range(new_indices.shape[0]):
+            row_active = kept_active[row]
+            count = int(row_active.sum())
+            if count:
+                new_indices[row, :count] = kept_mapped[row, row_active]
+                new_values[row, :count] = kept_values[row, row_active]
+        new_labels = IndexedDesignMatrix(
+            indices=jnp.asarray(new_indices),
+            values=jnp.asarray(new_values),
+            num_columns=int(keep_targets.sum()),
+        )
+    elif labels.ndim == 1:
+        labels_array = np.asarray(labels)
+        keep_cells = keep_targets[labels_array.astype(np.int64)]
+        new_labels = old_to_new[labels_array.astype(np.int64)[keep_cells]]
     elif labels.ndim == 2:
         binary = np.asarray(labels > 0)
         keep_cells = binary[:, keep_targets].any(axis=1)
@@ -1408,18 +1762,26 @@ def exclude_targets(chunk_data: PerTurboData, drop_names: Iterable[str]) -> PerT
         return None
 
     def _rows(values):
-        return None if values is None else jnp.asarray(np.asarray(values)[keep_cells])
+        if values is None:
+            return None
+        if isinstance(values, IndexedDesignMatrix):
+            return values.take_rows(keep_cells)
+        return jnp.asarray(np.asarray(values)[keep_cells])
 
     return PerTurboData(
         counts=jnp.asarray(np.asarray(chunk_data.counts)[keep_cells]),
-        pert_id=jnp.asarray(new_labels),
+        pert_id=(new_labels if isinstance(new_labels, IndexedDesignMatrix) else jnp.asarray(new_labels)),
         pert_names=[name for name, keep in zip(names, keep_targets, strict=True) if keep],
         gene_names=list(chunk_data.gene_names),
         cell_mask=_rows(chunk_data.cell_mask),
         size_factors=_rows(chunk_data.size_factors),
         covariates=_rows(chunk_data.covariates),
         covariate_names=None if chunk_data.covariate_names is None else list(chunk_data.covariate_names),
+        guide_matrix=_rows(chunk_data.guide_matrix),
+        guide_names=None if chunk_data.guide_names is None else list(chunk_data.guide_names),
+        guide_to_element=chunk_data.guide_to_element,
         library_size_center_log_mean=chunk_data.library_size_center_log_mean,
+        _analysis_design_token=chunk_data._analysis_design_token,
     )
 
 
@@ -1444,6 +1806,8 @@ class CRTAccumulator:
     def __post_init__(self) -> None:
         shape = (len(self.element_names), len(self.gene_names))
         self._index = {name: position for position, name in enumerate(self.element_names)}
+        self._gene_index = {name: position for position, name in enumerate(self.gene_names)}
+        self._dropped_by_target_chunk: dict[tuple[str, ...], int] = {}
         self.num_multi_assignment_cells_dropped = 0
         self.observed_score = np.full(shape, np.nan, dtype=np.float64)
         self.p_value = np.full(shape, np.nan, dtype=np.float64)
@@ -1462,26 +1826,36 @@ class CRTAccumulator:
         }
 
     def absorb(self, result: ChunkCRTResult) -> None:
-        if tuple(result.gene_names) != self.gene_names:
-            raise ValueError("Chunk gene names do not match the accumulator's gene axis.")
         unknown = [name for name in result.target_names if name not in self._index]
         if unknown:
             raise ValueError(f"Chunk reported elements absent from the screen: {unknown[:5]}")
+        unknown_genes = [name for name in result.gene_names if name not in self._gene_index]
+        if unknown_genes:
+            raise ValueError(
+                f"Chunk gene names do not match the accumulator: absent from the screen {unknown_genes[:5]}"
+            )
         rows = np.asarray([self._index[name] for name in result.target_names])
-        self.num_multi_assignment_cells_dropped += int(getattr(result, "num_multi_assignment_cells_dropped", 0))
-        self.observed_score[rows] = result.observed_score
-        self.p_value[rows] = result.p_value
-        self.null_converged[rows] = result.null_converged
+        columns = np.asarray([self._gene_index[name] for name in result.gene_names])
+        destination = np.ix_(rows, columns)
+        target_chunk = tuple(result.target_names)
+        self._dropped_by_target_chunk[target_chunk] = max(
+            self._dropped_by_target_chunk.get(target_chunk, 0),
+            int(getattr(result, "num_multi_assignment_cells_dropped", 0)),
+        )
+        self.num_multi_assignment_cells_dropped = sum(self._dropped_by_target_chunk.values())
+        self.observed_score[destination] = result.observed_score
+        self.p_value[destination] = result.p_value
+        self.null_converged[destination] = result.null_converged
         self.tested[rows] = True
         for family, columns in result.parametric.items():
             if family not in self.parametric:
                 continue
             for key, values in columns.items():
                 if key in self.parametric[family]:
-                    self.parametric[family][key][rows] = values
+                    self.parametric[family][key][destination] = values
         for name, values in result.null_summaries.items():
             if name in self.null_summaries:
-                self.null_summaries[name][rows] = values
+                self.null_summaries[name][destination] = values
 
     def finalize(self) -> dict[str, np.ndarray]:
         """Screen-wide columns, with Benjamini-Hochberg over every tested pair.

@@ -352,24 +352,56 @@ class TargetPermutations:
     seed: int
     resampling_mechanism: str = "permutation"
     pair_rows: tuple[np.ndarray | None, ...] | None = None
-    """Row indices of each target's pool: its own cells plus every control."""
+    """Row indices of each target's pool when Bernoulli draws were requested.
+
+    Saddlepoint-only runs keep ``None`` entries because the compact coefficient
+    model reconstructs its pools without retaining one control-row vector per
+    target."""
     pool_logits: tuple[np.ndarray | None, ...] | None = None
     """Fitted selection log-odds over those pool rows, under the propensity
     mechanism. Logits rather than probabilities because the saddlepoint's CGF
     is written in the logit, and a float32 probability cannot carry one near
     the clip - sigmoid(30) rounds to exactly 1.0."""
     shared_logits: np.ndarray | None = None
-    """The covariate part of the selection model, one float64 value per cell,
-    shared by every target. ``pool_logits[t]`` is ``shared_logits[pair_rows[t]]
-    + pool_intercepts[t]`` rounded to float32; the decomposition is kept so the
-    saddlepoint can screen every target at once."""
+    """Legacy shared-slope representation retained for old cached callers."""
     pool_intercepts: np.ndarray | None = None
     """Per-target intercept of the selection model, NaN where the target has
     no pool."""
+    propensity_coefficients: np.ndarray | None = None
+    """Target-specific pool fits in ``propensity_basis`` coordinates.
+
+    Shape ``(targets, basis)``. Unlike the legacy shared-slope decomposition,
+    each row is fitted using only controls and that target's own cells, so an
+    unrelated target cannot change this target's assignment law."""
+    propensity_basis: np.ndarray | None = None
+    """Rank-revealing ``(cells, basis)`` design shared by the compact
+    target-specific propensity coefficients."""
+    _validation_target_names: tuple[str, ...] | None = None
+    _validation_num_cells: int | None = None
+    _validation_target_codes: np.ndarray | None = None
+    _validation_target_design: np.ndarray | None = None
+    _validation_control_mask: np.ndarray | None = None
+    _validation_source_cell_indices: np.ndarray | None = None
+    _validation_strata: np.ndarray | None = None
+    _validation_nuisance_design: np.ndarray | None = None
+    _validation_design_token: object | None = None
+    _validation_draw_resamples: bool = True
+    _validation_shared_propensity_coefficients: np.ndarray | None = None
 
     def __post_init__(self) -> None:
         if any(entry is not None and entry.ndim != 2 for entry in self.indices):
             raise ValueError("Each target's permutation indices must be two-dimensional.")
+        for value in (
+            self._validation_target_codes,
+            self._validation_target_design,
+            self._validation_control_mask,
+            self._validation_source_cell_indices,
+            self._validation_strata,
+            self._validation_nuisance_design,
+            self._validation_shared_propensity_coefficients,
+        ):
+            if value is not None:
+                value.flags.writeable = False
 
 
 
@@ -399,6 +431,62 @@ def _solve_propensity_intercept(
     return 0.5 * (low + high)
 
 
+_BASIS_SOLVE_TOLERANCE = 1e-4
+"""Relative slack allowed when re-expressing a vector in the propensity basis.
+
+The basis is built and stored in float32, so an exactly representable vector
+still comes back with a residual of order the float32 epsilon times the
+conditioning of the design. A genuine failure - no intercept column, a dropped
+direction - leaves a residual of order the vector itself, which is four orders
+of magnitude above this.
+"""
+
+
+def _basis_coordinates(basis: np.ndarray, target: np.ndarray, *, what: str) -> np.ndarray:
+    """Exact coordinates of ``target`` in the column space of ``basis``.
+
+    ``basis`` is a rank-revealing orthonormal basis for the column space of the
+    nuisance design, so anything that *is* a linear combination of nuisance
+    columns has exact coordinates in it and the least-squares solve below
+    returns them rather than an approximation. Both vectors this is asked for
+    qualify: the shared linear predictor is ``nuisance @ beta`` by
+    construction, and the all-ones vector is the nuisance design's own
+    intercept column.
+
+    A non-zero residual therefore does not mean "close enough" - it means the
+    premise failed, and the coefficients built from these coordinates would
+    describe a different selection model than the one that was fitted. That
+    would corrupt every p-value silently, so it is an error.
+    """
+
+    basis = np.asarray(basis, dtype=np.float64)
+    target = np.asarray(target, dtype=np.float64).reshape(-1)
+    # Solved through the (rank x rank) Gram matrix rather than by an SVD of the
+    # (cells x rank) basis: the answer is the same least-squares solution, and
+    # the cell axis runs to hundreds of thousands.
+    coordinates = np.linalg.lstsq(basis.T @ basis, basis.T @ target, rcond=None)[0]
+    residual = float(np.max(np.abs(basis @ coordinates - target))) if target.size else 0.0
+    scale = max(1.0, float(np.max(np.abs(target))) if target.size else 1.0)
+    if residual > _BASIS_SOLVE_TOLERANCE * scale:
+        raise ValueError(
+            f"The shared propensity {what} does not lie in the span of the nuisance design's "
+            f"propensity basis (residual {residual:.3e} against a scale of {scale:.3e}). "
+            "The likely causes are a nuisance design whose first column is not an intercept, "
+            "or a basis that dropped a direction the shared coefficients use as rank-deficient."
+        )
+    return coordinates
+
+
+def _target_propensity_key(seed: int, target_name: str) -> jax.Array:
+    """A JAX key stable to target ordering and chunk composition."""
+
+    digest = hashlib.blake2b(str(target_name).encode("utf-8"), digest_size=8).digest()
+    value = int.from_bytes(digest, "big")
+    key = jax.random.key(int(seed))
+    key = jax.random.fold_in(key, np.uint32(value & 0xFFFFFFFF))
+    return jax.random.fold_in(key, np.uint32(value >> 32))
+
+
 def precompute_low_moi_permutations(
     design: JointNBDesign | object,
     *,
@@ -407,6 +495,9 @@ def precompute_low_moi_permutations(
     seed: int = 0,
     resampling_mechanism: str = "permutation",
     draw_resamples: bool = True,
+    propensity_target_batch_size: int = 64,
+    shared_propensity_coefficients: np.ndarray | None = None,
+    _cache_validation: bool = False,
 ) -> TargetPermutations:
     """Draw every target's resamples once, for reuse across gene chunks.
 
@@ -414,6 +505,20 @@ def precompute_low_moi_permutations(
     make on its own: both key their generator on the target's name via
     :func:`target_permutation_rng`, so passing the result back in leaves the
     p-values unchanged.
+
+    ``shared_propensity_coefficients`` are screen-wide logistic selection
+    coefficients in the *original* nuisance parametrisation - one entry per
+    column of ``design.nuisance_design``, in that order. When they are given
+    and the mechanism is ``"propensity"``, the covariate part of every target's
+    selection model is theirs and only the intercept is fitted per target. That
+    is the same shared-slope estimator as fitting "carries a targeting guide"
+    against "carries a control" inside this design, except that the caller
+    fitted it over the whole screen: perturbation chunking hands this function
+    one chunk at a time, so an in-design fit would make a target's p-value a
+    function of which neighbours the chunk-size flag gave it.
+
+    Leaving them ``None`` fits each target's model on its own pool instead,
+    which is chunk-invariant too but spends far less data on the covariates.
     """
 
     target_codes = getattr(design, "target_codes", None)
@@ -442,29 +547,89 @@ def precompute_low_moi_permutations(
     # Imported here rather than at module scope: high_moi's package __init__
     # pulls in its api, which imports this module back.
     from perturbo._internal.high_moi.resampling import (
-        fit_propensity_coefficients,
+        fit_masked_propensity_coefficients,
+        propensity_basis,
         propensity_logits_from_coefficients,
         sample_propensity_indices,
     )
     nuisance = np.asarray(design.nuisance_design, dtype=np.float32)
-    shared_eta = None
+    propensity_coef = None
+    propensity_Q = None
     if resampling_mechanism == "propensity":
-        # One fit of "carries a targeting guide" against "carries a control",
-        # over every cell, giving the covariate part of the selection model.
-        if target_codes is not None:
-            targeting = (target_codes >= 0).astype(np.float32)
-        else:
-            targeting = (target_design.sum(axis=1) > 0).astype(np.float32)
-        shared_coefficients, shared_basis = fit_propensity_coefficients(
-            targeting.reshape(1, -1), nuisance
+        if propensity_target_batch_size < 1:
+            raise ValueError("propensity_target_batch_size must be positive.")
+        # Coefficients share a compact rank-revealing basis, so the saddlepoint
+        # can screen targets in batches without retaining an all-target x
+        # all-cell logit matrix: it reads a target's logits as
+        # ``propensity_coef[t] @ propensity_Q[rows].T``.
+        propensity_Q = np.asarray(propensity_basis(nuisance), dtype=np.float32)
+        propensity_coef = np.zeros(
+            (design.num_targets, propensity_Q.shape[1]), dtype=np.float32
         )
-        shared_eta = np.asarray(
-            propensity_logits_from_coefficients(shared_coefficients, shared_basis)
-        ).reshape(-1).astype(np.float64)
+    if propensity_coef is not None and shared_propensity_coefficients is not None:
+        # Shared covariate slopes, per-target intercept. Depth, guide load and
+        # batch act on the *cell*, not on which guide it happened to receive,
+        # so only abundance is target-specific and abundance is the intercept.
+        # The slopes were fitted once over the whole screen by the caller,
+        # which is what makes them independent of this chunk's composition.
+        beta = np.asarray(shared_propensity_coefficients, dtype=np.float64).reshape(-1)
+        if beta.shape[0] != nuisance.shape[1]:
+            raise ValueError(
+                "shared_propensity_coefficients must hold one coefficient per nuisance column "
+                f"(got {beta.shape[0]} for {nuisance.shape[1]} columns)."
+            )
+        eta_shared = nuisance.astype(np.float64) @ beta
+        # ``eta_shared`` is a linear combination of nuisance columns and the
+        # all-ones vector is the nuisance design's intercept column, so both
+        # have exact coordinates in the basis; ``_basis_coordinates`` refuses
+        # to proceed on anything less than exact.
+        b_shared = _basis_coordinates(propensity_Q, eta_shared, what="linear predictor")
+        c_one = _basis_coordinates(
+            propensity_Q, np.ones(nuisance.shape[0]), what="intercept direction"
+        )
+        # Filled for every target here, before the drawing loop: the
+        # saddlepoint-only path skips that loop entirely and still reads these.
+        for target_index in range(design.num_targets):
+            if target_codes is not None:
+                own = target_codes == target_index
+            else:
+                own = target_design[:, target_index] > 0
+            pool = control_mask | own
+            selected = int(np.count_nonzero(own & pool))
+            pool_size = int(np.count_nonzero(pool))
+            if selected == 0 or selected == pool_size:
+                # Not testable; the drawing loop drops it and the saddlepoint
+                # has nothing to evaluate. Leave the row at zero rather than
+                # letting the bisection run to its clip.
+                continue
+            # The intercept that makes the fitted probabilities over this
+            # target's pool sum to its observed cell count - the intercept
+            # score equation of the unpenalized logistic, kept per target.
+            delta = _solve_propensity_intercept(eta_shared[pool], selected)
+            propensity_coef[target_index] = (b_shared + delta * c_one).astype(np.float32)
+    elif propensity_coef is not None:
+        # One model per target, each fitted on exactly the population used by
+        # its CRT: controls plus that target's own cells. This makes the fitted
+        # assignment law independent of unrelated targets in the same CLI
+        # chunk, at the cost of estimating every covariate slope from one
+        # target's worth of events.
+        for start in range(0, design.num_targets, int(propensity_target_batch_size)):
+            stop = min(start + int(propensity_target_batch_size), design.num_targets)
+            targets = np.arange(start, stop, dtype=np.int32)
+            if target_codes is not None:
+                indicators = target_codes[None, :] == targets[:, None]
+            else:
+                indicators = target_design[:, start:stop].T > 0
+            inclusion = control_mask[None, :] | indicators
+            propensity_coef[start:stop] = np.asarray(
+                fit_masked_propensity_coefficients(
+                    indicators,
+                    inclusion,
+                    propensity_Q,
+                )
+            )
     pair_rows: list[np.ndarray | None] = []
     pool_logits: list[np.ndarray | None] = []
-    pool_intercepts = np.full(design.num_targets, np.nan, dtype=np.float64)
-    key = jax.random.key(seed)
     drawn: list[np.ndarray | None] = []
     for target_index in range(design.num_targets):
         if target_design is None:
@@ -497,25 +662,24 @@ def precompute_low_moi_permutations(
         # because a perturbed cell is not a valid "could have been this target"
         # counterfactual - its expression already moved.
         #
-        # Covariate effects are shared across targets and only the intercept is
-        # per target. Depth, guide load and batch act on the *cell*, not on
-        # which guide it happened to receive, so there is no reason for their
-        # coefficients to differ by target - only abundance does, and that is
-        # the intercept. Fitting them jointly turns hundreds of events per
-        # target into every event at once, which removes the separation risk a
-        # per-target fit runs at this imbalance, and removes a QR and a
-        # (pool x q x q) curvature solve per target: with 48 batch levels that
-        # per-target fit was the whole precompute.
-        rows = np.flatnonzero(pair_mask)
-        offsets = shared_eta[rows]
-        intercept = _solve_propensity_intercept(offsets, int(observed_assignment.sum()))
-        logits = (offsets + intercept).astype(np.float32, copy=False)
-        pair_rows.append(rows.astype(np.int64, copy=False))
-        pool_logits.append(logits)
-        pool_intercepts[target_index] = intercept
+        # Coefficients are target-specific because the actual pool is
+        # target-specific. They still share one compact basis, which lets the
+        # saddlepoint batch targets and keeps storage proportional to targets x
+        # covariates rather than targets x controls.
         if not draw_resamples:
+            pair_rows.append(None)
+            pool_logits.append(None)
             drawn.append(None)
             continue
+        rows = np.flatnonzero(pair_mask)
+        logits = np.asarray(
+            propensity_logits_from_coefficients(
+                propensity_coef[target_index : target_index + 1],
+                propensity_Q[rows],
+            )
+        ).reshape(-1).astype(np.float32, copy=False)
+        pair_rows.append(rows.astype(np.int64, copy=False))
+        pool_logits.append(logits)
         # Pad the pool to a common length before drawing. The sampler's index
         # extraction is compiled per (pool, width) shape, and every target's
         # pool - the controls plus its own cells - has its own length, so an
@@ -531,7 +695,7 @@ def precompute_low_moi_permutations(
             sample_propensity_indices(
                 selection,
                 num_resamples=num_resamples,
-                key=jax.random.fold_in(key, target_index),
+                key=_target_propensity_key(seed, target_names[target_index]),
                 pad_value=int(rows.size),
             ).astype(np.int32, copy=False)
         )
@@ -542,8 +706,47 @@ def precompute_low_moi_permutations(
         resampling_mechanism=resampling_mechanism,
         pair_rows=tuple(pair_rows) if resampling_mechanism == "propensity" else None,
         pool_logits=tuple(pool_logits) if resampling_mechanism == "propensity" else None,
-        shared_logits=shared_eta if resampling_mechanism == "propensity" else None,
-        pool_intercepts=pool_intercepts if resampling_mechanism == "propensity" else None,
+        shared_logits=None,
+        pool_intercepts=None,
+        propensity_coefficients=propensity_coef if resampling_mechanism == "propensity" else None,
+        propensity_basis=propensity_Q if resampling_mechanism == "propensity" else None,
+        _validation_target_names=target_names if _cache_validation else None,
+        _validation_num_cells=int(design.num_cells) if _cache_validation else None,
+        _validation_target_codes=(
+            None
+            if not _cache_validation or target_codes is None
+            else np.asarray(target_codes, dtype=np.int32).copy()
+        ),
+        _validation_target_design=(
+            None
+            if not _cache_validation or target_design is None
+            else np.asarray(target_design, dtype=np.int8).copy()
+        ),
+        _validation_control_mask=(
+            np.asarray(control_mask, dtype=bool).copy() if _cache_validation else None
+        ),
+        _validation_source_cell_indices=(
+            np.asarray(
+                getattr(design, "source_cell_indices", np.arange(design.num_cells)), dtype=np.int64
+            ).copy()
+            if _cache_validation
+            else None
+        ),
+        _validation_strata=np.asarray(full_strata).copy() if _cache_validation else None,
+        _validation_nuisance_design=(
+            None
+            if not _cache_validation or getattr(design, "_gene_independent_token", None) is not None
+            else np.asarray(nuisance, dtype=np.float32).copy()
+        ),
+        _validation_design_token=(
+            getattr(design, "_gene_independent_token", None) if _cache_validation else None
+        ),
+        _validation_draw_resamples=bool(draw_resamples),
+        _validation_shared_propensity_coefficients=(
+            None
+            if not _cache_validation or shared_propensity_coefficients is None
+            else np.asarray(shared_propensity_coefficients, dtype=np.float64).copy()
+        ),
     )
 
 
@@ -901,35 +1104,52 @@ def newton_step_magnitude(
     construction and the solve never sees an indefinite matrix.
     """
 
-    theta_row = theta[None, :]
-    eta = offsets + nuisance_design @ beta
-    mean = np.exp(np.clip(eta, -_ETA_CLIP, _ETA_CLIP))
-    denominator = theta_row + mean
-    residual = theta_row * (counts - mean) / denominator
-    weight = theta_row * mean / denominator
-    gradient = nuisance_design.T @ residual - prior_precision * beta
+    design = np.asarray(nuisance_design, dtype=np.float64)
+    coefficients = np.asarray(beta, dtype=np.float64)
+    count_panel = np.asarray(counts)
+    offset_panel = np.asarray(offsets, dtype=np.float64)
+    if offset_panel.ndim == 1:
+        offset_panel = offset_panel[:, None]
+    dispersion = np.asarray(theta, dtype=np.float64).reshape(-1)
 
-    # Gene-blocked, and a matmul rather than an einsum. Both matter once the
-    # nuisance design is wide: the work is cells x genes x nuisance^2, which at
+    # Gene-block every cells-by-genes intermediate as well as the curvature.
+    # This matters before the solve even starts: eta, mean, denominator,
+    # residual and weight are five full float64 copies of the count panel if
+    # they are formed above this loop.
+    #
+    # A matmul rather than an einsum matters once the nuisance design is wide:
+    # the work is cells x genes x nuisance^2, which at
     # 10k control cells, 8k genes and 267 gem-group columns is 5.9e12
     # multiply-adds. np.einsum is not BLAS-backed and runs that single-threaded
     # - measured 1.8 hours against 2.9 minutes for the same arithmetic
     # expressed as Z' (Z * w) - and it materializes the whole
     # (genes, nuisance, nuisance) tensor, 4.4 GiB here, when only one block is
     # ever live.
-    num_genes = int(weight.shape[1])
-    num_nuisance = int(nuisance_design.shape[1])
+    num_genes = int(coefficients.shape[1])
+    num_nuisance = int(design.shape[1])
     block = max(1, min(num_genes, _NEWTON_STEP_GENE_BLOCK))
     magnitude = np.empty(num_genes, dtype=np.float64)
     curvature = np.empty((block, num_nuisance, num_nuisance), dtype=np.float64)
     for start in range(0, num_genes, block):
         stop = min(start + block, num_genes)
         width = stop - start
+        block_counts = np.asarray(count_panel[:, start:stop], dtype=np.float64)
+        block_beta = coefficients[:, start:stop]
+        block_theta = dispersion[None, start:stop]
+        block_offsets = (
+            offset_panel if offset_panel.shape[1] == 1 else offset_panel[:, start:stop]
+        )
+        eta = block_offsets + design @ block_beta
+        mean = np.exp(np.clip(eta, -_ETA_CLIP, _ETA_CLIP))
+        denominator = block_theta + mean
+        residual = block_theta * (block_counts - mean) / denominator
+        weight = block_theta * mean / denominator
+        gradient = design.T @ residual - prior_precision * block_beta
         for offset in range(width):
-            column = weight[:, start + offset, None]
-            curvature[offset] = nuisance_design.T @ (nuisance_design * column)
+            column = weight[:, offset, None]
+            curvature[offset] = design.T @ (design * column)
         block_curvature = curvature[:width] + ridge
-        step = np.linalg.solve(block_curvature, gradient.T[start:stop, :, None])[:, :, 0].T
+        step = np.linalg.solve(block_curvature, gradient.T[:, :, None])[:, :, 0].T
         magnitude[start:stop] = np.max(np.abs(step), axis=0)
     return magnitude
 
@@ -2100,9 +2320,17 @@ def run_low_moi_score_permutations(
                         "resampling_mechanism='propensity', which keeps each target's pool "
                         "rows and logits."
                     )
-                if permutations.shared_logits is None or permutations.pool_intercepts is None:
+                compact_propensity = (
+                    permutations.propensity_coefficients is not None
+                    and permutations.propensity_basis is not None
+                )
+                legacy_propensity = (
+                    permutations.shared_logits is not None
+                    and permutations.pool_intercepts is not None
+                )
+                if not compact_propensity and not legacy_propensity:
                     raise ValueError(
-                        "permutations predate the decomposed selection model; recompute them "
+                        "permutations do not carry a compact selection model; recompute them "
                         "with precompute_low_moi_permutations."
                     )
                 # The pool projection: the contributions are efficient under the
@@ -2115,8 +2343,12 @@ def run_low_moi_score_permutations(
                     contribution=_low_moi_contribution(),
                     target_codes=target_codes,
                     control_mask=control_mask,
-                    shared_logits=permutations.shared_logits,
-                    intercepts=permutations.pool_intercepts,
+                    shared_logits=(permutations.shared_logits if legacy_propensity else None),
+                    intercepts=(permutations.pool_intercepts if legacy_propensity else None),
+                    propensity_coefficients=(
+                        permutations.propensity_coefficients if compact_propensity else None
+                    ),
+                    propensity_basis=(permutations.propensity_basis if compact_propensity else None),
                     num_targets=design.num_targets,
                     screen_p_value=saddlepoint_screen_p_value,
                     two_sided=saddlepoint_two_sided or "equal-tail",

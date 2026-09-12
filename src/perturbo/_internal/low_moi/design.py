@@ -33,6 +33,7 @@ class LowMOIDesign:
     source_cell_indices: jnp.ndarray
     batch_codes: jnp.ndarray | None = None
     batch_names: tuple[str, ...] | None = None
+    _gene_independent_token: object | None = None
 
     @property
     def num_cells(self) -> int:
@@ -206,4 +207,5 @@ def prepare_low_moi_design(
         source_cell_indices=jnp.asarray(np.flatnonzero(keep), dtype=jnp.int32),
         batch_codes=batch_codes,
         batch_names=batch_names,
+        _gene_independent_token=data._analysis_design_token,
     )

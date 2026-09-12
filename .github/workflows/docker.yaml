@@ -7,7 +7,7 @@ on:
     # The v2 integration branch republishes the MUTABLE :v2-dev tag on every
     # commit, so downstream pipelines can track fixes by re-pulling one stable
     # name instead of editing a pinned sha into their config per attempt.
-    branches: ["feature/cortado-successor"]
+    branches: ["v2-port"]
   # Build and smoke-test (never push) on any PR that can change what lands in
   # the image. A broken image previously shipped because nothing exercised it
   # until after the release tag was cut.

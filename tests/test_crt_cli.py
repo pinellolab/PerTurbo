@@ -96,6 +96,21 @@ def test_the_accumulator_rejects_a_mismatched_gene_axis() -> None:
         accumulator.absorb(_chunk_result(("a",), ("other",), 0.5))
 
 
+def test_the_accumulator_places_gene_blocks_by_name_before_global_bh() -> None:
+    accumulator = CRTAccumulator(
+        element_names=("a", "b"), gene_names=("g0", "g1", "g2"), tail_families=()
+    )
+    accumulator.absorb(_chunk_result(("a", "b"), ("g2",), [[0.9], [0.002]]))
+    accumulator.absorb(_chunk_result(("a", "b"), ("g0", "g1"), [[0.001, 0.9], [0.9, 0.9]]))
+
+    columns = accumulator.finalize()
+    np.testing.assert_allclose(accumulator.p_value[0], [0.001, 0.9, 0.9])
+    np.testing.assert_allclose(accumulator.p_value[1], [0.9, 0.9, 0.002])
+    # Six hypotheses are corrected together after both gene blocks arrive.
+    assert columns["crt_q_value"][0, 0] == pytest.approx(0.006)
+    assert columns["crt_q_value"][1, 2] == pytest.approx(0.006)
+
+
 def test_benjamini_hochberg_spans_every_chunk() -> None:
     """The correction must see the whole family, not one chunk at a time.
 
@@ -414,3 +429,183 @@ def test_an_unsupported_default_steps_aside_but_an_explicit_request_stops(tmp_pa
     explicit = tmp_path / "explicit"; explicit.mkdir()
     with pytest.raises(ValueError, match="latent factors"):
         _run_cli(explicit, "--num-factors", "2", "--crt")
+
+
+def _write_selection_screen(path, *, num_genes: int = 12, seed: int = 5) -> None:
+    """Low-MOI screen whose covariate predicts which target a cell carries.
+
+    ``depth_score`` runs high on t0/t1 and low on t2/t3, so a selection model
+    fitted inside a perturbation chunk sees a different covariate contrast
+    depending on which targets landed in that chunk. Without structure like
+    this the chunk dependence the shared fit removes leaves no trace.
+    """
+
+    rng = np.random.default_rng(seed)
+    targets = [f"t{i}" for i in range(4)]
+    labels = np.asarray(["non-targeting"] * 400 + [t for t in targets for _ in range(80)])
+    shift = np.where(
+        np.isin(labels, ["t0", "t1"]), 1.2, np.where(labels == "non-targeting", 0.0, -1.2)
+    )
+    covariate = rng.normal(size=labels.size) + shift
+    theta = rng.uniform(4.0, 10.0, size=num_genes)
+    eta = np.full((labels.size, num_genes), 1.6) + 0.3 * covariate[:, None]
+    eta[labels == "t0", 1] -= 1.4
+    counts = rng.negative_binomial(theta[None, :], theta[None, :] / (theta[None, :] + np.exp(eta)))
+    obs = pd.DataFrame(
+        {
+            "gene": pd.Categorical(labels),
+            "UMI": counts.sum(axis=1).astype(float),
+            "depth_score": covariate,
+        },
+        index=[f"cell_{i}" for i in range(labels.size)],
+    )
+    var = pd.DataFrame(index=[f"gene_{i}" for i in range(num_genes)])
+    md.MuData({"rna": ad.AnnData(X=sp.csr_matrix(counts.astype(np.float32)), obs=obs, var=var)}).write(path)
+
+
+def _run_selection_screen_cli(tmp_path, subdir: str, *extra: str) -> pd.DataFrame:
+    screen = tmp_path / subdir / "screen.h5mu"
+    screen.parent.mkdir(parents=True)
+    _write_selection_screen(screen)
+    out = tmp_path / subdir / "out"
+    cli_main([
+        "--input", str(screen), "--out-dir", str(out), "--modality-key", "rna",
+        "--perturbation-key", "gene", "--control-substring", "non-targeting",
+        "--library-size-key", "UMI", "--size-factor-mode", "observed",
+        "--continuous-covariates", "depth_score",
+        "--likelihood", "nb", "--num-steps", "200", "--no-save-model-params",
+        "--crt", "--crt-only", "--crt-mechanism", "propensity",
+        "--crt-tail-families", "saddlepoint", "--crt-saddlepoint-only",
+        "--crt-polish-baseline", "--crt-allow-unconverged-baseline",
+        *extra,
+    ])
+    frame = pd.read_parquet(out / "element_effects.parquet")
+    return frame.sort_values(["element", "gene"]).reset_index(drop=True)
+
+
+def test_the_crt_p_values_do_not_move_with_the_chunk_size(tmp_path, capsys) -> None:
+    """The whole point of fitting the selection model over the screen.
+
+    One perturbation per chunk, two per chunk, and no chunking at all give each
+    target different neighbours. With the covariate slopes fitted once over
+    every analysed cell, none of that reaches the p-values.
+    """
+
+    one_at_a_time = _run_selection_screen_cli(tmp_path, "one", "--perturbation-chunk-size", "1")
+    two_at_a_time = _run_selection_screen_cli(tmp_path, "two", "--perturbation-chunk-size", "2")
+    unchunked = _run_selection_screen_cli(tmp_path, "whole")
+
+    tested = unchunked["element"] != "non-targeting"
+    assert unchunked.loc[tested, "crt_saddlepoint_p_value"].notna().all()
+    for other in (one_at_a_time, two_at_a_time):
+        pd.testing.assert_series_equal(other["element"], unchunked["element"])
+        np.testing.assert_allclose(
+            other.loc[tested, "crt_saddlepoint_p_value"].to_numpy(),
+            unchunked.loc[tested, "crt_saddlepoint_p_value"].to_numpy(),
+            rtol=1e-4,
+            atol=1e-8,
+        )
+    # The planted knockdown is still found.
+    planted = unchunked[(unchunked["element"] == "t0") & (unchunked["gene"] == "gene_1")]
+    assert float(planted["crt_saddlepoint_p_value"].iloc[0]) < 1e-3
+
+
+def test_the_shared_selection_model_is_reported_once_per_run(tmp_path, capsys) -> None:
+    """It changes every p-value, so the log has to record that it happened."""
+
+    _run_selection_screen_cli(tmp_path, "logged", "--perturbation-chunk-size", "1")
+    lines = [
+        line
+        for line in capsys.readouterr().out.splitlines()
+        if "shared selection model fit over" in line
+    ]
+    assert len(lines) == 1, lines
+    # 400 control cells plus 320 targeting ones, and the controls are not tested.
+    assert "720 cells" in lines[0] and "320 targeting" in lines[0]
+
+
+def test_the_chunked_and_unchunked_runs_fit_the_same_selection_model(tmp_path, monkeypatch) -> None:
+    """Both assemblies of the screen-wide design must land on the same model.
+
+    Chunked, the CLI cannot see the analysed cells' counts, so it gathers the
+    tested rows from the chunk membership and re-derives their covariates from
+    ``obs``; unchunked it reads them off the loaded data. Those are different
+    pieces of code and they have to agree, or the chunk-size flag would move
+    the p-values through the back door.
+    """
+
+    import perturbo.cli as cli_module
+
+    captured: list[np.ndarray | None] = []
+    original = cli_module.run_crt_for_chunk
+
+    def capture(*args, **kwargs):
+        captured.append(kwargs.get("shared_propensity_coefficients"))
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(cli_module, "run_crt_for_chunk", capture)
+
+    _run_selection_screen_cli(tmp_path, "chunked", "--perturbation-chunk-size", "1")
+    chunked = list(captured)
+    assert len(chunked) == 4 and all(entry is not None for entry in chunked)
+    for entry in chunked[1:]:
+        np.testing.assert_array_equal(entry, chunked[0])
+
+    captured.clear()
+    _run_selection_screen_cli(tmp_path, "whole_again")
+    assert len(captured) == 1 and captured[0] is not None
+    np.testing.assert_allclose(captured[0], chunked[0], rtol=1e-4, atol=1e-6)
+
+
+def test_gene_blocks_reuse_one_low_moi_null_without_reusing_their_baselines(
+    tmp_path, monkeypatch
+) -> None:
+    """Outer gene blocks share the gene-invariant null and retain fresh fits."""
+    import perturbo.cli as cli_module
+    import perturbo.crt as crt_module
+
+    original_precompute = crt_module.precompute_low_moi_permutations
+    precompute_calls: list[int] = []
+
+    def counting_precompute(*args, **kwargs):
+        precompute_calls.append(1)
+        return original_precompute(*args, **kwargs)
+
+    monkeypatch.setattr(crt_module, "precompute_low_moi_permutations", counting_precompute)
+    cached = _run_selection_screen_cli(
+        tmp_path,
+        "cached_gene_blocks",
+        "--gene-chunk-size",
+        "4",
+    )
+    assert len(precompute_calls) == 1
+
+    original_run_crt = cli_module.run_crt_for_chunk
+
+    def without_cached_null(*args, **kwargs):
+        # Keep the outer gene-block tuple protocol, but force each block to
+        # rebuild the same deterministic, gene-invariant propensity null.
+        kwargs["_permutations"] = None
+        return original_run_crt(*args, **kwargs)
+
+    monkeypatch.setattr(cli_module, "run_crt_for_chunk", without_cached_null)
+    precompute_calls.clear()
+    uncached = _run_selection_screen_cli(
+        tmp_path,
+        "uncached_gene_blocks",
+        "--gene-chunk-size",
+        "4",
+    )
+    assert len(precompute_calls) == 3
+
+    # Reusing only the propensity null must be transparent. In particular,
+    # each block still uses its own gene-specific control baseline.
+    pd.testing.assert_frame_equal(cached, uncached, check_exact=True)
+    tested = cached["element"] != "non-targeting"
+    for column in (
+        "crt_z_value",
+        "crt_saddlepoint_p_value",
+        "crt_saddlepoint_log_p_value",
+        "crt_saddlepoint_q_value",
+    ):
+        assert np.isfinite(cached.loc[tested, column].to_numpy(float)).all(), column

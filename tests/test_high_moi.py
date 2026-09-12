@@ -471,7 +471,7 @@ def test_load_analysis_cells_high_moi_grouped_varm_requires_names_or_uns_key() -
         )
 
 
-def test_load_analysis_cells_high_moi_grouped_varm_uses_uns_names_for_subset() -> None:
+def test_load_analysis_cells_high_moi_grouped_varm_rejects_coassigned_subset() -> None:
     data = _make_mudata()
     data["pert"].varm["element_targeted"] = np.array(
         [
@@ -483,9 +483,29 @@ def test_load_analysis_cells_high_moi_grouped_varm_uses_uns_names_for_subset() -
     )
     data["pert"].uns["element_names"] = ["elem1", "elem2"]
 
+    with pytest.raises(ValueError, match="also carry excluded effects"):
+        load_analysis_cells(
+            data,
+            perturbation_key=None,
+            modality_key="rna",
+            perturbation_modality_key="pert",
+            perturbation_element_varm_key="element_targeted",
+            perturbation_element_names_uns_key="element_names",
+            selected_perturbations=["elem2"],
+        )
+
+
+def test_load_analysis_cells_grouped_subset_remains_valid_when_mutually_exclusive() -> None:
+    data = _make_mudata()
+    data["pert"].X[2, 0] = 0
+    data["pert"].varm["element_targeted"] = np.array(
+        [[1, 0], [0, 1], [0, 1]],
+        dtype=np.int8,
+    )
+    data["pert"].uns["element_names"] = ["elem1", "elem2"]
+
     analysis_data = load_analysis_cells(
         data,
-        perturbation_key=None,
         modality_key="rna",
         perturbation_modality_key="pert",
         perturbation_element_varm_key="element_targeted",
@@ -494,12 +514,7 @@ def test_load_analysis_cells_high_moi_grouped_varm_uses_uns_names_for_subset() -
     )
 
     assert analysis_data.pert_names == ["elem2"]
-    assert analysis_data.pert_id.shape == (1, 1)
     assert np.array_equal(np.asarray(analysis_data.pert_id), np.array([[1]], dtype=np.int8))
-    assert np.array_equal(
-        np.asarray(analysis_data.counts),
-        np.array([[0, 0, 3]], dtype=np.int32),
-    )
 
 
 def test_load_analysis_cells_high_moi_grouped_varm_accepts_sparse_mapping() -> None:

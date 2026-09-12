@@ -7,16 +7,20 @@ port preserved the test.
 
 from __future__ import annotations
 
+import dataclasses
+
 import jax.numpy as jnp
 import numpy as np
 import pytest
 
+import perturbo.crt as crt_module
 from perturbo.core import ControlFit, PerTurboData
 from perturbo.crt import (
     CRT_CONTROL_NAME,
     CRT_TAIL_FAMILIES,
     build_chunk_design,
     check_baseline_is_null_mode,
+    fit_shared_propensity_coefficients,
     prepare_crt_baseline,
     run_crt_for_chunk,
 )
@@ -488,6 +492,64 @@ def test_tail_families_can_be_switched_off() -> None:
     assert result.parametric == {}
 
 
+def test_cached_low_moi_selection_plan_matches_uncached_and_validates_assignments(monkeypatch) -> None:
+    control_data, chunk_data, theta, strata = _simulate_screen()
+    string_strata = strata.astype(str)
+    control_data = dataclasses.replace(control_data, _analysis_design_token=object())
+    chunk_data = dataclasses.replace(chunk_data, _analysis_design_token=object())
+    baseline = prepare_crt_baseline(control_data, _fitted_control_fit(control_data, theta))
+    precompute_calls = 0
+    original_precompute = crt_module.precompute_low_moi_permutations
+
+    def counting_precompute(*args, **kwargs):
+        nonlocal precompute_calls
+        precompute_calls += 1
+        return original_precompute(*args, **kwargs)
+
+    monkeypatch.setattr(crt_module, "precompute_low_moi_permutations", counting_precompute)
+    uncached, plan = run_crt_for_chunk(
+        baseline,
+        chunk_data,
+        control_data=dataclasses.replace(control_data),
+        num_resamples=31,
+        strata=string_strata,
+        seed=12,
+        tail_families=(),
+        _return_permutations=True,
+    )
+    cached = run_crt_for_chunk(
+        baseline,
+        chunk_data,
+        control_data=control_data,
+        num_resamples=31,
+        strata=string_strata,
+        seed=12,
+        tail_families=(),
+        saddlepoint_screen_p_value=0.2,
+        _permutations=plan,
+    )
+
+    assert precompute_calls == 1
+    assert plan._validation_nuisance_design is None
+    np.testing.assert_array_equal(cached.observed_score, uncached.observed_score)
+    np.testing.assert_array_equal(cached.p_value, uncached.p_value)
+
+    assignments = np.asarray(chunk_data.pert_id).copy()
+    assignments[[0, 40]] = assignments[[40, 0]]
+    changed = dataclasses.replace(chunk_data, pert_id=jnp.asarray(assignments))
+    with pytest.raises(ValueError, match="target assignments"):
+        run_crt_for_chunk(
+            baseline,
+            changed,
+            control_data=control_data,
+            num_resamples=31,
+            strata=string_strata,
+            seed=12,
+            tail_families=(),
+            _permutations=plan,
+        )
+
+
 def test_the_saddlepoint_only_production_path_matches_the_research_path() -> None:
     """Parity for the propensity saddlepoint with no draws at all.
 
@@ -611,3 +673,156 @@ def test_the_polished_production_path_matches_the_research_fit() -> None:
         atol=1e-4,
     )
     assert np.abs(production.p_value - np.asarray(research.p_value, dtype=np.float64)).max() <= 2.0 / 200
+
+
+def _screen_with_a_selection_covariate(seed: int = 3):
+    """The same screen, but with a covariate that genuinely predicts selection.
+
+    Targets 0-2 sit high on the covariate and targets 3-5 low, so which targets
+    a chunk holds decides what a selection model fitted inside that chunk sees.
+    Without a shift like this the estimator's chunk dependence is invisible.
+    """
+
+    control_data, chunk_data, theta, strata = _simulate_screen(seed=seed)
+    codes = np.asarray(chunk_data.pert_id)
+    covariates = np.asarray(chunk_data.covariates).copy()
+    covariates[codes < 3, 0] += 1.5
+    covariates[codes >= 3, 0] -= 1.5
+    chunk_data = dataclasses.replace(chunk_data, covariates=jnp.asarray(covariates))
+    return control_data, chunk_data, theta, strata
+
+
+def _split_off_last_three_targets(chunk_data: PerTurboData) -> PerTurboData:
+    """Targets 3-5 alone, laid out as the production chunk loader hands them over."""
+
+    codes = np.asarray(chunk_data.pert_id)
+    keep = codes >= 3
+    return PerTurboData(
+        counts=jnp.asarray(np.asarray(chunk_data.counts)[keep]),
+        pert_id=jnp.asarray(codes[keep] - 3),
+        pert_names=list(chunk_data.pert_names[3:]),
+        gene_names=chunk_data.gene_names,
+        size_factors=jnp.asarray(np.asarray(chunk_data.size_factors)[keep]),
+        covariates=jnp.asarray(np.asarray(chunk_data.covariates)[keep]),
+        covariate_names=chunk_data.covariate_names,
+        library_size_center_log_mean=0.0,
+    )
+
+
+def _selection_model_over(control_data: PerTurboData, chunk_data: PerTurboData) -> np.ndarray:
+    """Fit the selection model over exactly these cells, as the CLI does per screen."""
+
+    control_covariates = np.asarray(control_data.covariates)
+    chunk_covariates = np.asarray(chunk_data.covariates)
+    num_control = control_covariates.shape[0]
+    num_target = chunk_covariates.shape[0]
+    # [intercept, covariates], controls first: the layout build_chunk_design
+    # gives the CRT, which is the parametrisation the coefficients travel in.
+    nuisance = np.concatenate(
+        [
+            np.ones((num_control + num_target, 1), dtype=np.float32),
+            np.concatenate([control_covariates, chunk_covariates], axis=0),
+        ],
+        axis=1,
+    )
+    targeting = np.concatenate([np.zeros(num_control), np.ones(num_target)])
+    return fit_shared_propensity_coefficients(nuisance, targeting)
+
+
+def _saddlepoint_log_p(baseline, chunk, control_data, shared) -> np.ndarray:
+    result = run_crt_for_chunk(
+        baseline,
+        chunk,
+        control_data=control_data,
+        num_resamples=9,
+        seed=8,
+        tail_families=("saddlepoint",),
+        resampling_mechanism="propensity",
+        saddlepoint_only=True,
+        saddlepoint_screen_p_value=0.5,
+        shared_propensity_coefficients=shared,
+    )
+    return result.parametric["saddlepoint"]["log_p_value"]
+
+
+def test_screen_wide_slopes_survive_a_change_of_chunk_size() -> None:
+    """A target's p-value must not move when the chunk-size flag regroups it.
+
+    Slopes fitted once over the whole screen are the same numbers in every
+    chunk, so targets 3-5 get the same saddlepoint tail whether they are tested
+    beside targets 0-2 or on their own.
+    """
+
+    control_data, chunk_data, theta, _ = _screen_with_a_selection_covariate()
+    baseline = prepare_crt_baseline(control_data, _fitted_control_fit(control_data, theta))
+    shared = _selection_model_over(control_data, chunk_data)
+
+    together = _saddlepoint_log_p(baseline, chunk_data, control_data, shared)
+    apart = _saddlepoint_log_p(
+        baseline, _split_off_last_three_targets(chunk_data), control_data, shared
+    )
+
+    np.testing.assert_allclose(apart, together[3:], rtol=1e-6, atol=1e-8)
+
+
+def test_slopes_fitted_inside_the_chunk_move_with_the_chunk_size() -> None:
+    """The same run under the estimator the screen-wide fit replaces.
+
+    Fitting the shared slopes on the cells the chunk happens to hold is the old
+    in-chunk behaviour. Here it makes targets 3-5 answer differently depending
+    on whether targets 0-2 shared their chunk, which is the bug.
+    """
+
+    control_data, chunk_data, theta, _ = _screen_with_a_selection_covariate()
+    baseline = prepare_crt_baseline(control_data, _fitted_control_fit(control_data, theta))
+    split = _split_off_last_three_targets(chunk_data)
+
+    together = _saddlepoint_log_p(
+        baseline, chunk_data, control_data, _selection_model_over(control_data, chunk_data)
+    )
+    apart = _saddlepoint_log_p(
+        baseline, split, control_data, _selection_model_over(control_data, split)
+    )
+
+    assert np.max(np.abs(apart - together[3:])) > 1e-2
+
+
+def test_screen_wide_slopes_are_the_in_design_fit_when_nothing_is_chunked() -> None:
+    """Unchunked, "over the whole screen" and "inside the chunk" are the same cells.
+
+    The CLI passes the screen-wide coefficients on the unchunked path too, so
+    that one piece of code serves both, and this is the claim that makes that
+    free. It also checks the assembly the CLI does by hand - controls first,
+    ``[intercept, covariates]``, that column order - against the design the CRT
+    actually builds, which is the thing the coefficients are interpreted in.
+    """
+
+    control_data, chunk_data, theta, _ = _screen_with_a_selection_covariate()
+    baseline = prepare_crt_baseline(control_data, _fitted_control_fit(control_data, theta))
+    assembled_by_the_caller = _selection_model_over(control_data, chunk_data)
+
+    design = build_chunk_design(baseline, chunk_data, control_data=control_data)
+    nuisance = np.asarray(design.nuisance_design, dtype=np.float64)
+    fitted_in_the_design = fit_shared_propensity_coefficients(
+        nuisance, (np.asarray(design.target_codes) >= 0).astype(np.float32)
+    )
+
+    # Compared as predictors, not coefficients: the design carries no unique
+    # coefficient vector when a batch one-hot sits beside the intercept, and
+    # only the predictor is identified.
+    np.testing.assert_allclose(
+        nuisance @ assembled_by_the_caller, nuisance @ fitted_in_the_design, rtol=0, atol=1e-4
+    )
+    np.testing.assert_allclose(
+        _saddlepoint_log_p(baseline, chunk_data, control_data, assembled_by_the_caller),
+        _saddlepoint_log_p(baseline, chunk_data, control_data, fitted_in_the_design),
+        rtol=1e-6,
+        atol=1e-8,
+    )
+
+
+def test_shared_coefficients_must_match_the_nuisance_columns() -> None:
+    control_data, chunk_data, theta, _ = _screen_with_a_selection_covariate()
+    baseline = prepare_crt_baseline(control_data, _fitted_control_fit(control_data, theta))
+    with pytest.raises(ValueError, match="one coefficient per nuisance column"):
+        _saddlepoint_log_p(baseline, chunk_data, control_data, np.zeros(7))

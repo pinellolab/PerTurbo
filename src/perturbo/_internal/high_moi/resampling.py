@@ -156,6 +156,129 @@ def _logistic_irls_orthonormal(
     return coef
 
 
+@partial(jax.jit, static_argnames=("max_iterations",))
+def _logistic_irls_masked_orthonormal(
+    indicators: jnp.ndarray,
+    inclusion: jnp.ndarray,
+    basis: jnp.ndarray,
+    jitter: jnp.ndarray,
+    eta_clip: jnp.ndarray,
+    *,
+    max_iterations: int,
+) -> jnp.ndarray:
+    """Batched IRLS where each response is fit on its own subset of rows."""
+
+    num_features = basis.shape[1]
+    eye = jnp.eye(num_features, dtype=basis.dtype)
+
+    def step(coef, _):
+        probability = jax.nn.sigmoid(jnp.clip(coef @ basis.T, -eta_clip, eta_clip))
+        weight = jnp.clip(probability * (1.0 - probability), 1e-9, None) * inclusion
+        gradient = ((indicators - probability) * inclusion) @ basis
+        curvature = jnp.einsum("nk,en,nl->ekl", basis, weight, basis) + jitter * eye
+        return coef + jnp.linalg.solve(curvature, gradient[..., None])[..., 0], None
+
+    coef, _ = jax.lax.scan(
+        step,
+        jnp.zeros((indicators.shape[0], num_features), dtype=basis.dtype),
+        None,
+        length=max_iterations,
+    )
+    return coef
+
+
+def _rank_revealing_basis(design: np.ndarray | jnp.ndarray) -> jnp.ndarray:
+    """An orthonormal basis for exactly the numerical column space of ``design``.
+
+    A reduced, unpivoted QR always returns one column per input column.  When
+    the design contains a zero or dependent column, the extra columns of Q are
+    an arbitrary completion outside the supplied design's span.  Feeding those
+    columns to the propensity GLM therefore adds predictors the caller never
+    supplied.
+
+    Normalize nonzero columns before the SVD so changing a covariate's units
+    cannot change the numerical rank decision.  The tolerance is the standard
+    LAPACK-style relative threshold, stated explicitly here because the fitted
+    assignment law must not depend on a library default.  The host-side SVD is
+    intentional: this small ``cells x covariates`` decomposition is performed
+    once per propensity design, while the large batched IRLS remains on JAX.
+    """
+
+    raw = np.asarray(design)
+    source_epsilon = (
+        np.finfo(raw.dtype).eps if np.issubdtype(raw.dtype, np.floating) else np.finfo(np.float64).eps
+    )
+    matrix = np.asarray(raw, dtype=np.float64)
+    if matrix.ndim != 2:
+        raise ValueError("design must be a two-dimensional matrix.")
+    if not np.isfinite(matrix).all():
+        raise ValueError("design must contain only finite values.")
+    if matrix.shape[0] == 0:
+        raise ValueError("design must contain at least one row.")
+
+    norms = np.linalg.norm(matrix, axis=0)
+    nonzero = norms > 0.0
+    if not np.any(nonzero):
+        return jnp.zeros((matrix.shape[0], 0), dtype=jnp.float32)
+    scaled = matrix[:, nonzero] / norms[nonzero]
+    left, singular_values, _ = np.linalg.svd(scaled, full_matrices=False)
+    if singular_values.size == 0:
+        rank = 0
+    else:
+        # The decomposition itself runs in float64, so its usual LAPACK bound
+        # scales with the row count. Source quantization is different: after
+        # column normalization its perturbation grows with the number of
+        # columns, not with the number of observations. Multiplying float32
+        # epsilon by ``n_rows`` would make the rank tolerance approach one on
+        # million-cell screens and discard ordinary correlated covariates.
+        tolerance = max(
+            max(scaled.shape) * np.finfo(np.float64).eps,
+            8.0 * np.sqrt(scaled.shape[1]) * source_epsilon,
+        ) * float(singular_values[0])
+        rank = int(np.count_nonzero(singular_values > tolerance))
+    return jnp.asarray(left[:, :rank], dtype=jnp.float32)
+
+
+def propensity_basis(design: np.ndarray | jnp.ndarray) -> jnp.ndarray:
+    """Return the rank-revealing propensity basis used by the fitters."""
+
+    return _rank_revealing_basis(design)
+
+
+def fit_masked_propensity_coefficients(
+    indicators: np.ndarray | jnp.ndarray,
+    inclusion: np.ndarray | jnp.ndarray,
+    basis: np.ndarray | jnp.ndarray,
+    *,
+    max_iterations: int = 25,
+    jitter: float = 1e-6,
+    eta_clip: float = 30.0,
+) -> jnp.ndarray:
+    """Fit several logistic models on row subsets in one shared basis.
+
+    ``indicators`` and ``inclusion`` are both ``(models, cells)``. Rows where
+    ``inclusion`` is zero contribute neither score nor curvature. This is used
+    by the low-MOI CRT to fit each target only against its own valid pool while
+    retaining a compact common basis for the saddlepoint calculation.
+    """
+
+    y = jnp.atleast_2d(jnp.asarray(indicators, dtype=jnp.float32))
+    mask = jnp.atleast_2d(jnp.asarray(inclusion, dtype=jnp.float32))
+    Q = jnp.asarray(basis, dtype=jnp.float32)
+    if y.shape != mask.shape:
+        raise ValueError("indicators and inclusion must have the same shape.")
+    if y.shape[1] != Q.shape[0]:
+        raise ValueError("indicators and basis disagree on the cell count.")
+    return _logistic_irls_masked_orthonormal(
+        y,
+        mask,
+        Q,
+        jnp.asarray(jitter, dtype=jnp.float32),
+        jnp.asarray(eta_clip, dtype=jnp.float32),
+        max_iterations=max_iterations,
+    )
+
+
 def fit_propensity_probabilities(
     indicators: np.ndarray | jnp.ndarray,
     design: np.ndarray | jnp.ndarray,
@@ -173,11 +296,13 @@ def fit_propensity_probabilities(
     equation is what makes ``sum(p)`` reproduce the observed selected count,
     and a penalty would quietly break it.
 
-    The fit runs in an orthonormal basis for the design's column space, taken
-    by QR. Fitted probabilities are invariant to any full-rank linear
+    The fit runs in a rank-revealing orthonormal basis for the design's column
+    space. Fitted probabilities are invariant to any full-rank linear
     reparameterization, so this changes nothing statistically while making
     ``Q'WQ`` well conditioned - which is what lets the whole thing run in
-    float32 without the Hessian solve degrading.
+    float32 without the Hessian solve degrading. Zero and dependent columns
+    are removed from the basis rather than letting a QR completion invent
+    directions outside the supplied design.
 
     ``eta_clip`` bounds the linear predictor, standing in for the step-halving
     a production GLM routine does; without it a separable element sends the
@@ -232,6 +357,7 @@ def fit_propensity_coefficients(
     max_iterations: int = 25,
     jitter: float = 1e-6,
     eta_clip: float = 30.0,
+    basis: np.ndarray | jnp.ndarray | None = None,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
     """The same fits, returned as ``(coefficients, basis)`` in an orthonormal basis.
 
@@ -257,7 +383,9 @@ def fit_propensity_coefficients(
     Z = jnp.asarray(design, dtype=jnp.float32)
     if y.shape[1] != Z.shape[0]:
         raise ValueError("indicators and design disagree on the cell count.")
-    basis, _ = jnp.linalg.qr(Z)
+    basis = _rank_revealing_basis(Z) if basis is None else jnp.asarray(basis, dtype=jnp.float32)
+    if basis.ndim != 2 or basis.shape[0] != Z.shape[0]:
+        raise ValueError("basis must have shape (cells, rank).")
     coefficients = _logistic_irls_orthonormal(
         y,
         basis,

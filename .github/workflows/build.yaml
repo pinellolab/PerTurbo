@@ -2,9 +2,9 @@ name: Check build
 
 on:
   push:
-    branches: [main]
+    branches: [main, v2-port]
   pull_request:
-    branches: [main]
+    branches: [main, v2-port]
 
 jobs:
   package:
@@ -16,7 +16,7 @@ jobs:
           python-version: "3.11"
       - uses: astral-sh/setup-uv@v5
       - run: uv build
-      - run: uv run --with twine twine check --strict dist/*
+      - run: uv run --with "twine>=7" twine check --strict dist/*
       - run: uv venv /tmp/perturbo-wheel
       - run: uv pip install --python /tmp/perturbo-wheel/bin/python dist/*.whl
       - run: /tmp/perturbo-wheel/bin/perturbo --help

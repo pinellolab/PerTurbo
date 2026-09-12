@@ -96,7 +96,7 @@ class LogNormalNegativeBinomial(Distribution):
             total_count=self.total_count,
             logits=self.logits + normals,
         )
-        # The normal draw already expanded the batch by sample_shape.
+        # The normal draw already expanded the NB batch by sample_shape.
         return nb_dist.sample(nb_key)
 
     def expand(self, batch_shape):
