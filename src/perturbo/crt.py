@@ -60,6 +60,7 @@ import jax.numpy as jnp
 import numpy as np
 
 from perturbo.core import PerTurboData, ControlFit, _normalize_likelihood_name
+from perturbo.sparse_design import IndexedDesignMatrix
 from perturbo._internal.chunked_runner import iter_gene_chunks, replace_gene_axis
 from perturbo._internal.low_moi.design import prepare_low_moi_design
 from perturbo._internal.parametric_null import (
@@ -79,6 +80,7 @@ from perturbo.utils import compute_size_factors
 
 __all__ = [
     "BaselineNullCheck",
+    "AllCellsPropensityFit",
     "ChunkCRTResult",
     "ControlBlock",
     "ControlNuisance",
@@ -99,6 +101,7 @@ __all__ = [
     "control_block_for_genes",
     "exclude_targets",
     "prepare_crt_baseline",
+    "prepare_all_cells_propensity",
     "polish_baseline_to_null_mode",
     "run_crt_for_chunk",
     "run_crt_all_cells",
@@ -262,7 +265,11 @@ def assemble_control_nuisance(
     size-factor mode those are zeros and this is still correct.
     """
 
-    counts = np.asarray(control_data.counts, dtype=np.float64)
+    # Keep the source dtype here. The baseline owns this panel for the whole
+    # CRT run, and eagerly widening a float32 count matrix to float64 doubles
+    # its resident CPU footprint. Numerical kernels cast only the active gene
+    # block to float64 when they need diagnostic precision.
+    counts = np.asarray(control_data.counts)
     if counts.ndim != 2:
         raise ValueError("control_data.counts must be a cells-by-genes matrix.")
     num_cells, num_genes = counts.shape
@@ -501,7 +508,7 @@ def polish_baseline_to_null_mode(
 
     from perturbo._internal.jax_kernels import fisher_nb_null
 
-    counts = np.asarray(nuisance.counts, dtype=np.float64)
+    counts = np.asarray(nuisance.counts)
     num_cells, num_genes = counts.shape
     if gene_block < 1 or max_iterations < 1:
         raise ValueError("gene_block and max_iterations must be positive.")
@@ -770,8 +777,24 @@ def build_chunk_design(
     num_control = control_counts.shape[0]
     num_chunk = chunk_counts.shape[0]
 
-    chunk_labels = np.asarray(chunk_data.pert_id)
-    if chunk_labels.ndim == 2:
+    chunk_labels = chunk_data.pert_id
+    if isinstance(chunk_labels, IndexedDesignMatrix):
+        indices = np.asarray(chunk_labels.indices, dtype=np.int64)
+        values = np.asarray(chunk_labels.values)
+        active = (indices >= 0) & (values > 0)
+        assignments = active.sum(axis=1)
+        num_multi_dropped = int(np.count_nonzero(assignments > 1))
+        if num_multi_dropped:
+            print(
+                f"[perturbo] CRT: setting aside {num_multi_dropped} of {num_chunk} chunk cells that carry "
+                "more than one perturbation; the control-anchored test needs one per cell "
+                "(--crt-pool all-cells keeps them)."
+            )
+        first = np.argmax(active, axis=1)
+        codes = np.where(assignments == 1, indices[np.arange(num_chunk), first], -1)
+        unassigned = assignments != 1
+    elif chunk_labels.ndim == 2:
+        chunk_labels = np.asarray(chunk_labels)
         assignments = np.asarray(chunk_labels > 0).sum(axis=1)
         num_multi_dropped = int(np.count_nonzero(assignments > 1))
         if num_multi_dropped:
@@ -786,6 +809,7 @@ def build_chunk_design(
         codes = np.where(assignments == 1, np.argmax(np.asarray(chunk_labels > 0), axis=1), -1)
         unassigned = assignments != 1
     elif chunk_labels.ndim == 1:
+        chunk_labels = np.asarray(chunk_labels)
         codes = chunk_labels.astype(np.int64)
         unassigned = np.zeros(num_chunk, dtype=bool)
         num_multi_dropped = 0
@@ -982,13 +1006,17 @@ def run_crt_for_chunk(
 
     # cells the control-anchored test set aside; the design builder prints it.
 
-    _labels = np.asarray(chunk_data.pert_id)
-
-    num_multi_dropped = (
-
-        int(np.count_nonzero(np.asarray(_labels > 0).sum(axis=1) > 1)) if _labels.ndim == 2 else 0
-
-    )
+    _labels = chunk_data.pert_id
+    if isinstance(_labels, IndexedDesignMatrix):
+        _active = (np.asarray(_labels.indices) >= 0) & (np.asarray(_labels.values) > 0)
+        num_multi_dropped = int(np.count_nonzero(_active.sum(axis=1) > 1))
+    else:
+        _labels = np.asarray(_labels)
+        num_multi_dropped = (
+            int(np.count_nonzero(np.asarray(_labels > 0).sum(axis=1) > 1))
+            if _labels.ndim == 2
+            else 0
+        )
 
     design = build_chunk_design(baseline, chunk_data, control_data=control_data)
     categorical_batch = design.batch_codes is not None and _categorical_batch_applies(design)
@@ -1175,14 +1203,20 @@ def _element_membership(data: PerTurboData) -> tuple[np.ndarray, np.ndarray, int
         )
     guide_to_element = np.asarray(data.guide_to_element) > 0
     num_guides, num_elements = guide_to_element.shape
-    guide_matrix = np.asarray(data.guide_matrix)
+    guide_matrix = data.guide_matrix
     num_cells = int(guide_matrix.shape[0])
     if int(guide_matrix.shape[1]) != int(num_guides):
         raise ValueError(
             f"guide_matrix has {guide_matrix.shape[1]} guides but guide_to_element maps {num_guides}."
         )
-    cells, guides = np.nonzero(guide_matrix > 0)
-    del guide_matrix
+    if isinstance(guide_matrix, IndexedDesignMatrix):
+        indices = np.asarray(guide_matrix.indices, dtype=np.int64)
+        values = np.asarray(guide_matrix.values)
+        active = (indices >= 0) & (values > 0)
+        cells = np.broadcast_to(np.arange(num_cells)[:, None], indices.shape)[active]
+        guides = indices[active]
+    else:
+        cells, guides = np.nonzero(np.asarray(guide_matrix) > 0)
     # Expand each detected (cell, guide) to the guide's elements. The map's
     # non-zeros come out sorted by guide, so a guide's elements are one
     # contiguous run starting at offsets[guide].
@@ -1205,6 +1239,110 @@ def _element_membership(data: PerTurboData) -> tuple[np.ndarray, np.ndarray, int
     return cell_index.astype(np.int64), element_index.astype(np.int64), int(num_elements)
 
 
+@dataclass(frozen=True)
+class AllCellsPropensityFit:
+    """Gene-independent state reused across gene blocks of an all-cells CRT."""
+
+    cell_index: np.ndarray
+    element_index: np.ndarray
+    element_names: tuple[str, ...]
+    testable: np.ndarray
+    coefficients: np.ndarray
+    basis: np.ndarray
+    num_cells: int
+
+
+def prepare_all_cells_propensity(
+    baseline: CRTBaseline,
+    data: PerTurboData,
+    *,
+    min_cells_per_element: int = 1,
+    include_guide_count: bool = True,
+    max_iterations: int = 25,
+    eta_clip: float = 30.0,
+    element_batch_size: int = 64,
+) -> AllCellsPropensityFit:
+    """Fit the all-cells assignment models once for reuse over gene blocks."""
+
+    from perturbo._internal.high_moi.resampling import (
+        fit_propensity_coefficients,
+        propensity_basis,
+    )
+
+    num_cells = int(np.asarray(data.counts).shape[0])
+    if baseline.num_control_cells != num_cells:
+        raise ValueError(
+            "The all-cells CRT baseline must be prepared on the analysed cells themselves "
+            f"(baseline holds {baseline.num_control_cells} cells, data holds {num_cells})."
+        )
+    cell_index, element_index, num_elements = _element_membership(data)
+    element_names = tuple(str(name) for name in data.pert_names)
+    if len(element_names) != num_elements:
+        raise ValueError(
+            f"pert_names has {len(element_names)} entries but guide_to_element maps to {num_elements} elements."
+        )
+    sizes = np.bincount(element_index, minlength=num_elements)
+    testable = sizes >= int(min_cells_per_element)
+    keep_pair = testable[element_index]
+    cell_index, element_index = cell_index[keep_pair], element_index[keep_pair]
+
+    nuisance_design = np.asarray(baseline.nuisance.nuisance_design, dtype=np.float32)
+    propensity_design = nuisance_design
+    if include_guide_count:
+        if isinstance(data.guide_matrix, IndexedDesignMatrix):
+            detected = np.sum(
+                (np.asarray(data.guide_matrix.indices) >= 0)
+                & (np.asarray(data.guide_matrix.values) > 0),
+                axis=1,
+                dtype=np.float64,
+            )
+        else:
+            detected = np.asarray(np.asarray(data.guide_matrix) > 0).sum(axis=1).astype(np.float64)
+        moi = np.log1p(detected)
+        moi = (moi - moi.mean()) / max(float(moi.std()), 1e-8)
+        propensity_design = np.concatenate(
+            [nuisance_design, moi.astype(np.float32)[:, None]], axis=1
+        )
+
+    coefficients_parts = []
+    basis = None
+    order = np.argsort(element_index, kind="stable")
+    sorted_elements = element_index[order]
+    sorted_cells = cell_index[order]
+    starts = np.searchsorted(sorted_elements, np.arange(num_elements + 1))
+    for start in range(0, num_elements, int(element_batch_size)):
+        stop = min(start + int(element_batch_size), num_elements)
+        indicators = np.zeros((stop - start, num_cells), dtype=np.float32)
+        for local, element in enumerate(range(start, stop)):
+            indicators[local, sorted_cells[starts[element] : starts[element + 1]]] = 1.0
+        coef, basis_batch = fit_propensity_coefficients(
+            indicators,
+            propensity_design,
+            max_iterations=int(max_iterations),
+            eta_clip=float(eta_clip),
+            basis=basis,
+        )
+        coefficients_parts.append(np.asarray(coef))
+        if basis is None:
+            basis = np.asarray(basis_batch)
+    if basis is None:
+        basis = np.asarray(propensity_basis(propensity_design))
+    coefficients = (
+        np.concatenate(coefficients_parts, axis=0)
+        if coefficients_parts
+        else np.zeros((0, basis.shape[1]), dtype=np.float32)
+    )
+    return AllCellsPropensityFit(
+        cell_index=cell_index,
+        element_index=element_index,
+        element_names=element_names,
+        testable=testable,
+        coefficients=coefficients,
+        basis=basis,
+        num_cells=num_cells,
+    )
+
+
 def run_crt_all_cells(
     baseline: CRTBaseline,
     data: PerTurboData,
@@ -1218,6 +1356,7 @@ def run_crt_all_cells(
     include_guide_count_in_propensity: bool = True,
     propensity_max_iterations: int = 25,
     eta_clip: float = 30.0,
+    propensity_fit: AllCellsPropensityFit | None = None,
 ) -> ChunkCRTResult:
     """The propensity saddlepoint CRT with every analysed cell as the pool (high MOI).
 
@@ -1240,7 +1379,6 @@ def run_crt_all_cells(
     the caller's, as for the chunked low-MOI path.
     """
 
-    from perturbo._internal.high_moi.resampling import fit_propensity_coefficients
     from perturbo._internal.saddlepoint import fit_high_moi_propensity_saddlepoint
 
     num_cells = int(np.asarray(data.counts).shape[0])
@@ -1254,46 +1392,26 @@ def run_crt_all_cells(
     if not 0.0 < screen_p_value <= 1.0:
         raise ValueError("screen_p_value must lie in (0, 1].")
 
-    cell_index, element_index, num_elements = _element_membership(data)
-    element_names = tuple(str(name) for name in data.pert_names)
-    if len(element_names) != num_elements:
-        raise ValueError(
-            f"pert_names has {len(element_names)} entries but guide_to_element maps to {num_elements} elements."
-        )
-    sizes = np.bincount(element_index, minlength=num_elements)
-    testable = sizes >= int(min_cells_per_element)
-    keep_pair = testable[element_index]
-    cell_index, element_index = cell_index[keep_pair], element_index[keep_pair]
-
     nuisance_design = np.asarray(baseline.nuisance.nuisance_design, dtype=np.float32)
-    propensity_design = nuisance_design
-    if include_guide_count_in_propensity:
-        detected = np.asarray(np.asarray(data.guide_matrix) > 0).sum(axis=1).astype(np.float64)
-        moi = np.log1p(detected)
-        moi = (moi - moi.mean()) / max(float(moi.std()), 1e-8)
-        propensity_design = np.concatenate([nuisance_design, moi.astype(np.float32)[:, None]], axis=1)
-
-    # Per-element selection models, in batches so the dense indicator block
-    # stays (batch, cells). The basis is the same QR of one design for every
-    # batch, so it is taken from the first.
-    coefficients_parts = []
-    basis = None
-    order = np.argsort(element_index, kind="stable")
-    sorted_elements = element_index[order]
-    sorted_cells = cell_index[order]
-    starts = np.searchsorted(sorted_elements, np.arange(num_elements + 1))
-    for start in range(0, num_elements, int(element_batch_size)):
-        stop = min(start + int(element_batch_size), num_elements)
-        indicators = np.zeros((stop - start, num_cells), dtype=np.float32)
-        for local, element in enumerate(range(start, stop)):
-            indicators[local, sorted_cells[starts[element] : starts[element + 1]]] = 1.0
-        coef, basis_batch = fit_propensity_coefficients(
-            indicators, propensity_design, max_iterations=int(propensity_max_iterations), eta_clip=float(eta_clip)
+    if propensity_fit is None:
+        propensity_fit = prepare_all_cells_propensity(
+            baseline,
+            data,
+            min_cells_per_element=int(min_cells_per_element),
+            include_guide_count=bool(include_guide_count_in_propensity),
+            max_iterations=int(propensity_max_iterations),
+            eta_clip=float(eta_clip),
+            element_batch_size=int(element_batch_size),
         )
-        coefficients_parts.append(np.asarray(coef))
-        if basis is None:
-            basis = np.asarray(basis_batch)
-    coefficients = np.concatenate(coefficients_parts, axis=0) if coefficients_parts else np.zeros((0, propensity_design.shape[1]))
+    element_names = tuple(str(name) for name in data.pert_names)
+    if propensity_fit.num_cells != num_cells or propensity_fit.element_names != element_names:
+        raise ValueError("propensity_fit does not match the all-cells CRT data.")
+    cell_index = propensity_fit.cell_index
+    element_index = propensity_fit.element_index
+    testable = propensity_fit.testable
+    coefficients = propensity_fit.coefficients
+    basis = propensity_fit.basis
+    num_elements = len(element_names)
 
     num_genes = baseline.num_genes
     width = num_genes if gene_chunk_size is None else int(gene_chunk_size)
@@ -1392,12 +1510,38 @@ def exclude_targets(chunk_data: PerTurboData, drop_names: Iterable[str]) -> PerT
     if keep_targets.all():
         return chunk_data
 
-    labels = np.asarray(chunk_data.pert_id)
+    labels = chunk_data.pert_id
     old_to_new = np.full(len(names), -1, dtype=np.int64)
     old_to_new[np.flatnonzero(keep_targets)] = np.arange(int(keep_targets.sum()))
-    if labels.ndim == 1:
-        keep_cells = keep_targets[labels.astype(np.int64)]
-        new_labels = old_to_new[labels.astype(np.int64)[keep_cells]]
+    if isinstance(labels, IndexedDesignMatrix):
+        indices = np.asarray(labels.indices, dtype=np.int64)
+        values = np.asarray(labels.values)
+        safe = np.maximum(indices, 0)
+        mapped = old_to_new[safe]
+        active = (indices >= 0) & (values != 0) & (mapped >= 0)
+        keep_cells = active.any(axis=1)
+        kept_active = active[keep_cells]
+        kept_mapped = mapped[keep_cells]
+        kept_values = values[keep_cells]
+        widths = kept_active.sum(axis=1)
+        width = max(1, int(widths.max(initial=0)))
+        new_indices = np.full((int(keep_cells.sum()), width), -1, dtype=np.int32)
+        new_values = np.zeros((int(keep_cells.sum()), width), dtype=np.float32)
+        for row in range(new_indices.shape[0]):
+            row_active = kept_active[row]
+            count = int(row_active.sum())
+            if count:
+                new_indices[row, :count] = kept_mapped[row, row_active]
+                new_values[row, :count] = kept_values[row, row_active]
+        new_labels = IndexedDesignMatrix(
+            indices=jnp.asarray(new_indices),
+            values=jnp.asarray(new_values),
+            num_columns=int(keep_targets.sum()),
+        )
+    elif labels.ndim == 1:
+        labels_array = np.asarray(labels)
+        keep_cells = keep_targets[labels_array.astype(np.int64)]
+        new_labels = old_to_new[labels_array.astype(np.int64)[keep_cells]]
     elif labels.ndim == 2:
         binary = np.asarray(labels > 0)
         keep_cells = binary[:, keep_targets].any(axis=1)
@@ -1408,17 +1552,24 @@ def exclude_targets(chunk_data: PerTurboData, drop_names: Iterable[str]) -> PerT
         return None
 
     def _rows(values):
-        return None if values is None else jnp.asarray(np.asarray(values)[keep_cells])
+        if values is None:
+            return None
+        if isinstance(values, IndexedDesignMatrix):
+            return values.take_rows(keep_cells)
+        return jnp.asarray(np.asarray(values)[keep_cells])
 
     return PerTurboData(
         counts=jnp.asarray(np.asarray(chunk_data.counts)[keep_cells]),
-        pert_id=jnp.asarray(new_labels),
+        pert_id=(new_labels if isinstance(new_labels, IndexedDesignMatrix) else jnp.asarray(new_labels)),
         pert_names=[name for name, keep in zip(names, keep_targets, strict=True) if keep],
         gene_names=list(chunk_data.gene_names),
         cell_mask=_rows(chunk_data.cell_mask),
         size_factors=_rows(chunk_data.size_factors),
         covariates=_rows(chunk_data.covariates),
         covariate_names=None if chunk_data.covariate_names is None else list(chunk_data.covariate_names),
+        guide_matrix=_rows(chunk_data.guide_matrix),
+        guide_names=None if chunk_data.guide_names is None else list(chunk_data.guide_names),
+        guide_to_element=chunk_data.guide_to_element,
         library_size_center_log_mean=chunk_data.library_size_center_log_mean,
     )
 
@@ -1444,6 +1595,8 @@ class CRTAccumulator:
     def __post_init__(self) -> None:
         shape = (len(self.element_names), len(self.gene_names))
         self._index = {name: position for position, name in enumerate(self.element_names)}
+        self._gene_index = {name: position for position, name in enumerate(self.gene_names)}
+        self._dropped_by_target_chunk: dict[tuple[str, ...], int] = {}
         self.num_multi_assignment_cells_dropped = 0
         self.observed_score = np.full(shape, np.nan, dtype=np.float64)
         self.p_value = np.full(shape, np.nan, dtype=np.float64)
@@ -1462,26 +1615,36 @@ class CRTAccumulator:
         }
 
     def absorb(self, result: ChunkCRTResult) -> None:
-        if tuple(result.gene_names) != self.gene_names:
-            raise ValueError("Chunk gene names do not match the accumulator's gene axis.")
         unknown = [name for name in result.target_names if name not in self._index]
         if unknown:
             raise ValueError(f"Chunk reported elements absent from the screen: {unknown[:5]}")
+        unknown_genes = [name for name in result.gene_names if name not in self._gene_index]
+        if unknown_genes:
+            raise ValueError(
+                f"Chunk gene names do not match the accumulator: absent from the screen {unknown_genes[:5]}"
+            )
         rows = np.asarray([self._index[name] for name in result.target_names])
-        self.num_multi_assignment_cells_dropped += int(getattr(result, "num_multi_assignment_cells_dropped", 0))
-        self.observed_score[rows] = result.observed_score
-        self.p_value[rows] = result.p_value
-        self.null_converged[rows] = result.null_converged
+        columns = np.asarray([self._gene_index[name] for name in result.gene_names])
+        destination = np.ix_(rows, columns)
+        target_chunk = tuple(result.target_names)
+        self._dropped_by_target_chunk[target_chunk] = max(
+            self._dropped_by_target_chunk.get(target_chunk, 0),
+            int(getattr(result, "num_multi_assignment_cells_dropped", 0)),
+        )
+        self.num_multi_assignment_cells_dropped = sum(self._dropped_by_target_chunk.values())
+        self.observed_score[destination] = result.observed_score
+        self.p_value[destination] = result.p_value
+        self.null_converged[destination] = result.null_converged
         self.tested[rows] = True
         for family, columns in result.parametric.items():
             if family not in self.parametric:
                 continue
             for key, values in columns.items():
                 if key in self.parametric[family]:
-                    self.parametric[family][key][rows] = values
+                    self.parametric[family][key][destination] = values
         for name, values in result.null_summaries.items():
             if name in self.null_summaries:
-                self.null_summaries[name][rows] = values
+                self.null_summaries[name][destination] = values
 
     def finalize(self) -> dict[str, np.ndarray]:
         """Screen-wide columns, with Benjamini-Hochberg over every tested pair.

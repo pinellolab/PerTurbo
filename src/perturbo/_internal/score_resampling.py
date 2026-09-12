@@ -352,20 +352,30 @@ class TargetPermutations:
     seed: int
     resampling_mechanism: str = "permutation"
     pair_rows: tuple[np.ndarray | None, ...] | None = None
-    """Row indices of each target's pool: its own cells plus every control."""
+    """Row indices of each target's pool when Bernoulli draws were requested.
+
+    Saddlepoint-only runs keep ``None`` entries because the compact coefficient
+    model reconstructs its pools without retaining one control-row vector per
+    target."""
     pool_logits: tuple[np.ndarray | None, ...] | None = None
     """Fitted selection log-odds over those pool rows, under the propensity
     mechanism. Logits rather than probabilities because the saddlepoint's CGF
     is written in the logit, and a float32 probability cannot carry one near
     the clip - sigmoid(30) rounds to exactly 1.0."""
     shared_logits: np.ndarray | None = None
-    """The covariate part of the selection model, one float64 value per cell,
-    shared by every target. ``pool_logits[t]`` is ``shared_logits[pair_rows[t]]
-    + pool_intercepts[t]`` rounded to float32; the decomposition is kept so the
-    saddlepoint can screen every target at once."""
+    """Legacy shared-slope representation retained for old cached callers."""
     pool_intercepts: np.ndarray | None = None
     """Per-target intercept of the selection model, NaN where the target has
     no pool."""
+    propensity_coefficients: np.ndarray | None = None
+    """Target-specific pool fits in ``propensity_basis`` coordinates.
+
+    Shape ``(targets, basis)``. Unlike the legacy shared-slope decomposition,
+    each row is fitted using only controls and that target's own cells, so an
+    unrelated target cannot change this target's assignment law."""
+    propensity_basis: np.ndarray | None = None
+    """Rank-revealing ``(cells, basis)`` design shared by the compact
+    target-specific propensity coefficients."""
 
     def __post_init__(self) -> None:
         if any(entry is not None and entry.ndim != 2 for entry in self.indices):
@@ -399,6 +409,16 @@ def _solve_propensity_intercept(
     return 0.5 * (low + high)
 
 
+def _target_propensity_key(seed: int, target_name: str) -> jax.Array:
+    """A JAX key stable to target ordering and chunk composition."""
+
+    digest = hashlib.blake2b(str(target_name).encode("utf-8"), digest_size=8).digest()
+    value = int.from_bytes(digest, "big")
+    key = jax.random.key(int(seed))
+    key = jax.random.fold_in(key, np.uint32(value & 0xFFFFFFFF))
+    return jax.random.fold_in(key, np.uint32(value >> 32))
+
+
 def precompute_low_moi_permutations(
     design: JointNBDesign | object,
     *,
@@ -407,6 +427,7 @@ def precompute_low_moi_permutations(
     seed: int = 0,
     resampling_mechanism: str = "permutation",
     draw_resamples: bool = True,
+    propensity_target_batch_size: int = 64,
 ) -> TargetPermutations:
     """Draw every target's resamples once, for reuse across gene chunks.
 
@@ -442,29 +463,44 @@ def precompute_low_moi_permutations(
     # Imported here rather than at module scope: high_moi's package __init__
     # pulls in its api, which imports this module back.
     from perturbo._internal.high_moi.resampling import (
-        fit_propensity_coefficients,
+        fit_masked_propensity_coefficients,
+        propensity_basis,
         propensity_logits_from_coefficients,
         sample_propensity_indices,
     )
     nuisance = np.asarray(design.nuisance_design, dtype=np.float32)
-    shared_eta = None
+    propensity_coef = None
+    propensity_Q = None
     if resampling_mechanism == "propensity":
-        # One fit of "carries a targeting guide" against "carries a control",
-        # over every cell, giving the covariate part of the selection model.
-        if target_codes is not None:
-            targeting = (target_codes >= 0).astype(np.float32)
-        else:
-            targeting = (target_design.sum(axis=1) > 0).astype(np.float32)
-        shared_coefficients, shared_basis = fit_propensity_coefficients(
-            targeting.reshape(1, -1), nuisance
+        if propensity_target_batch_size < 1:
+            raise ValueError("propensity_target_batch_size must be positive.")
+        # One model per target, each fitted on exactly the population used by
+        # its CRT: controls plus that target's own cells. This makes the fitted
+        # assignment law independent of unrelated targets in the same CLI
+        # chunk. Coefficients share a compact rank-revealing basis, so the
+        # saddlepoint can still screen targets in batches without retaining an
+        # all-target x all-cell logit matrix.
+        propensity_Q = np.asarray(propensity_basis(nuisance), dtype=np.float32)
+        propensity_coef = np.zeros(
+            (design.num_targets, propensity_Q.shape[1]), dtype=np.float32
         )
-        shared_eta = np.asarray(
-            propensity_logits_from_coefficients(shared_coefficients, shared_basis)
-        ).reshape(-1).astype(np.float64)
+        for start in range(0, design.num_targets, int(propensity_target_batch_size)):
+            stop = min(start + int(propensity_target_batch_size), design.num_targets)
+            targets = np.arange(start, stop, dtype=np.int32)
+            if target_codes is not None:
+                indicators = target_codes[None, :] == targets[:, None]
+            else:
+                indicators = target_design[:, start:stop].T > 0
+            inclusion = control_mask[None, :] | indicators
+            propensity_coef[start:stop] = np.asarray(
+                fit_masked_propensity_coefficients(
+                    indicators,
+                    inclusion,
+                    propensity_Q,
+                )
+            )
     pair_rows: list[np.ndarray | None] = []
     pool_logits: list[np.ndarray | None] = []
-    pool_intercepts = np.full(design.num_targets, np.nan, dtype=np.float64)
-    key = jax.random.key(seed)
     drawn: list[np.ndarray | None] = []
     for target_index in range(design.num_targets):
         if target_design is None:
@@ -497,25 +533,24 @@ def precompute_low_moi_permutations(
         # because a perturbed cell is not a valid "could have been this target"
         # counterfactual - its expression already moved.
         #
-        # Covariate effects are shared across targets and only the intercept is
-        # per target. Depth, guide load and batch act on the *cell*, not on
-        # which guide it happened to receive, so there is no reason for their
-        # coefficients to differ by target - only abundance does, and that is
-        # the intercept. Fitting them jointly turns hundreds of events per
-        # target into every event at once, which removes the separation risk a
-        # per-target fit runs at this imbalance, and removes a QR and a
-        # (pool x q x q) curvature solve per target: with 48 batch levels that
-        # per-target fit was the whole precompute.
-        rows = np.flatnonzero(pair_mask)
-        offsets = shared_eta[rows]
-        intercept = _solve_propensity_intercept(offsets, int(observed_assignment.sum()))
-        logits = (offsets + intercept).astype(np.float32, copy=False)
-        pair_rows.append(rows.astype(np.int64, copy=False))
-        pool_logits.append(logits)
-        pool_intercepts[target_index] = intercept
+        # Coefficients are target-specific because the actual pool is
+        # target-specific. They still share one compact basis, which lets the
+        # saddlepoint batch targets and keeps storage proportional to targets x
+        # covariates rather than targets x controls.
         if not draw_resamples:
+            pair_rows.append(None)
+            pool_logits.append(None)
             drawn.append(None)
             continue
+        rows = np.flatnonzero(pair_mask)
+        logits = np.asarray(
+            propensity_logits_from_coefficients(
+                propensity_coef[target_index : target_index + 1],
+                propensity_Q[rows],
+            )
+        ).reshape(-1).astype(np.float32, copy=False)
+        pair_rows.append(rows.astype(np.int64, copy=False))
+        pool_logits.append(logits)
         # Pad the pool to a common length before drawing. The sampler's index
         # extraction is compiled per (pool, width) shape, and every target's
         # pool - the controls plus its own cells - has its own length, so an
@@ -531,7 +566,7 @@ def precompute_low_moi_permutations(
             sample_propensity_indices(
                 selection,
                 num_resamples=num_resamples,
-                key=jax.random.fold_in(key, target_index),
+                key=_target_propensity_key(seed, target_names[target_index]),
                 pad_value=int(rows.size),
             ).astype(np.int32, copy=False)
         )
@@ -542,8 +577,10 @@ def precompute_low_moi_permutations(
         resampling_mechanism=resampling_mechanism,
         pair_rows=tuple(pair_rows) if resampling_mechanism == "propensity" else None,
         pool_logits=tuple(pool_logits) if resampling_mechanism == "propensity" else None,
-        shared_logits=shared_eta if resampling_mechanism == "propensity" else None,
-        pool_intercepts=pool_intercepts if resampling_mechanism == "propensity" else None,
+        shared_logits=None,
+        pool_intercepts=None,
+        propensity_coefficients=propensity_coef if resampling_mechanism == "propensity" else None,
+        propensity_basis=propensity_Q if resampling_mechanism == "propensity" else None,
     )
 
 
@@ -901,35 +938,52 @@ def newton_step_magnitude(
     construction and the solve never sees an indefinite matrix.
     """
 
-    theta_row = theta[None, :]
-    eta = offsets + nuisance_design @ beta
-    mean = np.exp(np.clip(eta, -_ETA_CLIP, _ETA_CLIP))
-    denominator = theta_row + mean
-    residual = theta_row * (counts - mean) / denominator
-    weight = theta_row * mean / denominator
-    gradient = nuisance_design.T @ residual - prior_precision * beta
+    design = np.asarray(nuisance_design, dtype=np.float64)
+    coefficients = np.asarray(beta, dtype=np.float64)
+    count_panel = np.asarray(counts)
+    offset_panel = np.asarray(offsets, dtype=np.float64)
+    if offset_panel.ndim == 1:
+        offset_panel = offset_panel[:, None]
+    dispersion = np.asarray(theta, dtype=np.float64).reshape(-1)
 
-    # Gene-blocked, and a matmul rather than an einsum. Both matter once the
-    # nuisance design is wide: the work is cells x genes x nuisance^2, which at
+    # Gene-block every cells-by-genes intermediate as well as the curvature.
+    # This matters before the solve even starts: eta, mean, denominator,
+    # residual and weight are five full float64 copies of the count panel if
+    # they are formed above this loop.
+    #
+    # A matmul rather than an einsum matters once the nuisance design is wide:
+    # the work is cells x genes x nuisance^2, which at
     # 10k control cells, 8k genes and 267 gem-group columns is 5.9e12
     # multiply-adds. np.einsum is not BLAS-backed and runs that single-threaded
     # - measured 1.8 hours against 2.9 minutes for the same arithmetic
     # expressed as Z' (Z * w) - and it materializes the whole
     # (genes, nuisance, nuisance) tensor, 4.4 GiB here, when only one block is
     # ever live.
-    num_genes = int(weight.shape[1])
-    num_nuisance = int(nuisance_design.shape[1])
+    num_genes = int(coefficients.shape[1])
+    num_nuisance = int(design.shape[1])
     block = max(1, min(num_genes, _NEWTON_STEP_GENE_BLOCK))
     magnitude = np.empty(num_genes, dtype=np.float64)
     curvature = np.empty((block, num_nuisance, num_nuisance), dtype=np.float64)
     for start in range(0, num_genes, block):
         stop = min(start + block, num_genes)
         width = stop - start
+        block_counts = np.asarray(count_panel[:, start:stop], dtype=np.float64)
+        block_beta = coefficients[:, start:stop]
+        block_theta = dispersion[None, start:stop]
+        block_offsets = (
+            offset_panel if offset_panel.shape[1] == 1 else offset_panel[:, start:stop]
+        )
+        eta = block_offsets + design @ block_beta
+        mean = np.exp(np.clip(eta, -_ETA_CLIP, _ETA_CLIP))
+        denominator = block_theta + mean
+        residual = block_theta * (block_counts - mean) / denominator
+        weight = block_theta * mean / denominator
+        gradient = design.T @ residual - prior_precision * block_beta
         for offset in range(width):
-            column = weight[:, start + offset, None]
-            curvature[offset] = nuisance_design.T @ (nuisance_design * column)
+            column = weight[:, offset, None]
+            curvature[offset] = design.T @ (design * column)
         block_curvature = curvature[:width] + ridge
-        step = np.linalg.solve(block_curvature, gradient.T[start:stop, :, None])[:, :, 0].T
+        step = np.linalg.solve(block_curvature, gradient.T[:, :, None])[:, :, 0].T
         magnitude[start:stop] = np.max(np.abs(step), axis=0)
     return magnitude
 
@@ -2094,9 +2148,17 @@ def run_low_moi_score_permutations(
                         "resampling_mechanism='propensity', which keeps each target's pool "
                         "rows and logits."
                     )
-                if permutations.shared_logits is None or permutations.pool_intercepts is None:
+                compact_propensity = (
+                    permutations.propensity_coefficients is not None
+                    and permutations.propensity_basis is not None
+                )
+                legacy_propensity = (
+                    permutations.shared_logits is not None
+                    and permutations.pool_intercepts is not None
+                )
+                if not compact_propensity and not legacy_propensity:
                     raise ValueError(
-                        "permutations predate the decomposed selection model; recompute them "
+                        "permutations do not carry a compact selection model; recompute them "
                         "with precompute_low_moi_permutations."
                     )
                 # The pool projection: the contributions are efficient under the
@@ -2109,8 +2171,12 @@ def run_low_moi_score_permutations(
                     contribution=_low_moi_contribution(),
                     target_codes=target_codes,
                     control_mask=control_mask,
-                    shared_logits=permutations.shared_logits,
-                    intercepts=permutations.pool_intercepts,
+                    shared_logits=(permutations.shared_logits if legacy_propensity else None),
+                    intercepts=(permutations.pool_intercepts if legacy_propensity else None),
+                    propensity_coefficients=(
+                        permutations.propensity_coefficients if compact_propensity else None
+                    ),
+                    propensity_basis=(permutations.propensity_basis if compact_propensity else None),
                     num_targets=design.num_targets,
                     screen_p_value=saddlepoint_screen_p_value,
                     two_sided=saddlepoint_two_sided or "equal-tail",

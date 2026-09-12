@@ -1407,8 +1407,10 @@ def fit_low_moi_propensity_saddlepoint(
     contribution: np.ndarray,
     target_codes: np.ndarray,
     control_mask: np.ndarray,
-    shared_logits: np.ndarray,
-    intercepts: np.ndarray,
+    shared_logits: np.ndarray | None = None,
+    intercepts: np.ndarray | None = None,
+    propensity_coefficients: np.ndarray | None = None,
+    propensity_basis: np.ndarray | None = None,
     num_targets: int,
     screen_p_value: float = 0.05,
     two_sided: str = "equal-tail",
@@ -1460,19 +1462,18 @@ def fit_low_moi_propensity_saddlepoint(
     CGF below *is* the resampling law, so the field is filled with zeros and
     the only remaining error is the Lugannani-Rice asymptotic.
 
-    The selection model arrives decomposed - ``shared_logits`` per cell and an
-    ``intercepts`` entry per target, NaN where a target has no pool - because
-    that decomposition is what lets every target be screened at once. The
-    controls are common to every pool, so the three null cumulants over them
-    are three matmuls of a ``(targets, controls)`` weight matrix against the
-    control contributions, and the few cells a target adds arrive by segment
-    sum. Candidates the screen promotes are then packed across targets into
-    blocks of ``gene_block_size`` (target, gene) pairs, each column carrying
-    its own target's logits, so the block count is ``ceil(candidates / B)``
-    rather than one block per target per chunk. Per pair this is the same
-    pool, the same logits and the same kernel as evaluating targets one at a
-    time; only the order of the pool rows differs (controls first, then the
-    target's own cells), which is floating-point rounding, not arithmetic.
+    The preferred selection model arrives as target-specific
+    ``propensity_coefficients`` in one rank-revealing ``propensity_basis``.
+    Each target's coefficients were fitted on controls plus only its own cells,
+    making its assignment law independent of unrelated targets sharing a CLI
+    chunk. The legacy ``shared_logits`` plus ``intercepts`` representation is
+    still accepted for direct callers and old cached objects.
+
+    Both representations let every target be screened in bounded batches. The
+    controls are common to every pool, so their null cumulants are matrix
+    products against the control contributions, and the few cells a target
+    adds arrive by segment sum. Candidates the screen promotes are then packed
+    across targets into blocks of ``gene_block_size`` (target, gene) pairs.
     """
     _check_two_sided(two_sided)
 
@@ -1496,36 +1497,80 @@ def fit_low_moi_propensity_saddlepoint(
 
     codes = np.asarray(target_codes, dtype=np.int64).reshape(-1)
     control = np.asarray(control_mask, dtype=bool).reshape(-1)
-    shared = np.asarray(shared_logits, dtype=np.float64).reshape(-1)
-    alpha = np.asarray(intercepts, dtype=np.float64).reshape(-1)
-    if codes.shape != (num_cells,) or control.shape != (num_cells,) or shared.shape != (num_cells,):
-        raise ValueError("target_codes, control_mask and shared_logits must have one entry per cell.")
-    if alpha.shape != (num_targets,):
-        raise ValueError("intercepts must have one entry per target.")
+    compact_given = propensity_coefficients is not None or propensity_basis is not None
+    legacy_given = shared_logits is not None or intercepts is not None
+    if compact_given and legacy_given:
+        raise ValueError(
+            "Pass either propensity_coefficients with propensity_basis or "
+            "shared_logits with intercepts, not both."
+        )
+    if compact_given:
+        if propensity_coefficients is None or propensity_basis is None:
+            raise ValueError("propensity_coefficients and propensity_basis must be passed together.")
+        coefficients = np.asarray(propensity_coefficients, dtype=np.float64)
+        basis = np.asarray(propensity_basis, dtype=np.float64)
+        if coefficients.ndim != 2 or coefficients.shape[0] != num_targets:
+            raise ValueError("propensity_coefficients must have shape (targets, basis).")
+        if basis.shape != (num_cells, coefficients.shape[1]):
+            raise ValueError("propensity_basis must have shape (cells, basis).")
+        coefficients_device = jnp.asarray(coefficients)
+        basis_device = jnp.asarray(basis)
+        shared = None
+        alpha = None
+    else:
+        if shared_logits is None or intercepts is None:
+            raise ValueError(
+                "Pass propensity_coefficients with propensity_basis, or shared_logits with intercepts."
+            )
+        shared = np.asarray(shared_logits, dtype=np.float64).reshape(-1)
+        alpha = np.asarray(intercepts, dtype=np.float64).reshape(-1)
+        if shared.shape != (num_cells,):
+            raise ValueError("shared_logits must have one entry per cell.")
+        if alpha.shape != (num_targets,):
+            raise ValueError("intercepts must have one entry per target.")
+        coefficients_device = None
+        basis_device = None
+    if codes.shape != (num_cells,) or control.shape != (num_cells,):
+        raise ValueError("target_codes and control_mask must have one entry per cell.")
     if codes.max(initial=-1) >= num_targets:
         raise ValueError("target_codes index beyond num_targets.")
 
     shape = (num_targets, num_genes)
-    target_valid = np.isfinite(alpha)
-    # A target with a pool but no cells of its own has no observed sum to test.
-    target_valid &= np.bincount(codes[codes >= 0], minlength=num_targets) > 0
-    alpha_safe = np.where(target_valid, alpha, 0.0)
-    alpha_device = jnp.asarray(alpha_safe)
+    selected_counts = np.bincount(codes[codes >= 0], minlength=num_targets)
+    own = (codes >= 0) & ~control
+    own_rows = np.flatnonzero(own)
+    own_codes = codes[own_rows]
+    pool_counts = int(np.count_nonzero(control)) + np.bincount(
+        own_codes, minlength=num_targets
+    )
+    target_valid = (selected_counts > 0) & (selected_counts < pool_counts)
+    if compact_given:
+        target_valid &= np.isfinite(coefficients).all(axis=1)
+        alpha_device = None
+    else:
+        target_valid &= np.isfinite(alpha)
+        alpha_safe = np.where(target_valid, alpha, 0.0)
+        alpha_device = jnp.asarray(alpha_safe)
 
     # The pool of target t is the controls plus t's own cells. A cell can be
     # both (a control that also carries the target's code); it then enters the
     # pool once, through the control block, and the observed sum still counts
     # it, exactly as the per-target construction did.
     control_rows = np.flatnonzero(control)
-    own = (codes >= 0) & ~control
-    own_rows = np.flatnonzero(own)
-    own_codes = codes[own_rows]
     all_rows = np.flatnonzero(codes >= 0)
     all_codes_device = jnp.asarray(codes[all_rows])
     control_contribution = jnp.take(contribution, jnp.asarray(control_rows), axis=0)
-    control_logits = jnp.asarray(shared[control_rows])
+    if compact_given:
+        control_basis = jnp.take(basis_device, jnp.asarray(control_rows), axis=0)
+        own_basis = jnp.take(basis_device, jnp.asarray(own_rows), axis=0)
+        own_logits = jnp.sum(
+            own_basis * coefficients_device[jnp.asarray(own_codes)], axis=1
+        )
+        control_logits = None
+    else:
+        control_logits = jnp.asarray(shared[control_rows])
+        own_logits = jnp.asarray(shared[own_rows]) + alpha_device[jnp.asarray(own_codes)]
     own_contribution = jnp.take(contribution, jnp.asarray(own_rows), axis=0)
-    own_logits = jnp.asarray(shared[own_rows]) + alpha_device[jnp.asarray(own_codes)]
     own_codes_device = jnp.asarray(own_codes)
 
     observed = jax.ops.segment_sum(
@@ -1574,7 +1619,11 @@ def fit_low_moi_propensity_saddlepoint(
     mean_parts, variance_parts, third_parts = [], [], []
     for start in range(0, num_targets, target_batch_size):
         stop = min(start + target_batch_size, num_targets)
-        selection = jax.nn.sigmoid(control_logits[None, :] + alpha_device[start:stop, None])
+        if compact_given:
+            batch_logits = coefficients_device[start:stop] @ control_basis.T
+        else:
+            batch_logits = control_logits[None, :] + alpha_device[start:stop, None]
+        selection = jax.nn.sigmoid(batch_logits)
         bernoulli = selection * (1.0 - selection)
         third_weight = bernoulli * (1.0 - 2.0 * selection)
         batch_mean = selection @ control_contribution
@@ -1633,7 +1682,12 @@ def fit_low_moi_propensity_saddlepoint(
                 own_index[target, :count] = own_rows[order[starts[target] : starts[target] + count]]
         own_index_device = jnp.asarray(own_index)
         contribution_ext = jnp.concatenate([contribution, jnp.zeros((1, num_genes), dtype=contribution.dtype)], axis=0)
-        shared_ext = jnp.concatenate([jnp.asarray(shared), jnp.zeros((1,), dtype=jnp.float64)])
+        if compact_given:
+            basis_ext = jnp.concatenate(
+                [basis_device, jnp.zeros((1, basis_device.shape[1]), dtype=jnp.float64)], axis=0
+            )
+        else:
+            shared_ext = jnp.concatenate([jnp.asarray(shared), jnp.zeros((1,), dtype=jnp.float64)])
 
         for start in range(0, pair_targets.size, gene_block_size):
             targets = pair_targets[start : start + gene_block_size]
@@ -1643,10 +1697,18 @@ def fit_low_moi_propensity_saddlepoint(
             t_dev = jnp.asarray(np.concatenate([targets, np.repeat(targets[-1], pad)]).astype(np.int32))
             g_dev = jnp.asarray(np.concatenate([genes, np.repeat(genes[-1], pad)]).astype(np.int32))
             block_controls = jnp.take(control_contribution, g_dev, axis=1)
-            logits_controls = control_logits[:, None] + alpha_device[t_dev][None, :]
+            if compact_given:
+                logits_controls = control_basis @ coefficients_device[t_dev].T
+            else:
+                logits_controls = control_logits[:, None] + alpha_device[t_dev][None, :]
             rows = own_index_device[t_dev]                                   # (pairs, width)
             block_own = contribution_ext[rows, g_dev[:, None]].T             # (width, pairs)
-            logits_own = (shared_ext[rows] + alpha_device[t_dev][:, None]).T
+            if compact_given:
+                logits_own = jnp.einsum(
+                    "pwq,pq->wp", basis_ext[rows], coefficients_device[t_dev]
+                )
+            else:
+                logits_own = (shared_ext[rows] + alpha_device[t_dev][:, None]).T
             if projection is not None:
                 block_controls, block_own = projection.correct_blocks(t_dev, g_dev, rows, block_controls, block_own)
             fitted_log_p, fitted_valid = propensity_saddlepoint_log_two_sided(

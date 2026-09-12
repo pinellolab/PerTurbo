@@ -4,6 +4,8 @@ Both pools are valid for a screen whose realised MOI is a little above one, and 
 answer different questions, so the rule is: test against a control pool when cells
 carry about one perturbation each and there are enough unperturbed cells to be a pool.
 """
+from types import SimpleNamespace
+
 import anndata as ad
 import mudata as md
 import numpy as np
@@ -56,6 +58,41 @@ def test_a_high_moi_screen_reads_as_high():
     assert out["median_guides_per_cell"] >= 1.5
 
 
+def test_backed_sparse_high_moi_measurement_streams_csr_dataset(tmp_path):
+    assignments = sp.csr_matrix(
+        np.array(
+            [
+                [1, 1, 0, 0],
+                [0, 1, 1, 0],
+                [0, 0, 0, 0],
+                [1, 0, 0, 0],
+            ],
+            dtype=np.int8,
+        )
+    )
+    guide = ad.AnnData(
+        X=assignments,
+        var=pd.DataFrame(index=["non-targeting_0", "g1", "g2", "g3"]),
+    )
+    path = tmp_path / "backed-guides.h5ad"
+    guide.write_h5ad(path)
+    backed = ad.read_h5ad(path, backed="r")
+    try:
+        assert not hasattr(backed.X, "tocsr")
+        out = measure_realized_moi(
+            SimpleNamespace(mod={"grna": backed}),
+            perturbation_modality_key="grna",
+            perturbation_layer=None,
+            control_substring="non-targeting",
+        )
+    finally:
+        backed.file.close()
+
+    assert out["median_guides_per_cell"] == 1.5
+    assert out["mean_guides_per_cell"] == 1.25
+    assert out["n_control_cells"] == 1
+
+
 def test_only_cells_carrying_nothing_but_controls_count_as_controls():
     """A cell with a control guide and a targeting guide is perturbed, not a control."""
     n = 6
@@ -99,7 +136,10 @@ def test_controls_are_recognised_through_the_element_they_map_to():
     # guides 0-3 map to two control elements, the rest to targeting elements
     element_names = ["non-targeting|1", "non-targeting|2", "GENE_A", "GENE_B"]
     mapping = np.zeros((n_guides, 4), dtype=np.float32)
-    mapping[[0, 1], 0] = 1; mapping[[2, 3], 1] = 1; mapping[4:7, 2] = 1; mapping[7:, 3] = 1
+    mapping[[0, 1], 0] = 1
+    mapping[[2, 3], 1] = 1
+    mapping[4:7, 2] = 1
+    mapping[7:, 3] = 1
     guide.varm["element_map"] = mapping
     guide.uns["element_names"] = element_names
     rna = ad.AnnData(X=np.ones((n_cells, 2), dtype=np.float32), var=pd.DataFrame(index=["a", "b"]))

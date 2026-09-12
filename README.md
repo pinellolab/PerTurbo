@@ -59,7 +59,7 @@ perturbo --input screen.h5mu --out-dir perturbo_outputs/run --modality-key rna \
 The conditional randomization test runs alongside the Bayesian effect estimates
 by default (`--no-crt` opts out). It asks whether a gene's expression differs by more than it would had
 the guide landed in a different set of cells with the same covariates, and it
-evaluates that null in closed form rather than by resampling, so a genome-scale
+approximates its tail with a saddlepoint calculation without resampling, so a genome-scale
 screen can be tested against every gene:
 
 ```bash
@@ -82,6 +82,38 @@ control guides and warns when they are fewer than 1,000 or under 1%. A
 low-MOI screen may arrive with a guide-to-element map; the control-anchored
 test collapses the assignment to elements and sets aside cells carrying more
 than one, reporting the count. See `docs/crt_quickstart.md`.
+
+### Memory and chunking
+
+Use `--backed` for files larger than memory. For mutually exclusive assignments,
+perturbation chunks reduce both the number of cells and the number of fitted
+effects. Splitting co-occurring perturbations would omit predictors and can bias
+effects; when these assignments trigger automatic chunking, the CLI instead
+loads 256 genes at a time and retains every cell and predictor. Set
+`--gene-chunk-size 128` to choose a smaller block explicitly.
+
+Gene blocks currently support the plain NB model with observed or fixed-zero
+size factors, shared guide effects, no latent factors, no guide random effects,
+and no perturbation dispersion or baseline uncertainty propagation. Full-panel
+library sizes and the control centering are preserved across blocks. The
+all-cells CRT reuses its propensity fit, and multiple-testing correction happens
+once over the full tested family. Stage-two SVI defaults to 1,024 cells per step
+on this path; use `--minibatch-size-betas` and `--num-epochs-betas` to control
+training coverage. Stochastic fits at different block widths need not be
+numerically identical after a finite number of steps.
+
+For either chunking strategy, compare effect estimates with a longer training
+budget. The default 500 steps can underestimate strong knockdowns; CRT baseline
+polishing does not establish convergence of the Bayesian effect estimates.
+
+Gene blocks bound the count and likelihood buffers, but control fitting still
+loads up to `--max-control-cells` across all genes, and the final effect and CRT
+tables scale as perturbations × genes. A full atlas is therefore a cluster job.
+For a laptop smoke test, load a raw-count AnnData with `backed="r"`, select
+controls and a few perturbations, save full-panel cell totals in an observation
+column, then select a few hundred genes and pass that column with
+`--library-size-key`. A small debug run checks execution, not full-scale speed,
+convergence, or statistical calibration.
 
 ### Reporting a subset of pairs
 

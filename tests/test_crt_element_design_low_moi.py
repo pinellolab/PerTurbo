@@ -172,8 +172,9 @@ def test_element_grouping_is_a_fast_sparse_product():
     guide_of_cell = rng.integers(0, n_guides, n_cells)
     assignment = sp.csr_matrix((np.ones(n_cells), (np.arange(n_cells), guide_of_cell)), shape=(n_cells, n_guides))
     mapping = np.zeros((n_guides, n_elements)); mapping[np.arange(n_guides), rng.integers(0, n_elements, n_guides)] = 1
-    expected = (np.asarray(assignment.todense()) > 0).astype(np.int8) @ (mapping > 0).astype(np.int8)
-    expected = (expected > 0).astype(np.int8)
+    # Each fixture cell has exactly one known guide. A direct lookup is an
+    # independent reference without repeating the slow dense product in the test.
+    expected = (mapping[guide_of_cell] > 0).astype(np.int8)
     for matrix in (assignment, assignment.toarray().astype(np.int64)):
         start = time.perf_counter()
         got = _group_perturbation_matrix_by_element(matrix, mapping)

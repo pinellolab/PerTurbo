@@ -15,7 +15,7 @@ import pandas as pd
 
 from perturbo import core
 from perturbo.inference import PerTurboModel
-from perturbo.io import setup_mudata
+from perturbo.io import _SAVED_SIZE_FACTOR_KEY, setup_mudata
 from perturbo.log_normal_negative_binomial import LogNormalNegativeBinomial
 
 
@@ -37,13 +37,15 @@ def _resolve_gene_indices(model: PerTurboModel, gene_indices: np.ndarray | None)
 
 def _resolve_size_factors(model: PerTurboModel, cell_indices: np.ndarray, read_depth_adjust_factor: float) -> np.ndarray:
     obs = model.adata[model.setup.rna_modality].obs.iloc[cell_indices]
-    if model.setup.size_factor_key is not None and model.setup.size_factor_key in obs.columns:
+    if getattr(model.setup, "size_factor_mode", None) == "none":
+        size_factor = np.zeros((cell_indices.shape[0], 1), dtype=np.float32)
+    elif model.setup.size_factor_key is not None and model.setup.size_factor_key in obs.columns:
         size_factor_raw = pd.to_numeric(obs[model.setup.size_factor_key], errors="coerce").to_numpy(dtype=np.float32)
         if not np.all(np.isfinite(size_factor_raw)):
             raise ValueError(
                 f"size_factor_key '{model.setup.size_factor_key}' contains non-finite values in simulated source cells."
             )
-        if core._is_count_like(size_factor_raw):
+        if model.setup.size_factor_key != _SAVED_SIZE_FACTOR_KEY and core._is_count_like(size_factor_raw):
             raise ValueError(
                 f"size_factor_key '{model.setup.size_factor_key}' appears to contain integer counts. "
                 "Use library_size_key for count data, or provide real-valued size factors centered around zero."
@@ -82,6 +84,7 @@ def _sample_counts(
     *,
     model: PerTurboModel,
     mu: np.ndarray,
+    outlier_mu: np.ndarray | None = None,
     gene_indices: np.ndarray,
     theta_override: np.ndarray | None = None,
     seed: int = 0,
@@ -101,10 +104,10 @@ def _sample_counts(
         for index, start in enumerate(range(0, n_cells, chunk_rows)):
             stop = min(start + chunk_rows, n_cells)
             override = None if theta_override is None else np.asarray(theta_override)[start:stop]
+            outlier_mu_part = None if outlier_mu is None else np.asarray(outlier_mu)[start:stop]
             parts.append(
                 _sample_counts(
-                    model=model,
-                    mu=np.asarray(mu)[start:stop],
+                    model=model, mu=np.asarray(mu)[start:stop], outlier_mu=outlier_mu_part,
                     gene_indices=gene_indices,
                     theta_override=override,
                     seed=int(jax.random.key_data(jax.random.fold_in(jax.random.PRNGKey(seed), index))[-1]),
@@ -141,8 +144,9 @@ def _sample_counts(
             if control_fit.outlier_mean_shift is not None
             else np.zeros_like(theta_outlier)
         )
+        outlier_predictor = mu if outlier_mu is None else np.asarray(outlier_mu)
         logits_outlier = jnp.asarray(
-            mu + outlier_shift[None, :] - np.log(theta_outlier)[None, :],
+            outlier_predictor + outlier_shift[None, :] - np.log(theta_outlier)[None, :],
             dtype=jnp.float32,
         )
         component_distribution = dist.NegativeBinomialLogits(
@@ -281,9 +285,20 @@ def simulate_data_from_trained_model(
     gene_idx = _resolve_gene_indices(model, gene_indices)
     cell_idx = _resolve_cell_indices(model, guide_obs_arr.shape[0], cell_indices)
     lfc = np.asarray(element_by_gene_lfc, dtype=np.float32)[:, gene_idx]
-    weighted_guides = guide_obs_arr * guide_eff_arr[None, :]
-    element_scores = weighted_guides @ guide_by_element_arr
     element_membership = guide_obs_arr @ guide_by_element_arr
+    weighted_guides = guide_obs_arr * guide_eff_arr[None, :]
+    # The fitted shared-effect design records whether an element is present,
+    # so two observed guides for the same element still contribute one beta.
+    # Unit efficacy is the saved/default shared strategy. A caller-provided
+    # non-unit vector remains an explicit guide weighting override.
+    shared_unit_efficacy = (
+        str(getattr(model, "guide_effect_strategy", "shared")).lower() == "shared"
+        and np.allclose(guide_eff_arr, 1.0, rtol=0.0, atol=1e-6)
+    )
+    if shared_unit_efficacy:
+        element_scores = np.asarray(element_membership > 0, dtype=np.float32)
+    else:
+        element_scores = weighted_guides @ guide_by_element_arr
 
     beta_0 = np.asarray(model.control_fit.beta_0, dtype=np.float32)[gene_idx]
     mu = beta_0[None, :] + _resolve_size_factors(model, cell_idx, read_depth_adjust_factor)
@@ -291,6 +306,7 @@ def simulate_data_from_trained_model(
     if covariates is not None and model.control_fit.covariate_coef is not None:
         cov_coef = np.asarray(model.control_fit.covariate_coef, dtype=np.float32)[:, gene_idx]
         mu = mu + covariates @ cov_coef
+    outlier_mu = np.asarray(mu).copy()
     mu = mu + element_scores @ lfc
     guide_random_effect_contrib = _sample_guide_random_effect_contribution(
         model=model,
@@ -300,6 +316,7 @@ def simulate_data_from_trained_model(
     )
     if guide_random_effect_contrib is not None:
         mu = mu + guide_random_effect_contrib
+        outlier_mu = outlier_mu + guide_random_effect_contrib
 
     theta_override = _resolve_perturbation_dispersion_theta(
         model=model,
@@ -308,7 +325,12 @@ def simulate_data_from_trained_model(
         gene_indices=gene_idx,
     )
     counts = _sample_counts(
-        model=model, mu=mu, gene_indices=gene_idx, theta_override=theta_override, seed=int(seed)
+        model=model,
+        mu=mu,
+        outlier_mu=outlier_mu,
+        gene_indices=gene_idx,
+        theta_override=theta_override,
+        seed=int(seed),
     )
 
     rna_source = model.adata[model.setup.rna_modality]
@@ -360,6 +382,8 @@ def simulate_data_from_trained_model(
             "perturbation_layer": model.setup.perturbation_modality,
         },
         perturbation_layer=model.setup.perturbation_layer,
+        size_factor_mode=model.setup.size_factor_mode,
+        size_factor_provenance=model.setup.size_factor_provenance,
     )
     return mdata
 

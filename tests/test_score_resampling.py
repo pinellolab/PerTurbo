@@ -545,7 +545,12 @@ def test_precomputed_permutations_reproduce_the_inline_draws() -> None:
     np.testing.assert_array_equal(np.asarray(inline.p_value), np.asarray(reused.p_value))
 
 
-def _design_over_targets(keep_targets: tuple[int, ...], *, seed: int = 5) -> tuple[object, np.ndarray]:
+def _design_over_targets(
+    keep_targets: tuple[int, ...],
+    *,
+    seed: int = 5,
+    shifted_targets: tuple[int, ...] = (),
+) -> tuple[object, np.ndarray]:
     """Controls plus a chosen subset of targets, laid out as a chunk would be.
 
     Perturbation chunking hands each chunk only its own targets' cells, so a
@@ -562,6 +567,9 @@ def _design_over_targets(keep_targets: tuple[int, ...], *, seed: int = 5) -> tup
     theta = np.asarray([3.0, 9.0, 20.0])
     n_genes = theta.size
     offset = rng.normal(scale=0.2, size=labels.size)
+    covariate = rng.normal(size=labels.size)
+    for target in shifted_targets:
+        covariate[labels == target + 1] += 3.0
     eta = offset[:, None] + 1.5
     counts = rng.negative_binomial(theta[None, :], theta[None, :] / (theta[None, :] + np.exp(eta)))
     strata = np.tile(np.asarray([0, 1]), labels.size // 2)
@@ -579,6 +587,8 @@ def _design_over_targets(keep_targets: tuple[int, ...], *, seed: int = 5) -> tup
         pert_names=["NTC", *[f"target_{index}" for index in keep_targets]],
         gene_names=[f"gene_{index}" for index in range(n_genes)],
         size_factors=jnp.asarray(offset[keep_cells, None]),
+        covariates=jnp.asarray(covariate[keep_cells, None]),
+        covariate_names=["selection_covariate"],
     )
     design = prepare_joint_nb_design(data, control_perturbations=["NTC"], dispersion=theta)
     return design, strata[keep_cells]
@@ -602,6 +612,73 @@ def test_a_targets_resamples_do_not_depend_on_which_targets_share_its_run() -> N
     assert full.target_names == ("target_0", "target_1", "target_2")
     assert chunk.target_names == ("target_2",)
     np.testing.assert_array_equal(full_draws.indices[2], chunk_draws.indices[0])
+
+
+def test_propensity_fit_and_tail_ignore_unrelated_shifted_targets() -> None:
+    """Each target's model is fitted on controls plus only its own cells.
+
+    Moving unrelated targets far along the propensity covariate therefore
+    cannot alter target_2's pool logits or deterministic saddlepoint tail when
+    target_2 moves from a multi-target chunk into a chunk by itself.
+    """
+
+    full, _ = _design_over_targets((0, 1, 2), shifted_targets=(0, 1))
+    chunk, _ = _design_over_targets((2,))
+    full_propensity = precompute_low_moi_permutations(
+        full,
+        num_resamples=8,
+        seed=19,
+        resampling_mechanism="propensity",
+        draw_resamples=True,
+    )
+    chunk_propensity = precompute_low_moi_permutations(
+        chunk,
+        num_resamples=8,
+        seed=19,
+        resampling_mechanism="propensity",
+        draw_resamples=True,
+    )
+    np.testing.assert_allclose(
+        full_propensity.pool_logits[2], chunk_propensity.pool_logits[0], rtol=2e-5, atol=2e-5
+    )
+    np.testing.assert_array_equal(full_propensity.indices[2], chunk_propensity.indices[0])
+
+    full_saddlepoint = precompute_low_moi_permutations(
+        full,
+        num_resamples=8,
+        seed=19,
+        resampling_mechanism="propensity",
+        draw_resamples=False,
+    )
+    chunk_saddlepoint = precompute_low_moi_permutations(
+        chunk,
+        num_resamples=8,
+        seed=19,
+        resampling_mechanism="propensity",
+        draw_resamples=False,
+    )
+
+    common = dict(
+        num_resamples=8,
+        seed=19,
+        backend="jax",
+        null_model="control_only",
+        tail_approximation="saddlepoint",
+        saddlepoint_only=True,
+        saddlepoint_screen_p_value=1.0,
+    )
+    full_result = run_low_moi_score_permutations(
+        full, permutations=full_saddlepoint, **common
+    )
+    chunk_result = run_low_moi_score_permutations(
+        chunk, permutations=chunk_saddlepoint, **common
+    )
+    np.testing.assert_allclose(
+        np.asarray(full_result.tail_fits["saddlepoint"]["log_p_value"])[2],
+        np.asarray(chunk_result.tail_fits["saddlepoint"]["log_p_value"])[0],
+        rtol=2e-5,
+        atol=2e-7,
+    )
 
 
 def test_distinct_targets_still_get_distinct_resamples() -> None:

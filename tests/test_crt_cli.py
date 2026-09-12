@@ -96,6 +96,21 @@ def test_the_accumulator_rejects_a_mismatched_gene_axis() -> None:
         accumulator.absorb(_chunk_result(("a",), ("other",), 0.5))
 
 
+def test_the_accumulator_places_gene_blocks_by_name_before_global_bh() -> None:
+    accumulator = CRTAccumulator(
+        element_names=("a", "b"), gene_names=("g0", "g1", "g2"), tail_families=()
+    )
+    accumulator.absorb(_chunk_result(("a", "b"), ("g2",), [[0.9], [0.002]]))
+    accumulator.absorb(_chunk_result(("a", "b"), ("g0", "g1"), [[0.001, 0.9], [0.9, 0.9]]))
+
+    columns = accumulator.finalize()
+    np.testing.assert_allclose(accumulator.p_value[0], [0.001, 0.9, 0.9])
+    np.testing.assert_allclose(accumulator.p_value[1], [0.9, 0.9, 0.002])
+    # Six hypotheses are corrected together after both gene blocks arrive.
+    assert columns["crt_q_value"][0, 0] == pytest.approx(0.006)
+    assert columns["crt_q_value"][1, 2] == pytest.approx(0.006)
+
+
 def test_benjamini_hochberg_spans_every_chunk() -> None:
     """The correction must see the whole family, not one chunk at a time.
 

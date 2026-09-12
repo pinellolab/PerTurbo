@@ -4,14 +4,41 @@ from __future__ import annotations
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 import numpyro
 import numpyro.distributions as dist
 from numpyro.infer import SVI, Trace_ELBO
 from numpyro.infer.autoguide import AutoNormal
+from scipy.integrate import quad
+from scipy.special import expit
+from scipy.stats import nbinom, norm
 
 from perturbo.api import PerTurboData, fit_perturbation_effects, fit_control
 from perturbo.log_normal_negative_binomial import LogNormalNegativeBinomial
 from perturbo.model import LogNormalNegativeBinomialModel
+
+
+def test_nonzero_noise_likelihood_matches_independent_integration() -> None:
+    total_count, logits, noise = 5.0, 0.0, 0.5
+    distribution = LogNormalNegativeBinomial(
+        jnp.asarray(total_count), jnp.asarray(logits), jnp.asarray(noise), num_quad_points=32
+    )
+    values = np.array([0, 1, 5, 15])
+    expected = np.array([
+        quad(
+            lambda z: nbinom.pmf(value, total_count, expit(-logits - noise * z)) * norm.pdf(z),
+            -10.0,
+            10.0,
+            epsabs=1e-12,
+        )[0]
+        for value in values
+    ])
+    np.testing.assert_allclose(np.exp(distribution.log_prob(values)), expected, rtol=1e-6, atol=1e-10)
+
+
+def test_sample_shape_is_applied_once() -> None:
+    distribution = LogNormalNegativeBinomial(jnp.array([3.0, 5.0]), jnp.zeros(2), jnp.full(2, 0.5))
+    assert distribution.sample(jax.random.key(0), sample_shape=(3, 4)).shape == (3, 4, 2)
 
 
 def test_lognormal_nb_matches_negative_binomial_at_zero_noise() -> None:

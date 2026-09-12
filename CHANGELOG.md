@@ -15,6 +15,25 @@ and this project adheres to [Semantic Versioning][].
 -   Grouping guides into elements is a sparse product. The dense int8 product had
     no BLAS kernel and ran for hours on one core on a 233,000-cell screen before
     anything reached the GPU.
+-   High-MOI CLI chunking retains co-occurring predictors by fitting gene blocks
+    instead of dropping other perturbation columns. Sparse assignments remain
+    compact through loading and cell minibatching.
+-   Propensity fits remove dependent covariates without introducing arbitrary QR
+    directions. Each low-MOI target uses its own target-plus-control population,
+    with name-stable resampling keys across chunks.
+-   Baseline diagnostics form count-dependent arrays in gene blocks; all-cells
+    CRT gene blocks reuse the same compact propensity fit and receive one global
+    multiple-testing correction.
+-   Observed size factors preserve zero-count cells and full-panel centering.
+    Simulation bundles retain the fitted offsets and all chunked guide posterior
+    fields; fixed-zero offsets remain distinct from counts-derived offsets.
+-   Shared element means no longer count duplicate guides twice when perturbation
+    dispersion is enabled. Mixture-NB simulation leaves the outlier component
+    independent of the perturbation mean, matching the fitted likelihood.
+-   Log-normal NB quadrature uses log weights, and sampling applies the requested
+    sample shape once.
+-   Release tests and build checks run for `v2-port`; package validation supports
+    the build backend's metadata version.
 -   The float32 pin read the variational parameters through their constraints and
     handed them back to the optimizer unconstrained, so every positive scale
     restarted at exp of its value and stage one began 40% above its reference

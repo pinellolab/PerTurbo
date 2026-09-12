@@ -7,7 +7,7 @@ import numpy as np
 import pytest
 
 from perturbo.core import ControlFit, PerTurboData
-from perturbo._internal.score_resampling import fit_batched_nb_null
+from perturbo._internal.score_resampling import fit_batched_nb_null, newton_step_magnitude
 from perturbo.crt import (
     assemble_control_nuisance,
     check_baseline_is_null_mode,
@@ -188,6 +188,46 @@ def test_nuisance_assembly_without_covariates_is_intercept_only() -> None:
     nuisance = assemble_control_nuisance(data, _control_fit(beta_0, theta, None))
     assert nuisance.nuisance_design.shape == (400, 1)
     assert nuisance.nuisance_names == ("intercept",)
+
+
+def test_nuisance_assembly_keeps_the_count_panels_compact_dtype() -> None:
+    data, beta_0, theta, _ = _simulate_controls()
+    nuisance = assemble_control_nuisance(data, _control_fit(beta_0, theta, None))
+    assert nuisance.counts.dtype == np.float32
+
+
+def test_gene_blocked_newton_step_matches_the_full_panel_formula() -> None:
+    """Exercise more genes than one block and compare the original algebra."""
+
+    rng = np.random.default_rng(22)
+    cells, genes = 18, 300
+    design = np.column_stack([np.ones(cells), rng.normal(size=cells)])
+    beta = rng.normal(scale=0.15, size=(2, genes))
+    offsets = rng.normal(scale=0.1, size=(cells, 1))
+    theta = rng.uniform(2.0, 9.0, size=genes)
+    mean = np.exp(offsets + design @ beta)
+    counts = rng.poisson(mean).astype(np.float32)
+    ridge = 1e-8 * np.eye(2)
+
+    actual = newton_step_magnitude(
+        counts,
+        design,
+        offsets,
+        theta,
+        beta,
+        prior_precision=0.0,
+        ridge=ridge,
+    )
+
+    denominator = theta[None, :] + mean
+    residual = theta[None, :] * (counts - mean) / denominator
+    weight = theta[None, :] * mean / denominator
+    gradient = design.T @ residual
+    expected = np.empty(genes)
+    for gene in range(genes):
+        information = design.T @ (design * weight[:, gene, None]) + ridge
+        expected[gene] = np.max(np.abs(np.linalg.solve(information, gradient[:, gene])))
+    np.testing.assert_allclose(actual, expected, rtol=1e-12, atol=1e-12)
 
 
 def test_nuisance_assembly_rejects_covariates_without_coefficients() -> None:
