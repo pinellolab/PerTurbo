@@ -232,11 +232,13 @@ def main(argv: list[str] | None = None) -> None:
     )
     parser.add_argument(
         "--size-factor-mode",
-        default="infer",
+        default="observed",
         choices=VALID_CLI_SIZE_FACTOR_MODES,
         help=(
-            "How to handle per-cell size factors: infer latent size factors (infer), "
-            "condition on observed/computed values (observed), or fix size factors to zero (none)."
+            "How to handle per-cell size factors: condition on observed values (observed, the "
+            "default; --library-size-key names the column, otherwise each cell's total count over "
+            "the analysed genes is used), infer latent size factors (infer; incompatible with the "
+            "conditional randomization test), or fix them to zero (none)."
         ),
     )
     parser.add_argument(
@@ -267,13 +269,13 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument(
         "--crt-tail-families",
         nargs="*",
-        default=list(CRT_TAIL_FAMILIES),
+        default=["saddlepoint"],
         choices=list(CRT_ALL_TAIL_FAMILIES),
         help=(
             "Continuous nulls so p-values can resolve below the empirical floor of 1/(resamples+1). "
-            "skew_normal and student_t are fitted from the resampled moments; saddlepoint is "
-            "evaluated in the kernel and, under --crt-mechanism propensity, uses the exact "
-            "Bernoulli-sum CGF. All share one resampling pass. Pass with no values to skip them."
+            "saddlepoint (the default) is evaluated in the kernel and, under --crt-mechanism "
+            "propensity, uses the exact Bernoulli-sum CGF; skew_normal and student_t are fitted "
+            "from resampled moments and need resamples. Pass with no values to skip them."
         ),
     )
     parser.add_argument(
@@ -334,7 +336,7 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument(
         "--crt-mechanism",
         choices=list(CRT_MECHANISMS),
-        default="permutation",
+        default="propensity",
         help=(
             "How a target's label is resampled inside its pool of controls plus its own cells: "
             "a stratified permutation holding the count fixed, or model-X Bernoulli draws at each "
@@ -343,11 +345,14 @@ def main(argv: list[str] | None = None) -> None:
     )
     parser.add_argument(
         "--crt-saddlepoint-only",
-        action="store_true",
+        action=argparse.BooleanOptionalAction,
+        default=None,
         help=(
             "Draw no resamples: fit the propensity model, compute observed scores, and evaluate the "
-            "exact-CGF saddlepoint alone. Requires --crt-mechanism propensity and "
-            "--crt-tail-families saddlepoint; crt_p_value stays missing."
+            "exact-CGF saddlepoint alone. On by default whenever the mechanism is propensity and "
+            "the only tail family is saddlepoint (the production configuration); "
+            "--no-crt-saddlepoint-only adds the resampling pass. Requires those two settings; "
+            "crt_p_value stays missing without resamples."
         ),
     )
     parser.add_argument(
@@ -377,8 +382,14 @@ def main(argv: list[str] | None = None) -> None:
     )
     parser.add_argument(
         "--crt-allow-unconverged-baseline",
-        action="store_true",
-        help="Warn instead of failing when the stage-1 baseline is not at the control-cell null mode.",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Warn instead of failing when the stage-1 baseline is not at the control-cell null mode. "
+            "On by default: after the polish the guard's percentile is dominated by genes with almost "
+            "no control counts, and every production run passes it. --no-crt-allow-unconverged-baseline "
+            "makes the guard fatal."
+        ),
     )
     parser.add_argument(
         "--crt-polish-baseline",
@@ -701,6 +712,12 @@ def main(argv: list[str] | None = None) -> None:
     # Tri-state: True asked for it, False refused it, None is the default. On the
     # default an unsupported configuration steps aside rather than failing a run
     # that never mentioned the test; asked for explicitly, it is an error.
+    if args.crt_saddlepoint_only is None:
+        # The production configuration draws no resamples; any other mechanism or
+        # tail family needs them.
+        args.crt_saddlepoint_only = args.crt_mechanism == "propensity" and list(args.crt_tail_families) == [
+            CRT_SADDLEPOINT_FAMILY
+        ]
     crt_requested = args.crt is True or bool(args.crt_only)
     if args.crt is False:
         args.crt = False

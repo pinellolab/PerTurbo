@@ -75,6 +75,8 @@ def test_cli_writes_standard_outputs_relative(monkeypatch, tmp_path) -> None:
 
     api.main(
         [
+            # stubbed loader: the fabricated data cannot carry the test
+            "--no-crt",
             "--input",
             "dummy.h5mu",
             "--out-dir",
@@ -240,6 +242,8 @@ def test_cli_does_not_write_guide_efficiency_for_shared(monkeypatch, tmp_path) -
             "perturbation",
             "--control-substring",
             "ctrl",
+            # these tests stub the loader; the fabricated data cannot carry the test
+            "--no-crt",
         ]
     )
 
@@ -295,6 +299,8 @@ def test_cli_saves_model_params_by_default_and_supports_opt_out(monkeypatch, tmp
             "perturbation",
             "--control-substring",
             "ctrl",
+            # these tests stub the loader; the fabricated data cannot carry the test
+            "--no-crt",
             "--library-size-key",
             "umi_count",
             "--size-factor-mode",
@@ -330,6 +336,8 @@ def test_cli_saves_model_params_by_default_and_supports_opt_out(monkeypatch, tmp
             "perturbation",
             "--control-substring",
             "ctrl",
+            # these tests stub the loader; the fabricated data cannot carry the test
+            "--no-crt",
             "--library-size-key",
             "umi_count",
             "--size-factor-mode",

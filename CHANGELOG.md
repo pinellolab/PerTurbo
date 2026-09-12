@@ -19,6 +19,11 @@ and this project adheres to [Semantic Versioning][].
 
 ### Added
 
+-   The production configuration is the default: observed size factors (the named
+    library size, or each cell's total over the analysed genes), the propensity
+    mechanism, the exact-CGF saddlepoint with no resamples, and an advisory baseline
+    guard. A plain `perturbo --input ... --perturbation-key ... --control-substring ...`
+    runs the validated test; the research paths remain reachable by flag.
 -   PerTurbo 2.0 replaces the default implementation with NumPyro/JAX.
 -   A conditional randomization test (`--crt`), evaluated in closed form rather
     than by resampling, so every perturbation-gene pair of a genome-scale screen

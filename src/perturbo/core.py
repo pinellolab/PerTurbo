@@ -715,6 +715,16 @@ def _load_observed_size_factors(
             log_mean = float(library_size_center_log_mean)
         size_factors = (log_lib - log_mean).astype(np.float32, copy=False)[:, None]
         return jnp.asarray(size_factors, dtype=jnp.float32), log_mean
+    if counts is not None and hasattr(counts, "sum") and library_size_key is None and size_factor_key is None:
+        # No key named: the library size is the cell's total over the analysed genes.
+        # That is what --library-size-key usually holds anyway, computed over the full
+        # panel; over a gene subset it is the same quantity restricted to the subset.
+        totals = np.asarray(counts.sum(axis=1), dtype=np.float64).reshape(-1)
+        if totals.size and np.all(totals > 0):
+            log_lib = np.log1p(totals)
+            log_mean = float(np.mean(log_lib)) if library_size_center_log_mean is None else float(library_size_center_log_mean)
+            print("[perturbo] No --library-size-key given: using each cell's total count over the analysed genes as its library size.")
+            return jnp.asarray((log_lib - log_mean).astype(np.float32)[:, None], dtype=jnp.float32), log_mean
     return None, None
 
 

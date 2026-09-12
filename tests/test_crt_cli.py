@@ -172,7 +172,7 @@ def test_the_crt_columns_are_absent_only_when_refused(tmp_path) -> None:
 
 
 def test_the_crt_writes_its_columns_and_finds_the_planted_effect(tmp_path) -> None:
-    frame = _run_cli(tmp_path, "--crt", "--crt-num-resamples", "199", "--crt-seed", "1")
+    frame = _run_cli(tmp_path, "--crt", "--crt-mechanism", "permutation", "--crt-tail-families", "skew_normal", "student_t", "--crt-num-resamples", "199", "--crt-seed", "1")
 
     for column in ("crt_z_value", "crt_p_value", "crt_q_value"):
         assert column in frame.columns
@@ -195,7 +195,7 @@ def test_every_tail_family_is_reported_side_by_side(tmp_path) -> None:
     family among themselves, so each carries its own screen-wide q-value.
     """
 
-    frame = _run_cli(tmp_path, "--crt", "--crt-num-resamples", "199")
+    frame = _run_cli(tmp_path, "--crt", "--crt-mechanism", "permutation", "--crt-tail-families", "skew_normal", "student_t", "--crt-num-resamples", "199")
 
     for family in ("skew_normal", "student_t"):
         for suffix in ("p_value", "log_p_value", "q_value", "valid"):
@@ -274,7 +274,7 @@ def test_the_saddlepoint_only_crt_needs_no_resamples(tmp_path) -> None:
 
 def test_saddlepoint_only_is_refused_without_the_propensity_mechanism(tmp_path) -> None:
     with pytest.raises(ValueError, match="crt-mechanism propensity"):
-        _run_cli(tmp_path, "--crt", "--crt-tail-families", "saddlepoint", "--crt-saddlepoint-only")
+        _run_cli(tmp_path, "--crt", "--crt-mechanism", "permutation", "--crt-tail-families", "saddlepoint", "--crt-saddlepoint-only")
 
 
 def test_the_saddlepoint_runs_beside_the_moment_families(tmp_path) -> None:
@@ -293,7 +293,7 @@ def test_the_saddlepoint_runs_beside_the_moment_families(tmp_path) -> None:
 
 
 def test_the_baseline_can_be_polished_from_the_cli(tmp_path) -> None:
-    frame = _run_cli(tmp_path, "--crt", "--crt-num-resamples", "99", "--crt-polish-baseline")
+    frame = _run_cli(tmp_path, "--crt", "--crt-mechanism", "permutation", "--crt-tail-families", "skew_normal", "student_t", "--crt-num-resamples", "99", "--crt-polish-baseline")
     tested = frame[frame["element"] != "non-targeting"]
     assert tested["crt_p_value"].notna().all()
     planted = tested[(tested["element"] == "t0") & (tested["gene"] == "gene_1")]
