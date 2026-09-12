@@ -13,6 +13,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
+import perturbo.crt as crt_module
 from perturbo.core import ControlFit, PerTurboData
 from perturbo.crt import (
     CRT_CONTROL_NAME,
@@ -489,6 +490,64 @@ def test_tail_families_can_be_switched_off() -> None:
         tail_families=(),
     )
     assert result.parametric == {}
+
+
+def test_cached_low_moi_selection_plan_matches_uncached_and_validates_assignments(monkeypatch) -> None:
+    control_data, chunk_data, theta, strata = _simulate_screen()
+    string_strata = strata.astype(str)
+    control_data = dataclasses.replace(control_data, _analysis_design_token=object())
+    chunk_data = dataclasses.replace(chunk_data, _analysis_design_token=object())
+    baseline = prepare_crt_baseline(control_data, _fitted_control_fit(control_data, theta))
+    precompute_calls = 0
+    original_precompute = crt_module.precompute_low_moi_permutations
+
+    def counting_precompute(*args, **kwargs):
+        nonlocal precompute_calls
+        precompute_calls += 1
+        return original_precompute(*args, **kwargs)
+
+    monkeypatch.setattr(crt_module, "precompute_low_moi_permutations", counting_precompute)
+    uncached, plan = run_crt_for_chunk(
+        baseline,
+        chunk_data,
+        control_data=dataclasses.replace(control_data),
+        num_resamples=31,
+        strata=string_strata,
+        seed=12,
+        tail_families=(),
+        _return_permutations=True,
+    )
+    cached = run_crt_for_chunk(
+        baseline,
+        chunk_data,
+        control_data=control_data,
+        num_resamples=31,
+        strata=string_strata,
+        seed=12,
+        tail_families=(),
+        saddlepoint_screen_p_value=0.2,
+        _permutations=plan,
+    )
+
+    assert precompute_calls == 1
+    assert plan._validation_nuisance_design is None
+    np.testing.assert_array_equal(cached.observed_score, uncached.observed_score)
+    np.testing.assert_array_equal(cached.p_value, uncached.p_value)
+
+    assignments = np.asarray(chunk_data.pert_id).copy()
+    assignments[[0, 40]] = assignments[[40, 0]]
+    changed = dataclasses.replace(chunk_data, pert_id=jnp.asarray(assignments))
+    with pytest.raises(ValueError, match="target assignments"):
+        run_crt_for_chunk(
+            baseline,
+            changed,
+            control_data=control_data,
+            num_resamples=31,
+            strata=string_strata,
+            seed=12,
+            tail_families=(),
+            _permutations=plan,
+        )
 
 
 def test_the_saddlepoint_only_production_path_matches_the_research_path() -> None:

@@ -58,6 +58,7 @@ from dataclasses import dataclass
 
 import jax.numpy as jnp
 import numpy as np
+import scipy.sparse as sp
 
 from perturbo.core import PerTurboData, ControlFit, _normalize_likelihood_name
 from perturbo.sparse_design import IndexedDesignMatrix
@@ -69,6 +70,7 @@ from perturbo._internal.parametric_null import (
 )
 from perturbo._internal.arrow_nuisance import batch_codes_from_one_hot, is_intercept_and_one_hot
 from perturbo._internal.score_resampling import (
+    TargetPermutations,
     _benjamini_hochberg,
     _nuisance_information,
     evaluate_nb_null_components,
@@ -854,6 +856,14 @@ def build_chunk_design(
         ),
         covariate_names=None if control_data.covariate_names is None else list(control_data.covariate_names),
         library_size_center_log_mean=control_data.library_size_center_log_mean,
+        _analysis_design_token=(
+            control_data._analysis_design_token,
+            chunk_data._analysis_design_token,
+            tuple(str(name) for name in chunk_data.pert_names),
+        ) if (
+            control_data._analysis_design_token is not None
+            and chunk_data._analysis_design_token is not None
+        ) else None,
         **_stacked_batch_coding(control_data, chunk_data, control_covariates, chunk_covariates),
     )
     theta = baseline.nuisance.dispersion if dispersion is None else np.asarray(dispersion)
@@ -1043,6 +1053,84 @@ def fit_shared_propensity_coefficients(
     return beta
 
 
+def _validate_cached_low_moi_permutations(
+    permutations: TargetPermutations,
+    design,
+    *,
+    strata: np.ndarray | None,
+    num_resamples: int,
+    seed: int,
+    resampling_mechanism: str,
+    draw_resamples: bool,
+    shared_propensity_coefficients: np.ndarray | None,
+) -> None:
+    """Refuse a gene-block selection plan when its cells or assignment law changed."""
+
+    if permutations._validation_target_names is None:
+        raise ValueError("Cached permutations lack design validation metadata; recompute them for this data.")
+    expected_strata = (
+        np.zeros(design.num_cells, dtype=np.int64)
+        if strata is None
+        else np.asarray(strata).reshape(-1)
+    )
+    checks = (
+        (permutations.num_resamples == int(num_resamples), "resample count"),
+        (permutations.seed == int(seed), "seed"),
+        (permutations.resampling_mechanism == resampling_mechanism, "resampling mechanism"),
+        (permutations._validation_draw_resamples == bool(draw_resamples), "draw mode"),
+        (permutations._validation_num_cells == int(design.num_cells), "cell count"),
+        (
+            permutations._validation_target_names == tuple(str(name) for name in design.target_names),
+            "target identity/order",
+        ),
+    )
+    for matches, label in checks:
+        if not matches:
+            raise ValueError(f"Cached low-MOI permutations do not match the current {label}.")
+
+    def _same(cached, current) -> bool:
+        if cached is None or current is None:
+            return cached is None and current is None
+        try:
+            return bool(np.array_equal(cached, current, equal_nan=True))
+        except TypeError:
+            return bool(np.array_equal(cached, current))
+
+    current_codes = getattr(design, "target_codes", None)
+    current_target_design = None if current_codes is not None else np.asarray(design.target_design, dtype=np.int8)
+    structural = (
+        (permutations._validation_target_codes, current_codes, "target assignments"),
+        (permutations._validation_target_design, current_target_design, "target assignments"),
+        (permutations._validation_control_mask, np.asarray(design.control_mask, dtype=bool), "control membership"),
+        (
+            permutations._validation_source_cell_indices,
+            np.asarray(getattr(design, "source_cell_indices", np.arange(design.num_cells)), dtype=np.int64),
+            "cell identity/order",
+        ),
+        (permutations._validation_strata, expected_strata, "strata"),
+        (
+            permutations._validation_shared_propensity_coefficients,
+            None
+            if shared_propensity_coefficients is None
+            else np.asarray(shared_propensity_coefficients, dtype=np.float64),
+            "shared propensity coefficients",
+        ),
+    )
+    for cached, current, label in structural:
+        if not _same(cached, None if current is None else np.asarray(current)):
+            raise ValueError(f"Cached low-MOI permutations do not match the current {label}.")
+
+    design_token = getattr(design, "_gene_independent_token", None)
+    if permutations._validation_design_token is not None:
+        if design_token != permutations._validation_design_token:
+            raise ValueError("Cached low-MOI permutations do not match the current nuisance design.")
+    elif not _same(
+        permutations._validation_nuisance_design,
+        np.asarray(design.nuisance_design, dtype=np.float32),
+    ):
+        raise ValueError("Cached low-MOI permutations do not match the current nuisance design.")
+
+
 def run_crt_for_chunk(
     baseline: CRTBaseline,
     chunk_data: PerTurboData,
@@ -1060,7 +1148,9 @@ def run_crt_for_chunk(
     saddlepoint_screen_p_value: float = 0.05,
     saddlepoint_two_sided: str = "equal-tail",
     shared_propensity_coefficients: np.ndarray | None = None,
-) -> ChunkCRTResult:
+    _permutations: TargetPermutations | None = None,
+    _return_permutations: bool = False,
+) -> ChunkCRTResult | tuple[ChunkCRTResult, TargetPermutations]:
     """Run the CRT for one perturbation chunk, looping inner gene chunks.
 
     ``resampling_mechanism`` chooses the null: ``"permutation"`` holds each
@@ -1182,15 +1272,29 @@ def run_crt_for_chunk(
 
     # Resamples never depend on genes, so they are drawn once for the whole
     # chunk rather than redrawn per gene slice.
-    permutations = precompute_low_moi_permutations(
-        design,
-        num_resamples=num_resamples,
-        strata=full_strata,
-        seed=seed,
-        resampling_mechanism=resampling_mechanism,
-        draw_resamples=not saddlepoint_only,
-        shared_propensity_coefficients=shared_propensity_coefficients,
-    )
+    permutations = _permutations
+    if permutations is None:
+        permutations = precompute_low_moi_permutations(
+            design,
+            num_resamples=num_resamples,
+            strata=full_strata,
+            seed=seed,
+            resampling_mechanism=resampling_mechanism,
+            draw_resamples=not saddlepoint_only,
+            shared_propensity_coefficients=shared_propensity_coefficients,
+            _cache_validation=_return_permutations,
+        )
+    else:
+        _validate_cached_low_moi_permutations(
+            permutations,
+            design,
+            strata=full_strata,
+            num_resamples=num_resamples,
+            seed=seed,
+            resampling_mechanism=resampling_mechanism,
+            draw_resamples=not saddlepoint_only,
+            shared_propensity_coefficients=shared_propensity_coefficients,
+        )
 
     counts = np.asarray(design.counts)
     dispersion = np.asarray(design.dispersion)
@@ -1257,7 +1361,7 @@ def run_crt_for_chunk(
             if result.parametric_used_fallback is not None:
                 block["used_screen"][:, gene_slice] = np.asarray(result.parametric_used_fallback, dtype=bool)
 
-    return ChunkCRTResult(
+    result = ChunkCRTResult(
         observed_score=observed,
         p_value=p_values,
         null_converged=converged,
@@ -1270,6 +1374,7 @@ def run_crt_for_chunk(
         resampling_mechanism=resampling_mechanism,
         saddlepoint_only=saddlepoint_only,
     )
+    return (result, permutations) if _return_permutations else result
 
 
 CRT_POOLS = ("control-anchored", "all-cells")
@@ -1298,7 +1403,11 @@ def _element_membership(data: PerTurboData) -> tuple[np.ndarray, np.ndarray, int
             "The all-cells CRT needs the guide-to-element structure (guide_matrix and guide_to_element); "
             "load the data with the perturbation modality and its element map."
         )
-    guide_to_element = np.asarray(data.guide_to_element) > 0
+    if sp.issparse(data.guide_to_element):
+        guide_to_element = (data.guide_to_element > 0).tocsr()
+        guide_to_element.eliminate_zeros()
+    else:
+        guide_to_element = np.asarray(data.guide_to_element) > 0
     num_guides, num_elements = guide_to_element.shape
     guide_matrix = data.guide_matrix
     num_cells = int(guide_matrix.shape[0])
@@ -1317,8 +1426,12 @@ def _element_membership(data: PerTurboData) -> tuple[np.ndarray, np.ndarray, int
     # Expand each detected (cell, guide) to the guide's elements. The map's
     # non-zeros come out sorted by guide, so a guide's elements are one
     # contiguous run starting at offsets[guide].
-    map_guides, map_elements = np.nonzero(guide_to_element)
-    per_guide = np.bincount(map_guides, minlength=num_guides)
+    if sp.issparse(guide_to_element):
+        per_guide = np.diff(guide_to_element.indptr)
+        map_elements = guide_to_element.indices
+    else:
+        map_guides, map_elements = np.nonzero(guide_to_element)
+        per_guide = np.bincount(map_guides, minlength=num_guides)
     offsets = np.concatenate([np.zeros(1, dtype=np.int64), np.cumsum(per_guide, dtype=np.int64)])
     reps = per_guide[guides]
     total = int(reps.sum())
@@ -1668,6 +1781,7 @@ def exclude_targets(chunk_data: PerTurboData, drop_names: Iterable[str]) -> PerT
         guide_names=None if chunk_data.guide_names is None else list(chunk_data.guide_names),
         guide_to_element=chunk_data.guide_to_element,
         library_size_center_log_mean=chunk_data.library_size_center_log_mean,
+        _analysis_design_token=chunk_data._analysis_design_token,
     )
 
 

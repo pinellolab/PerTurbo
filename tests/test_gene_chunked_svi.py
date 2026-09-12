@@ -86,6 +86,115 @@ def test_gene_chunk_loads_only_selected_counts_and_uses_full_panel_offsets(monke
     np.testing.assert_array_equal(np.asarray(indexed_design_to_dense(loaded.pert_id)), guides)
 
 
+def test_gene_chunk_design_cache_reuses_sparse_assignment_and_covariates(monkeypatch) -> None:
+    data, counts, _ = _high_moi_data()
+    data.mod["rna"].obs["depth"] = np.linspace(0.0, 1.0, counts.shape[0])
+    data.mod["pert"].varm["targets"] = sp.eye(2, dtype=np.int8, format="csr")
+    data.mod["pert"].uns["target_names"] = ["target_A", "target_B"]
+    grouped_calls = 0
+    original_group = core._group_perturbation_matrix_by_element
+
+    def counting_group(*args, **kwargs):
+        nonlocal grouped_calls
+        grouped_calls += 1
+        return original_group(*args, **kwargs)
+
+    monkeypatch.setattr(core, "_group_perturbation_matrix_by_element", counting_group)
+    library_sizes = counts.sum(axis=1)
+    first, cache = load_analysis_cells(
+        data,
+        modality_key="rna",
+        perturbation_modality_key="pert",
+        perturbation_element_varm_key="targets",
+        perturbation_element_names_uns_key="target_names",
+        retain_guide_structure=True,
+        continuous_covariates=["depth"],
+        selected_gene_indices=slice(0, 1),
+        full_panel_library_sizes=library_sizes,
+        indexed_perturbation_design=True,
+        _return_design_cache=True,
+    )
+    second = load_analysis_cells(
+        data,
+        modality_key="rna",
+        perturbation_modality_key="pert",
+        perturbation_element_varm_key="targets",
+        perturbation_element_names_uns_key="target_names",
+        retain_guide_structure=True,
+        continuous_covariates=["depth"],
+        selected_gene_indices=slice(1, 3),
+        full_panel_library_sizes=library_sizes,
+        indexed_perturbation_design=True,
+        _design_cache=cache,
+    )
+
+    assert grouped_calls == 1
+    assert second.pert_id is first.pert_id
+    assert second.covariates is first.covariates
+    assert second.guide_matrix is first.guide_matrix
+    assert sp.issparse(first.guide_to_element)
+    assert second.guide_to_element is first.guide_to_element
+    np.testing.assert_array_equal(np.asarray(first.counts), counts[:, :1])
+    np.testing.assert_array_equal(np.asarray(second.counts), counts[:, 1:3])
+    np.testing.assert_allclose(np.asarray(first.size_factors), np.asarray(second.size_factors))
+
+
+def test_gene_chunk_design_cache_rejects_changed_selection_or_options() -> None:
+    data, counts, _ = _high_moi_data()
+    _, cache = load_analysis_cells(
+        data,
+        modality_key="rna",
+        perturbation_modality_key="pert",
+        perturbation_element_varm_key="targets",
+        selected_gene_indices=slice(0, 1),
+        full_panel_library_sizes=counts.sum(axis=1),
+        indexed_perturbation_design=True,
+        _return_design_cache=True,
+    )
+    with np.testing.assert_raises_regex(ValueError, "options changed"):
+        load_analysis_cells(
+            data,
+            modality_key="rna",
+            perturbation_modality_key="pert",
+            perturbation_element_varm_key="targets",
+            selected_gene_indices=slice(1, 2),
+            full_panel_library_sizes=counts.sum(axis=1),
+            indexed_perturbation_design=False,
+            _design_cache=cache,
+        )
+    with np.testing.assert_raises_regex(ValueError, "cell selection/order changed"):
+        load_analysis_cells(
+            data,
+            modality_key="rna",
+            perturbation_modality_key="pert",
+            perturbation_element_varm_key="targets",
+            selected_gene_indices=slice(1, 2),
+            full_panel_library_sizes=counts.sum(axis=1),
+            indexed_perturbation_design=True,
+            cell_keep_mask=np.arange(counts.shape[0]) != 0,
+            _design_cache=cache,
+        )
+
+
+def test_control_loader_skips_unused_element_mapping(monkeypatch) -> None:
+    data, counts, _ = _high_moi_data()
+
+    def fail_mapping(*args, **kwargs):
+        raise AssertionError("unused guide-to-element mapping should not be loaded")
+
+    monkeypatch.setattr(core, "_load_perturbation_element_mapping", fail_mapping)
+    controls = load_controls(
+        data,
+        modality_key="rna",
+        perturbation_modality_key="pert",
+        perturbation_element_varm_key="targets",
+        control_selector=None,
+        infer_control_guides=False,
+        max_control_cells=None,
+    )
+    np.testing.assert_array_equal(np.asarray(controls.counts), counts)
+
+
 def test_backed_gene_chunk_does_not_materialize_raw_or_layers(tmp_path, monkeypatch) -> None:
     cell_names = ["c0", "c1", "c2", "c3"]
     counts = np.arange(24, dtype=np.int32).reshape(4, 6)

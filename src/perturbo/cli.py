@@ -1405,6 +1405,7 @@ def main(argv: list[str] | None = None) -> None:
 
     crt_baseline = None
     crt_accumulator: CRTAccumulator | None = None
+    gene_block_crt_permutations = None
     if args.crt and crt_pool == "control-anchored" and gene_chunk_size is None:
         print("[perturbo] Preparing CRT baseline from the stage-1 fit...")
         crt_baseline = prepare_crt_baseline(
@@ -1430,6 +1431,7 @@ def main(argv: list[str] | None = None) -> None:
         chunk side would stack the same biological cells twice as distinct rows.
         """
 
+        nonlocal gene_block_crt_permutations
         control_names = [
             name
             for name, is_control in zip(
@@ -1457,8 +1459,7 @@ def main(argv: list[str] | None = None) -> None:
                 return
             if control_names:
                 print(f"[perturbo] CRT: skipping {len(control_names)} control element(s) as targets.")
-        accumulator.absorb(
-            run_crt_for_chunk(
+        crt_result = run_crt_for_chunk(
                 crt_baseline if baseline_source is None else baseline_source,
                 testable,
                 control_data=controls if control_source is None else control_source,
@@ -1472,8 +1473,12 @@ def main(argv: list[str] | None = None) -> None:
                 saddlepoint_screen_p_value=args.crt_screen_p_value,
                 saddlepoint_two_sided=args.crt_two_sided,
                 shared_propensity_coefficients=crt_shared_propensity,
+                _permutations=gene_block_crt_permutations if gene_chunk_size is not None else None,
+                _return_permutations=gene_chunk_size is not None,
             )
-        )
+        if gene_chunk_size is not None:
+            crt_result, gene_block_crt_permutations = crt_result
+        accumulator.absorb(crt_result)
 
     def _nan_beta_fit(n_perts: int, n_genes: int):
         """A stage-two result with every estimate missing, for --crt-only runs."""
@@ -1527,7 +1532,15 @@ def main(argv: list[str] | None = None) -> None:
         print(f"[perturbo] CRT (all-cells pool) complete in {time.perf_counter() - started:.0f}s")
         return accumulator
 
-    def _load_all_analysis_cells(*, selected_gene_indices=None, full_panel_library_sizes=None) -> PerTurboData:
+    analysis_design_cache = None
+
+    def _load_all_analysis_cells(
+        *,
+        selected_gene_indices=None,
+        full_panel_library_sizes=None,
+        design_cache=None,
+        return_design_cache=False,
+    ):
         return load_analysis_cells(
             data,
             perturbation_key=args.perturbation_key,
@@ -1550,12 +1563,14 @@ def main(argv: list[str] | None = None) -> None:
             covariate_transform_state=covariate_transform_state,
             retain_guide_structure=retain_guide_structure and (
                 gene_chunk_size is None
-                or (args.crt and crt_pool == "all-cells" and all_cells_propensity is None)
+                or (args.crt and crt_pool == "all-cells")
             ),
             library_size_center_log_mean=controls.library_size_center_log_mean,
             selected_gene_indices=selected_gene_indices,
             full_panel_library_sizes=full_panel_library_sizes,
             indexed_perturbation_design=gene_chunk_size is not None,
+            _design_cache=design_cache,
+            _return_design_cache=return_design_cache,
         )
 
     chunk_losses: list[jnp.ndarray] = []
@@ -1590,10 +1605,16 @@ def main(argv: list[str] | None = None) -> None:
             stop = min(start + gene_chunk_size, n_genes)
             gene_slice = slice(start, stop)
             print(f"[perturbo] Gene block {start + 1}–{stop}/{n_genes}: every cell and perturbation predictor retained")
-            analysis_data = _load_all_analysis_cells(
+            loaded_analysis = _load_all_analysis_cells(
                 selected_gene_indices=gene_slice,
                 full_panel_library_sizes=full_panel_library_sizes,
+                design_cache=analysis_design_cache,
+                return_design_cache=analysis_design_cache is None,
             )
+            if analysis_design_cache is None:
+                analysis_data, analysis_design_cache = loaded_analysis
+            else:
+                analysis_data = loaded_analysis
             if size_factor_mode == "none":
                 analysis_data.size_factors = _fixed_zero_size_factors(analysis_data.counts)
             all_perturbation_names = list(analysis_data.pert_names)

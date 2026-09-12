@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import jax.numpy as jnp
 import numpy as np
+import scipy.sparse as sp
 
 from perturbo.core import PerTurboData
 from perturbo.crt import _element_membership, exclude_targets
@@ -33,7 +34,12 @@ def test_all_cells_membership_reads_indexed_guides_without_densifying() -> None:
 
     dense = _element_membership(data(jnp.asarray(guides)))
     indexed = _element_membership(data(indexed_design_from_matrix(guides)))
+    sparse_map_data = data(indexed_design_from_matrix(guides))
+    sparse_map_data.guide_to_element = sp.csr_matrix(np.asarray(guide_to_element))
+    sparse_map = _element_membership(sparse_map_data)
     for actual, expected in zip(indexed, dense, strict=True):
+        np.testing.assert_array_equal(actual, expected)
+    for actual, expected in zip(sparse_map, dense, strict=True):
         np.testing.assert_array_equal(actual, expected)
 
 

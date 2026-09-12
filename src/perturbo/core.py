@@ -91,10 +91,36 @@ class PerTurboData:
     covariate_names: list[str] | None = None
     guide_matrix: jnp.ndarray | IndexedDesignMatrix | None = None
     guide_names: list[str] | None = None
-    guide_to_element: jnp.ndarray | None = None
+    guide_to_element: jnp.ndarray | sp.csr_matrix | None = None
     library_size_center_log_mean: float | None = None
     categorical_batch_codes: jnp.ndarray | None = None
     categorical_batch_names: list[str] | None = None
+    _analysis_design_token: object | None = None
+
+
+@dataclass(frozen=True)
+class _AnalysisDesignCache:
+    """Gene-independent analysis inputs reused by the CLI's outer gene loop."""
+
+    source_adata_id: int
+    source_data_id: int
+    source_obs_names: pd.Index
+    source_var_names: pd.Index
+    source_perturbation_adata_id: int | None
+    source_perturbation_obs_names: pd.Index | None
+    source_perturbation_var_names: pd.Index | None
+    obs_indices: np.ndarray
+    configuration: tuple[Any, ...]
+    pert_id: jnp.ndarray | IndexedDesignMatrix
+    pert_names: tuple[str, ...]
+    covariates: jnp.ndarray | None
+    covariate_names: tuple[str, ...] | None
+    guide_matrix: jnp.ndarray | IndexedDesignMatrix | None
+    guide_names: tuple[str, ...] | None
+    guide_to_element: jnp.ndarray | sp.csr_matrix | None
+    categorical_batch_codes: jnp.ndarray | None
+    categorical_batch_names: tuple[str, ...] | None
+    token: object
 
 
 @dataclass
@@ -596,7 +622,7 @@ def _validate_guide_model_request(
                 "guide_effect_strategy other than 'shared' requires guide-level perturbation inputs "
                 "with perturbation_modality_key plus perturbation_element_varm_key."
             )
-        _validate_one_parent_guide_mapping(np.asarray(data.guide_to_element), guide_names=data.guide_names)
+        _validate_one_parent_guide_mapping(data.guide_to_element, guide_names=data.guide_names)
     return strategy, activity
 
 
@@ -1400,7 +1426,7 @@ def _load_guide_shared_perturbation_data(
     obs_names,
     element_subset: list[str] | None = None,
     indexed_design: bool = False,
-) -> tuple[Any, list[str], Any, np.ndarray, list[str]]:
+) -> tuple[Any, list[str], Any, np.ndarray | sp.csr_matrix, list[str]]:
     pert_adata = _resolve_perturbation_modality(data, perturbation_modality_key)
     if obs_names is not None:
         pert_adata = pert_adata[obs_names]
@@ -1429,14 +1455,16 @@ def _load_guide_shared_perturbation_data(
         element_names = list(element_subset)
     else:
         element_names = list(all_element_names)
+    binary_mapping = (element_mapping > 0).astype(np.float32)
+    if sp.issparse(binary_mapping):
+        binary_mapping = binary_mapping.tocsr()
+    if not indexed_design and sp.issparse(binary_mapping):
+        binary_mapping = binary_mapping.toarray()
     return (
         indexed_design_from_matrix(raw_matrix) if indexed_design else raw_matrix,
         guide_names,
         indexed_design_from_matrix(grouped) if indexed_design else grouped,
-        np.asarray(
-            (element_mapping > 0).toarray() if sp.issparse(element_mapping) else element_mapping > 0,
-            dtype=np.float32,
-        ),
+        np.asarray(binary_mapping, dtype=np.float32) if not sp.issparse(binary_mapping) else binary_mapping,
         element_names,
     )
 
@@ -1445,12 +1473,16 @@ _PADDING_GUIDE_PREFIX = "__padding_guide_"
 
 
 def _validate_one_parent_guide_mapping(
-    guide_to_element: np.ndarray,
+    guide_to_element: np.ndarray | sp.spmatrix,
     *,
     guide_names: list[str] | None = None,
 ) -> None:
-    mapping = np.asarray(guide_to_element, dtype=np.int32)
-    row_sums = mapping.sum(axis=1)
+    if sp.issparse(guide_to_element):
+        mapping = (guide_to_element > 0).astype(np.int32).tocsr()
+        row_sums = np.asarray(mapping.sum(axis=1)).reshape(-1)
+    else:
+        mapping = np.asarray(guide_to_element, dtype=np.int32)
+        row_sums = mapping.sum(axis=1)
     invalid = np.flatnonzero(row_sums != 1)
     if guide_names is not None and len(guide_names) == mapping.shape[0] and invalid.size:
         # Chunk padding appends all-zero guide rows to reach a shared guide
@@ -1498,7 +1530,7 @@ CONTROL_GUIDE_NAME_PATTERN = r"random|scrambled|non[-_ ]?target(?:ing)?"
 
 
 def _guides_for_matching_elements(
-    guide_to_element: np.ndarray | None,
+    guide_to_element: np.ndarray | sp.spmatrix | None,
     element_names: list[str] | None,
     pattern: str,
     *,
@@ -1506,7 +1538,7 @@ def _guides_for_matching_elements(
 ) -> np.ndarray | None:
     if guide_to_element is None or element_names is None:
         return None
-    mapping = np.asarray(guide_to_element > 0, dtype=bool)
+    mapping = (guide_to_element > 0).astype(bool)
     if mapping.ndim != 2 or mapping.shape[1] != len(element_names):
         raise ValueError("Guide-to-element mapping shape does not match perturbation element names.")
     element_mask = (
@@ -1517,13 +1549,15 @@ def _guides_for_matching_elements(
     )
     if not np.any(element_mask):
         return None
+    if sp.issparse(mapping):
+        return np.asarray(mapping[:, element_mask].getnnz(axis=1) > 0, dtype=bool)
     return np.asarray(mapping[:, element_mask].any(axis=1), dtype=bool)
 
 
 def _infer_control_guide_columns(
     pert_names: list[str],
     *,
-    guide_to_element: np.ndarray | None,
+    guide_to_element: np.ndarray | sp.spmatrix | None,
     element_names: list[str] | None,
 ) -> np.ndarray | None:
     control_cols = _guides_for_matching_elements(
@@ -1660,6 +1694,40 @@ def _normalize_gene_indices(selected_gene_indices, num_genes: int) -> np.ndarray
     if np.unique(indices).size != indices.size:
         raise ValueError("selected_gene_indices must not contain duplicate indices.")
     return indices
+
+
+def _analysis_design_configuration(
+    *,
+    perturbation_key: str | None,
+    modality_key: str | None,
+    perturbation_modality_key: str | None,
+    perturbation_layer: str | None,
+    perturbation_element_varm_key: str | None,
+    perturbation_element_names_uns_key: str | None,
+    gene_name_key: str | None,
+    device: Any | None,
+    continuous_covariates: list[str] | None,
+    batch_covariate: str | None,
+    covariate_transform_state: CovariateTransformState | None,
+    retain_guide_structure: bool,
+    indexed_perturbation_design: bool,
+) -> tuple[Any, ...]:
+    """Options whose outputs may be reused unchanged across expression-gene blocks."""
+    return (
+        perturbation_key,
+        modality_key,
+        perturbation_modality_key,
+        perturbation_layer,
+        perturbation_element_varm_key,
+        perturbation_element_names_uns_key,
+        gene_name_key,
+        str(device),
+        tuple(_dedupe_preserve_order(continuous_covariates)),
+        None if batch_covariate in (None, "", "None") else str(batch_covariate),
+        id(covariate_transform_state) if covariate_transform_state is not None else None,
+        bool(retain_guide_structure),
+        bool(indexed_perturbation_design),
+    )
 
 
 def _sum_matrix_rows_bounded(matrix, row_indices: np.ndarray, *, row_chunk_size: int = BACKED_ROW_CHUNK_SIZE) -> np.ndarray:
@@ -1869,12 +1937,15 @@ def load_controls(
         pert_names = _extract_pert_names(pert_adata)
         guide_to_element = None
         element_names = None
-        if perturbation_element_varm_key is not None:
+        if perturbation_element_varm_key is not None and (
+            isinstance(control_selector, str) or infer_control_guides
+        ):
             guide_to_element, element_names = _load_perturbation_element_mapping(
                 data,
                 perturbation_modality_key=perturbation_modality_key,
                 perturbation_element_varm_key=perturbation_element_varm_key,
                 perturbation_element_names_uns_key=perturbation_element_names_uns_key,
+                preserve_sparse=True,
             )
         control_cols = _resolve_high_moi_control_guide_columns(
             pert_names,
@@ -1969,6 +2040,7 @@ def load_controls(
         covariates=covariates,
         covariate_names=covariate_names,
         library_size_center_log_mean=library_size_center_log_mean,
+        _analysis_design_token=object(),
     )
     if return_covariate_transform_state:
         return out, covariate_transform_state
@@ -2002,11 +2074,30 @@ def load_analysis_cells(
     selected_gene_indices: slice | Iterable[int] | np.ndarray | None = None,
     full_panel_library_sizes: np.ndarray | None = None,
     indexed_perturbation_design: bool = False,
-) -> PerTurboData:
+    _design_cache: _AnalysisDesignCache | None = None,
+    _return_design_cache: bool = False,
+) -> PerTurboData | tuple[PerTurboData, _AnalysisDesignCache]:
     subset_suffix = " for selected perturbations" if selected_perturbations is not None else ""
     print(f"[perturbo] Loading analysis cells{subset_suffix}...")
     adata = _resolve_adata(data, modality_key)
+    source_adata = adata
     is_backed = bool(getattr(adata, "isbacked", False))
+
+    configuration = _analysis_design_configuration(
+        perturbation_key=perturbation_key,
+        modality_key=modality_key,
+        perturbation_modality_key=perturbation_modality_key,
+        perturbation_layer=perturbation_layer,
+        perturbation_element_varm_key=perturbation_element_varm_key,
+        perturbation_element_names_uns_key=perturbation_element_names_uns_key,
+        gene_name_key=gene_name_key,
+        device=device,
+        continuous_covariates=continuous_covariates,
+        batch_covariate=batch_covariate,
+        covariate_transform_state=covariate_transform_state,
+        retain_guide_structure=retain_guide_structure,
+        indexed_perturbation_design=indexed_perturbation_design,
+    )
 
     # Compose all obs-level filters into a single integer index array before
     # touching adata.X. Backed AnnData forbids "view of a view", so compose the
@@ -2019,6 +2110,30 @@ def load_analysis_cells(
     else:
         obs_idx = np.arange(adata.n_obs)
 
+    if _design_cache is not None:
+        if selected_perturbations is not None:
+            raise ValueError("A gene-block design cache cannot be combined with selected perturbations.")
+        if id(adata) != _design_cache.source_adata_id:
+            raise ValueError("The gene-block design cache belongs to a different analysis object.")
+        if id(data) != _design_cache.source_data_id:
+            raise ValueError("The gene-block design cache belongs to a different input object.")
+        if adata.obs_names is not _design_cache.source_obs_names or adata.var_names is not _design_cache.source_var_names:
+            raise ValueError("The analysis cell or gene identity/order changed after the gene-block cache was built.")
+        if configuration != _design_cache.configuration:
+            raise ValueError("Gene-independent analysis loading options changed after the gene-block cache was built.")
+        if not np.array_equal(obs_idx, _design_cache.obs_indices):
+            raise ValueError("The analysis cell selection/order changed after the gene-block cache was built.")
+        if perturbation_modality_key is not None:
+            source_perturbations = _resolve_perturbation_modality(data, perturbation_modality_key)
+            if (
+                id(source_perturbations) != _design_cache.source_perturbation_adata_id
+                or source_perturbations.obs_names is not _design_cache.source_perturbation_obs_names
+                or source_perturbations.var_names is not _design_cache.source_perturbation_var_names
+            ):
+                raise ValueError(
+                    "The perturbation cells or guide identity/order changed after the gene-block cache was built."
+                )
+
     working_obs = adata.obs.iloc[obs_idx]
     working_obs_names = adata.obs_names[obs_idx]
 
@@ -2026,7 +2141,13 @@ def load_analysis_cells(
     guide_matrix = None
     guide_names = None
     guide_to_element = None
-    if use_matrix:
+    if _design_cache is not None:
+        pert_id = _design_cache.pert_id
+        pert_names = list(_design_cache.pert_names)
+        guide_matrix = _design_cache.guide_matrix
+        guide_names = None if _design_cache.guide_names is None else list(_design_cache.guide_names)
+        guide_to_element = _design_cache.guide_to_element
+    elif use_matrix:
         if retain_guide_structure:
             if perturbation_element_varm_key is None:
                 raise ValueError("retain_guide_structure requires perturbation_element_varm_key.")
@@ -2105,7 +2226,7 @@ def load_analysis_cells(
         )
     adata = adata[obs_idx, gene_indices]
 
-    if use_matrix:
+    if use_matrix or _design_cache is not None:
         gene_names = _extract_gene_names(adata, gene_name_key)
     else:
         gene_names, pert_names, pert_id = _extract_names(
@@ -2135,9 +2256,14 @@ def load_analysis_cells(
         library_size_center_log_mean=library_size_center_log_mean,
         counts_library_sizes=counts_library_sizes,
     )
-    covariates = None
-    covariate_names = None
-    if covariate_transform_state is not None:
+    covariates = None if _design_cache is None else _design_cache.covariates
+    covariate_names = (
+        None if _design_cache is None or _design_cache.covariate_names is None
+        else list(_design_cache.covariate_names)
+    )
+    if _design_cache is not None:
+        pass
+    elif covariate_transform_state is not None:
         cov_matrix, covariate_names = apply_covariate_transform(adata.obs, covariate_transform_state)
         if cov_matrix.shape[0] != counts.shape[0]:
             raise RuntimeError(
@@ -2162,13 +2288,17 @@ def load_analysis_cells(
                 )
             covariates = _to_jax(cov_matrix, device_obj, dtype=jnp.float32)
     print("[perturbo] Analysis cells prepared for JAX.")
-    if isinstance(pert_id, IndexedDesignMatrix):
+    if _design_cache is not None:
+        pert_id_jax = pert_id
+    elif isinstance(pert_id, IndexedDesignMatrix):
         pert_id_jax = _indexed_design_to_device(pert_id, device_obj)
     else:
         pert_id_arr = np.asarray(_to_dense(pert_id))
         pert_dtype = jnp.bool_ if pert_id_arr.ndim == 2 else None
         pert_id_jax = _to_jax(pert_id_arr, device_obj, dtype=pert_dtype)
-    if isinstance(guide_matrix, IndexedDesignMatrix):
+    if _design_cache is not None:
+        guide_matrix_jax = guide_matrix
+    elif isinstance(guide_matrix, IndexedDesignMatrix):
         guide_matrix_jax = _indexed_design_to_device(guide_matrix, device_obj)
     else:
         guide_matrix_jax = (
@@ -2176,7 +2306,16 @@ def load_analysis_cells(
             if guide_matrix is not None
             else None
         )
-    return PerTurboData(
+    if sp.issparse(guide_to_element):
+        guide_to_element_out = guide_to_element
+    else:
+        guide_to_element_out = (
+            _to_jax(np.asarray(guide_to_element), device_obj, dtype=jnp.float32)
+            if guide_to_element is not None
+            else None
+        )
+    token = _design_cache.token if _design_cache is not None else object()
+    out = PerTurboData(
         counts=counts_jax,
         pert_id=pert_id_jax,
         pert_names=pert_names,
@@ -2186,13 +2325,49 @@ def load_analysis_cells(
         covariate_names=covariate_names,
         guide_matrix=guide_matrix_jax,
         guide_names=guide_names,
-        guide_to_element=(
-            _to_jax(np.asarray(guide_to_element), device_obj, dtype=jnp.float32)
-            if guide_to_element is not None
-            else None
-        ),
+        guide_to_element=guide_to_element_out,
         library_size_center_log_mean=loaded_library_size_center_log_mean,
+        _analysis_design_token=token,
     )
+    if not _return_design_cache:
+        return out
+    if selected_perturbations is not None:
+        raise ValueError("A gene-block design cache requires every perturbation predictor.")
+    cached_rows = np.asarray(obs_idx, dtype=np.int64).copy()
+    cached_rows.flags.writeable = False
+    source_perturbations = (
+        None
+        if perturbation_modality_key is None
+        else _resolve_perturbation_modality(data, perturbation_modality_key)
+    )
+    cache = _AnalysisDesignCache(
+        source_adata_id=id(source_adata),
+        source_data_id=id(data),
+        source_obs_names=source_adata.obs_names,
+        source_var_names=source_adata.var_names,
+        source_perturbation_adata_id=None if source_perturbations is None else id(source_perturbations),
+        source_perturbation_obs_names=(
+            None if source_perturbations is None else source_perturbations.obs_names
+        ),
+        source_perturbation_var_names=(
+            None if source_perturbations is None else source_perturbations.var_names
+        ),
+        obs_indices=cached_rows,
+        configuration=configuration,
+        pert_id=pert_id_jax,
+        pert_names=tuple(str(name) for name in pert_names),
+        covariates=covariates,
+        covariate_names=None if covariate_names is None else tuple(covariate_names),
+        guide_matrix=guide_matrix_jax,
+        guide_names=None if guide_names is None else tuple(guide_names),
+        guide_to_element=guide_to_element_out,
+        categorical_batch_codes=out.categorical_batch_codes,
+        categorical_batch_names=(
+            None if out.categorical_batch_names is None else tuple(out.categorical_batch_names)
+        ),
+        token=token,
+    )
+    return out, cache
 
 
 def fit_control(

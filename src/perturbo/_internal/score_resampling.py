@@ -376,10 +376,32 @@ class TargetPermutations:
     propensity_basis: np.ndarray | None = None
     """Rank-revealing ``(cells, basis)`` design shared by the compact
     target-specific propensity coefficients."""
+    _validation_target_names: tuple[str, ...] | None = None
+    _validation_num_cells: int | None = None
+    _validation_target_codes: np.ndarray | None = None
+    _validation_target_design: np.ndarray | None = None
+    _validation_control_mask: np.ndarray | None = None
+    _validation_source_cell_indices: np.ndarray | None = None
+    _validation_strata: np.ndarray | None = None
+    _validation_nuisance_design: np.ndarray | None = None
+    _validation_design_token: object | None = None
+    _validation_draw_resamples: bool = True
+    _validation_shared_propensity_coefficients: np.ndarray | None = None
 
     def __post_init__(self) -> None:
         if any(entry is not None and entry.ndim != 2 for entry in self.indices):
             raise ValueError("Each target's permutation indices must be two-dimensional.")
+        for value in (
+            self._validation_target_codes,
+            self._validation_target_design,
+            self._validation_control_mask,
+            self._validation_source_cell_indices,
+            self._validation_strata,
+            self._validation_nuisance_design,
+            self._validation_shared_propensity_coefficients,
+        ):
+            if value is not None:
+                value.flags.writeable = False
 
 
 
@@ -475,6 +497,7 @@ def precompute_low_moi_permutations(
     draw_resamples: bool = True,
     propensity_target_batch_size: int = 64,
     shared_propensity_coefficients: np.ndarray | None = None,
+    _cache_validation: bool = False,
 ) -> TargetPermutations:
     """Draw every target's resamples once, for reuse across gene chunks.
 
@@ -687,6 +710,43 @@ def precompute_low_moi_permutations(
         pool_intercepts=None,
         propensity_coefficients=propensity_coef if resampling_mechanism == "propensity" else None,
         propensity_basis=propensity_Q if resampling_mechanism == "propensity" else None,
+        _validation_target_names=target_names if _cache_validation else None,
+        _validation_num_cells=int(design.num_cells) if _cache_validation else None,
+        _validation_target_codes=(
+            None
+            if not _cache_validation or target_codes is None
+            else np.asarray(target_codes, dtype=np.int32).copy()
+        ),
+        _validation_target_design=(
+            None
+            if not _cache_validation or target_design is None
+            else np.asarray(target_design, dtype=np.int8).copy()
+        ),
+        _validation_control_mask=(
+            np.asarray(control_mask, dtype=bool).copy() if _cache_validation else None
+        ),
+        _validation_source_cell_indices=(
+            np.asarray(
+                getattr(design, "source_cell_indices", np.arange(design.num_cells)), dtype=np.int64
+            ).copy()
+            if _cache_validation
+            else None
+        ),
+        _validation_strata=np.asarray(full_strata).copy() if _cache_validation else None,
+        _validation_nuisance_design=(
+            None
+            if not _cache_validation or getattr(design, "_gene_independent_token", None) is not None
+            else np.asarray(nuisance, dtype=np.float32).copy()
+        ),
+        _validation_design_token=(
+            getattr(design, "_gene_independent_token", None) if _cache_validation else None
+        ),
+        _validation_draw_resamples=bool(draw_resamples),
+        _validation_shared_propensity_coefficients=(
+            None
+            if not _cache_validation or shared_propensity_coefficients is None
+            else np.asarray(shared_propensity_coefficients, dtype=np.float64).copy()
+        ),
     )
 
 
