@@ -1743,6 +1743,62 @@ def fit_low_moi_propensity_saddlepoint(
 _PROJECTION_ROWS_PER_CHUNK = 64_000_000  # cells x genes per row chunk of per-cell work (~0.5 GB in float64)
 
 
+@jax.jit
+def _accumulate_dense_pool_information(information, weight, design, codes):
+    """Run the existing triangular column reduction without Python dispatch.
+
+    The caller still bounds rows and targets. Each iteration materializes only
+    a cells-by-genes product and its target reduction, as in the Python loop.
+    """
+    q = design.shape[1]
+
+    def add_column(k, total):
+        def add_pair(ell, total):
+            block = jax.ops.segment_sum(
+                (design[:, k] * design[:, ell])[:, None] * weight,
+                codes,
+                num_segments=information.shape[0],
+            )
+            total = total.at[:, :, k, ell].add(block)
+            return jax.lax.cond(
+                ell == k,
+                lambda value: value,
+                lambda value: value.at[:, :, ell, k].add(block),
+                total,
+            )
+
+        return jax.lax.fori_loop(k, q, add_pair, total)
+
+    return jax.lax.fori_loop(0, q, add_column, information)
+
+
+@jax.jit
+def _correct_dense_control_cumulants(
+    e, design, selection, bernoulli, third_weight, w, cw, ww, c2w, cww, mean, variance, third,
+):
+    """Compile the column loops, retaining the second-order third cumulant."""
+    q = design.shape[1]
+
+    def correct_column(k, cumulants):
+        mean, variance, third = cumulants
+        zk = design[:, k, None]
+        mean = mean - e[:, :, k] * (selection @ (w * zk))
+        variance = variance - 2.0 * e[:, :, k] * (bernoulli @ (cw * zk))
+        third = third - 3.0 * e[:, :, k] * (third_weight @ (c2w * zk))
+
+        def correct_pair(ell, moments):
+            variance, third = moments
+            zkl = zk * design[:, ell, None]
+            variance = variance + e[:, :, k] * e[:, :, ell] * (bernoulli @ (ww * zkl))
+            third = third + 3.0 * e[:, :, k] * e[:, :, ell] * (third_weight @ (cww * zkl))
+            return variance, third
+
+        variance, third = jax.lax.fori_loop(0, q, correct_pair, (variance, third))
+        return mean, variance, third
+
+    return jax.lax.fori_loop(0, q, correct_column, (mean, variance, third))
+
+
 class _LowMoiPoolProjection:
     """Per-target re-projection of the efficient score onto the pool's nuisance fit.
 
@@ -1848,14 +1904,9 @@ class _LowMoiPoolProjection:
                     w_chunk = jnp.take(weight32, own_rows_d[rows_d[start:stop]], axis=0).astype(jnp.float64)
                     z_chunk = design_own[rows_d[start:stop]]
                     codes_chunk = local_codes[start:stop]
-                    for k in range(q):
-                        for l in range(k, q):
-                            block = jax.ops.segment_sum(
-                                (z_chunk[:, k] * z_chunk[:, l])[:, None] * w_chunk, codes_chunk, num_segments=n_batch
-                            )
-                            own_information = own_information.at[:, :, k, l].add(block)
-                            if l != k:
-                                own_information = own_information.at[:, :, l, k].add(block)
+                    own_information = _accumulate_dense_pool_information(
+                        own_information, w_chunk, z_chunk, codes_chunk
+                    )
                 pool_information = information[None, :, :, :] + own_information
                 e_batch = jnp.linalg.solve(pool_information, score[t_start:t_stop][..., None])[..., 0]
                 e = e.at[t_start:t_stop].set(e_batch)
@@ -1974,18 +2025,10 @@ class _LowMoiPoolProjection:
         cww = control_contribution * ww
         if self.dense:
             e = self.e[targets]                                                     # (batch, genes, q)
-            q = e.shape[-1]
-            Z = self.control_design
-            for k in range(q):
-                zk = Z[:, k, None]
-                mean = mean - e[:, :, k] * (selection @ (w * zk))
-                variance = variance - 2.0 * e[:, :, k] * (bernoulli @ (cw * zk))
-                third = third - 3.0 * e[:, :, k] * (third_weight @ (c2w * zk))
-                for l in range(q):
-                    zkl = zk * Z[:, l, None]
-                    variance = variance + e[:, :, k] * e[:, :, l] * (bernoulli @ (ww * zkl))
-                    third = third + 3.0 * e[:, :, k] * e[:, :, l] * (third_weight @ (cww * zkl))
-            return mean, variance, third
+            return _correct_dense_control_cumulants(
+                e, self.control_design, selection, bernoulli, third_weight,
+                w, cw, ww, c2w, cww, mean, variance, third,
+            )
         # Categorical: e_tb (targets, batches, genes) for this target batch from the
         # sparse rows, and per-batch control moments as one batched einsum over
         # controls grouped by batch.
