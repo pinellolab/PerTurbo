@@ -555,3 +555,57 @@ def test_the_chunked_and_unchunked_runs_fit_the_same_selection_model(tmp_path, m
     _run_selection_screen_cli(tmp_path, "whole_again")
     assert len(captured) == 1 and captured[0] is not None
     np.testing.assert_allclose(captured[0], chunked[0], rtol=1e-4, atol=1e-6)
+
+
+def test_gene_blocks_reuse_one_low_moi_null_without_reusing_their_baselines(
+    tmp_path, monkeypatch
+) -> None:
+    """Outer gene blocks share the gene-invariant null and retain fresh fits."""
+    import perturbo.cli as cli_module
+    import perturbo.crt as crt_module
+
+    original_precompute = crt_module.precompute_low_moi_permutations
+    precompute_calls: list[int] = []
+
+    def counting_precompute(*args, **kwargs):
+        precompute_calls.append(1)
+        return original_precompute(*args, **kwargs)
+
+    monkeypatch.setattr(crt_module, "precompute_low_moi_permutations", counting_precompute)
+    cached = _run_selection_screen_cli(
+        tmp_path,
+        "cached_gene_blocks",
+        "--gene-chunk-size",
+        "4",
+    )
+    assert len(precompute_calls) == 1
+
+    original_run_crt = cli_module.run_crt_for_chunk
+
+    def without_cached_null(*args, **kwargs):
+        # Keep the outer gene-block tuple protocol, but force each block to
+        # rebuild the same deterministic, gene-invariant propensity null.
+        kwargs["_permutations"] = None
+        return original_run_crt(*args, **kwargs)
+
+    monkeypatch.setattr(cli_module, "run_crt_for_chunk", without_cached_null)
+    precompute_calls.clear()
+    uncached = _run_selection_screen_cli(
+        tmp_path,
+        "uncached_gene_blocks",
+        "--gene-chunk-size",
+        "4",
+    )
+    assert len(precompute_calls) == 3
+
+    # Reusing only the propensity null must be transparent. In particular,
+    # each block still uses its own gene-specific control baseline.
+    pd.testing.assert_frame_equal(cached, uncached, check_exact=True)
+    tested = cached["element"] != "non-targeting"
+    for column in (
+        "crt_z_value",
+        "crt_saddlepoint_p_value",
+        "crt_saddlepoint_log_p_value",
+        "crt_saddlepoint_q_value",
+    ):
+        assert np.isfinite(cached.loc[tested, column].to_numpy(float)).all(), column
