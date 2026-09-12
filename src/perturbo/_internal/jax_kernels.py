@@ -545,7 +545,7 @@ def prepare_control_only_target_scores(
     target_indices: jnp.ndarray,
     score_residual: jnp.ndarray,
     observation_weight: jnp.ndarray,
-    weighted_nuisance: jnp.ndarray,
+    weighted_nuisance: jnp.ndarray | None,
     nuisance_design: jnp.ndarray,
     control_information: jnp.ndarray,
     control_nuisance_score: jnp.ndarray,
@@ -556,7 +556,8 @@ def prepare_control_only_target_scores(
     sentinel row already included in every gathered input. The returned inverse,
     score correction, and observed statistic are respectively ``(targets,
     genes, nuisance, nuisance)``, ``(targets, nuisance, genes)``, and
-    ``(targets, genes)``.
+    ``(targets, genes)``. With no resampled assignments, ``weighted_nuisance``
+    may be None: its observed cross term uses the target rows already gathered.
     """
 
     target_nuisance = jnp.take(nuisance_design, target_indices, axis=0)
@@ -569,14 +570,28 @@ def prepare_control_only_target_scores(
         "tkq,tkg->tqg", target_nuisance, target_residual
     )
     information_inverse = jnp.linalg.inv(information)
-    observed = batched_efficient_score_from_indices(
-        target_indices[:, None, :],
-        score_residual,
-        observation_weight,
-        weighted_nuisance,
-        information_inverse,
-        nuisance_score,
-    )[:, 0, :]
+    if weighted_nuisance is None:
+        # Keep the same product-then-sum and score formulas as the gathered
+        # path, without materializing weighted covariates for every cell.
+        cross = (target_weight[:, :, :, None] * target_nuisance[:, :, None, :]).sum(axis=1)[:, None, :, :]
+        score = target_residual.sum(axis=1)[:, None, :]
+        raw_information = target_weight.sum(axis=1)[:, None, :]
+        score = score - jnp.einsum("tbgq,tgqr,trg->tbg", cross, information_inverse, nuisance_score)
+        projected = jnp.einsum("tbgq,tgqr,tbgr->tbg", cross, information_inverse, cross)
+        efficient_information = raw_information - projected
+        valid = efficient_information > 1e-12
+        observed = jnp.where(
+            valid, score / jnp.sqrt(jnp.where(valid, efficient_information, 1.0)), jnp.nan
+        )[:, 0, :]
+    else:
+        observed = batched_efficient_score_from_indices(
+            target_indices[:, None, :],
+            score_residual,
+            observation_weight,
+            weighted_nuisance,
+            information_inverse,
+            nuisance_score,
+        )[:, 0, :]
     return information_inverse, nuisance_score, observed
 
 

@@ -1526,7 +1526,7 @@ def _run_jax_control_only_score_permutations(
                     jnp.asarray(target_indices),
                     score_residual,
                     observation_weight,
-                    weighted_nuisance,
+                    None if observed_only else weighted_nuisance,
                     nuisance_design,
                     control_information,
                     control_nuisance_score,
@@ -2117,8 +2117,14 @@ def run_low_moi_score_permutations(
             control_residual_jax, control_weight_jax = nb_null_residual_and_weight(
                 counts_jax, nuisance_jax, offsets_jax, theta_jax, control_beta
             )
-            control_weighted_nuisance_jax = (control_weight_jax[:, :, None] * nuisance_jax[:, None, :]).reshape(
-                counts.shape[0], design.num_genes * num_nuisance
+            # Pure saddlepoint testing needs only observed target rows. Keep
+            # the full weighted design only when assignments will be resampled.
+            control_weighted_nuisance_jax = (
+                jnp.empty((counts.shape[0], 0), dtype=jnp.float32)
+                if saddlepoint_only
+                else (control_weight_jax[:, :, None] * nuisance_jax[:, None, :]).reshape(
+                    counts.shape[0], design.num_genes * num_nuisance
+                )
             )
             control_information_jax = jnp.einsum(
                 "nq,ng,nr->gqr",
