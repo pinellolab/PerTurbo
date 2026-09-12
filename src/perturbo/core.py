@@ -1214,13 +1214,21 @@ def _group_perturbation_matrix_by_element(
     perturbation_matrix: Any,
     element_mapping: np.ndarray,
 ) -> np.ndarray:
-    mapping_int = np.asarray(element_mapping > 0, dtype=np.int8)
-    if hasattr(perturbation_matrix, "tocsr"):
-        grouped = perturbation_matrix.astype(np.int8) @ mapping_int
-        return np.asarray(grouped > 0, dtype=np.int8)
-    matrix_int = np.asarray(perturbation_matrix > 0, dtype=np.int8)
-    grouped = matrix_int @ mapping_int
-    return np.asarray(grouped > 0, dtype=np.int8)
+    # A guide assignment is sparse (a cell carries a handful of guides), so the
+    # cells-by-elements indicator is a sparse product. The dense int8 product this
+    # used to compute has no BLAS kernel: on the Replogle pipeline input
+    # (233,253 cells x 2,231 guides x 2,108 elements) numpy's generic loop ran for
+    # hours on one core, which is where every pipeline run spent its afternoon.
+    from scipy import sparse as _sparse
+
+    mapping = _sparse.csr_matrix(np.asarray(element_mapping > 0, dtype=np.float32))
+    if _sparse.issparse(perturbation_matrix):
+        indicator = perturbation_matrix.tocsr().astype(np.float32)
+        indicator.data[:] = (indicator.data > 0).astype(np.float32)
+    else:
+        indicator = _sparse.csr_matrix(np.asarray(perturbation_matrix > 0, dtype=np.float32))
+    grouped = indicator @ mapping
+    return np.asarray((grouped > 0).toarray(), dtype=np.int8)
 
 
 def _load_grouped_perturbation_matrix(

@@ -154,3 +154,30 @@ def test_control_elements_can_be_tested_too(screen, capsys):
     assert len(controls) == 2, f"both control elements should be tested, got {controls}"
     meta = json.loads((Path(out_dir) / "crt_metadata.json").read_text())
     assert meta["tested_control_elements"] is True
+
+
+def test_element_grouping_is_a_fast_sparse_product():
+    """The cells-by-elements indicator must agree with the dense definition and must
+    not take the dense int8 route, which has no BLAS kernel and ran for hours on the
+    233k-cell Replogle pipeline input."""
+    import time
+
+    import numpy as np
+    import scipy.sparse as sp
+
+    from perturbo.core import _group_perturbation_matrix_by_element
+
+    rng = np.random.default_rng(0)
+    n_cells, n_guides, n_elements = 60_000, 900, 850
+    guide_of_cell = rng.integers(0, n_guides, n_cells)
+    assignment = sp.csr_matrix((np.ones(n_cells), (np.arange(n_cells), guide_of_cell)), shape=(n_cells, n_guides))
+    mapping = np.zeros((n_guides, n_elements)); mapping[np.arange(n_guides), rng.integers(0, n_elements, n_guides)] = 1
+    expected = (np.asarray(assignment.todense()) > 0).astype(np.int8) @ (mapping > 0).astype(np.int8)
+    expected = (expected > 0).astype(np.int8)
+    for matrix in (assignment, assignment.toarray().astype(np.int64)):
+        start = time.perf_counter()
+        got = _group_perturbation_matrix_by_element(matrix, mapping)
+        elapsed = time.perf_counter() - start
+        assert got.dtype == np.int8 and got.shape == (n_cells, n_elements)
+        assert np.array_equal(got, expected)
+        assert elapsed < 10.0, f"grouping took {elapsed:.1f}s; the dense int8 path is back"
