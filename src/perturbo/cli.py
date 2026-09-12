@@ -49,6 +49,7 @@ from .core import (
     _validate_clip_percentile,
     _validate_gene_outlier_threshold_floor,
     _validate_guide_strategy,
+    apply_covariate_transform,
     fit_control,
     fit_perturbation_effects,
     load_analysis_cells,
@@ -56,6 +57,7 @@ from .core import (
     subset_control_fit_genes,
 )
 from .io import MuDataSetup, control_fit_arrays, save_array_bundle, save_light_fit_bundle
+from .sparse_design import IndexedDesignMatrix
 from .crt import (
     CRTAccumulator,
     CRT_ALL_TAIL_FAMILIES,
@@ -63,6 +65,7 @@ from .crt import (
     CRT_SADDLEPOINT_FAMILY,
     DEFAULT_NEWTON_STEP_TOLERANCE,
     exclude_targets,
+    fit_shared_propensity_coefficients,
     prepare_all_cells_propensity,
     prepare_crt_baseline,
     run_crt_all_cells,
@@ -282,6 +285,81 @@ def _crt_configuration_problem(args, size_factor_mode) -> str | None:
     if args.guide_random_effects:
         return "--guide-random-effects adds a per-guide latent outside the nuisance design."
     return None
+
+
+def _crt_tested_cell_rows(
+    element_names: list[str],
+    membership: list[np.ndarray],
+    *,
+    control_selector,
+    include_control_elements: bool,
+) -> np.ndarray:
+    """Analysis rows the control-anchored CRT will test, across every chunk.
+
+    Perturbation chunking splits these rows between chunks, but the shared
+    selection model has to see all of them at once - that is the whole point of
+    fitting it here rather than inside a chunk. Control elements are left out
+    unless the run tests them as targets too, matching what each chunk does.
+    """
+
+    control_mask = _resolve_control_element_mask(
+        [str(name) for name in element_names],
+        control_selector,
+        infer_control_elements=False,
+    )
+    tested = [
+        np.asarray(rows, dtype=np.int64)
+        for index, rows in enumerate(membership)
+        if include_control_elements or not control_mask[index]
+    ]
+    if not tested:
+        return np.zeros(0, dtype=np.int64)
+    # Sorted and de-duplicated: a cell carries at most one element on this
+    # path, but the union is taken over element lists all the same.
+    return np.unique(np.concatenate(tested))
+
+
+def _crt_tested_cell_mask(
+    chunk_data: PerTurboData,
+    *,
+    control_selector,
+    include_control_elements: bool,
+) -> np.ndarray:
+    """Cells of ``chunk_data`` the control-anchored CRT will actually test.
+
+    The same rules the chunk itself applies: control elements are dropped
+    unless the run tests them as targets (``exclude_targets``), a cell carrying
+    two elements is set aside rather than reinterpreted, and a masked-out cell
+    stays out (``build_chunk_design``). The shared selection model has to be
+    fitted on these rows and no others, or it would describe a different
+    population than the one each chunk resamples in.
+    """
+
+    names = [str(name) for name in chunk_data.pert_names]
+    control = _resolve_control_element_mask(
+        names, control_selector, infer_control_elements=False
+    )
+    labels = chunk_data.pert_id
+    if isinstance(labels, IndexedDesignMatrix):
+        indices = np.asarray(labels.indices, dtype=np.int64)
+        active = (indices >= 0) & (np.asarray(labels.values) > 0)
+        first = np.argmax(active, axis=1)
+        codes = np.where(
+            active.sum(axis=1) == 1, indices[np.arange(indices.shape[0]), first], -1
+        )
+    else:
+        labels = np.asarray(labels)
+        if labels.ndim == 2:
+            binary = np.asarray(labels > 0)
+            codes = np.where(binary.sum(axis=1) == 1, np.argmax(binary, axis=1), -1)
+        else:
+            codes = labels.astype(np.int64)
+    keep = codes >= 0
+    if not include_control_elements:
+        keep = keep & ~control[np.maximum(codes, 0)]
+    if chunk_data.cell_mask is not None:
+        keep = keep & np.asarray(chunk_data.cell_mask, dtype=bool).reshape(-1)
+    return keep
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -1000,6 +1078,14 @@ def main(argv: list[str] | None = None) -> None:
     all_perturbation_names = None
     all_guide_names: list[str] | None = None
     analysis_gene_names = None
+    # The control-anchored propensity CRT shares one screen-wide selection
+    # model across perturbation chunks; these are the analysis rows it is fitted
+    # on beside the control pool, captured while the chunk membership is still
+    # in hand.
+    crt_shares_selection_model = bool(
+        args.crt and crt_pool == "control-anchored" and args.crt_mechanism == "propensity"
+    )
+    crt_tested_rows: np.ndarray | None = None
     threshold_floor = _validate_gene_outlier_threshold_floor(args.gene_outlier_threshold_floor)
     apply_filter_cells = args.gene_outlier_action == "filter_cells"
     apply_winsorize = args.winsorize_gene_expression_outliers
@@ -1126,6 +1212,13 @@ def main(argv: list[str] | None = None) -> None:
                     max_chunk_size=args.max_chunk_size,
                     max_perturbations_per_chunk=args.perturbation_chunk_size or None,
                 )
+                if crt_shares_selection_model:
+                    crt_tested_rows = _crt_tested_cell_rows(
+                        all_perturbation_names,
+                        membership,
+                        control_selector=args.control_substring,
+                        include_control_elements=args.crt_test_control_elements,
+                    )
                 del membership
             del pert_matrix, pert_adata
             if args.perturbation_element_varm_key is not None:
@@ -1141,6 +1234,13 @@ def main(argv: list[str] | None = None) -> None:
                 max_chunk_size=args.max_chunk_size,
                 max_perturbations_per_chunk=args.perturbation_chunk_size or None,
             )
+            if crt_shares_selection_model:
+                crt_tested_rows = _crt_tested_cell_rows(
+                    all_perturbation_names,
+                    membership,
+                    control_selector=args.control_substring,
+                    include_control_elements=args.crt_test_control_elements,
+                )
 
     controls_loaded = load_controls(
         data,
@@ -1234,6 +1334,64 @@ def main(argv: list[str] | None = None) -> None:
     save_array_bundle(control_fit_path, control_fit_arrays(control_fit))
     print(f"[perturbo] Wrote {control_fit_path}")
 
+    crt_shared_propensity: np.ndarray | None = None
+
+    def _fit_crt_shared_selection_model(
+        target_covariates: np.ndarray | None, num_target: int
+    ) -> np.ndarray | None:
+        """The selection slopes every control-anchored CRT chunk will share.
+
+        Fitted once here, over the control pool and every cell that will be
+        tested, rather than inside each chunk: a chunk sees only its own
+        targets' cells, so an in-chunk fit would estimate the covariate slopes
+        from whichever neighbours the chunk-size flag happened to group
+        together, and a target's p-value would move with that flag.
+
+        The design is assembled as ``[intercept, covariates]`` with the control
+        pool first, exactly the parametrisation and column order
+        ``prepare_low_moi_design`` gives each chunk, because the coefficients
+        are interpreted in those columns downstream.
+        """
+
+        if not crt_shares_selection_model or num_target == 0:
+            return None
+        num_control = int(np.asarray(controls.counts).shape[0])
+        blocks = [np.ones((num_control + num_target, 1), dtype=np.float32)]
+        control_covariates = (
+            None if controls.covariates is None else np.asarray(controls.covariates, dtype=np.float32)
+        )
+        if control_covariates is not None:
+            if target_covariates is None:
+                raise RuntimeError(
+                    "The control pool carries covariates but the tested cells do not; the CRT's "
+                    "nuisance designs would not share a parametrisation."
+                )
+            blocks.append(
+                np.concatenate(
+                    [control_covariates, np.asarray(target_covariates, dtype=np.float32)], axis=0
+                )
+            )
+        targeting = np.concatenate(
+            [np.zeros(num_control, dtype=np.float32), np.ones(num_target, dtype=np.float32)]
+        )
+        coefficients = fit_shared_propensity_coefficients(
+            np.concatenate(blocks, axis=1), targeting
+        )
+        print(
+            f"[perturbo] CRT: shared selection model fit over {num_control + num_target:,} cells "
+            f"({num_target:,} targeting); every chunk reuses these covariate slopes."
+        )
+        return coefficients
+
+    if crt_shares_selection_model and crt_tested_rows is not None:
+        _tested_covariates = None
+        if covariate_transform_state is not None:
+            _tested_obs = analysis_adata_for_workflow.obs.iloc[crt_tested_rows]
+            _tested_covariates, _ = apply_covariate_transform(_tested_obs, covariate_transform_state)
+        crt_shared_propensity = _fit_crt_shared_selection_model(
+            _tested_covariates, int(crt_tested_rows.size)
+        )
+
     crt_baseline = None
     crt_accumulator: CRTAccumulator | None = None
     if args.crt and crt_pool == "control-anchored" and gene_chunk_size is None:
@@ -1302,6 +1460,7 @@ def main(argv: list[str] | None = None) -> None:
                 saddlepoint_only=args.crt_saddlepoint_only,
                 saddlepoint_screen_p_value=args.crt_screen_p_value,
                 saddlepoint_two_sided=args.crt_two_sided,
+                shared_propensity_coefficients=crt_shared_propensity,
             )
         )
 
@@ -1452,6 +1611,21 @@ def main(argv: list[str] | None = None) -> None:
                         strict=not args.crt_allow_unconverged_baseline,
                         polish=args.crt_polish_baseline,
                     )
+                    if crt_shares_selection_model and crt_shared_propensity is None:
+                        # Gene blocks keep every cell and every perturbation, so
+                        # this sees the whole screen already; it is fitted once
+                        # and reused, the selection model having no gene axis.
+                        _tested = _crt_tested_cell_mask(
+                            analysis_data,
+                            control_selector=args.control_substring,
+                            include_control_elements=args.crt_test_control_elements,
+                        )
+                        crt_shared_propensity = _fit_crt_shared_selection_model(
+                            None
+                            if analysis_data.covariates is None
+                            else np.asarray(analysis_data.covariates, dtype=np.float32)[_tested],
+                            int(np.count_nonzero(_tested)),
+                        )
                     _run_crt_on_chunk(
                         analysis_data, crt_accumulator,
                         baseline_source=block_baseline, control_source=block_controls,
@@ -1762,6 +1936,22 @@ def main(argv: list[str] | None = None) -> None:
                 gene_names=tuple(str(name) for name in analysis_gene_names),
                 tail_families=tuple(args.crt_tail_families),
             )
+            if crt_shares_selection_model:
+                # Nothing is chunked here, so "over the screen" and "inside the
+                # chunk" are the same cells and the fit could equally have
+                # happened downstream. It runs here anyway, so that a screen
+                # gets the same selection model however it was decomposed.
+                _tested = _crt_tested_cell_mask(
+                    analysis_data,
+                    control_selector=args.control_substring,
+                    include_control_elements=args.crt_test_control_elements,
+                )
+                crt_shared_propensity = _fit_crt_shared_selection_model(
+                    None
+                    if analysis_data.covariates is None
+                    else np.asarray(analysis_data.covariates, dtype=np.float32)[_tested],
+                    int(np.count_nonzero(_tested)),
+                )
             crt_started = time.perf_counter()
             _run_crt_on_chunk(analysis_data, crt_accumulator)
             print(f"[perturbo] CRT complete in {time.perf_counter() - crt_started:.0f}s")

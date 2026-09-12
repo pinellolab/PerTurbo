@@ -409,6 +409,52 @@ def _solve_propensity_intercept(
     return 0.5 * (low + high)
 
 
+_BASIS_SOLVE_TOLERANCE = 1e-4
+"""Relative slack allowed when re-expressing a vector in the propensity basis.
+
+The basis is built and stored in float32, so an exactly representable vector
+still comes back with a residual of order the float32 epsilon times the
+conditioning of the design. A genuine failure - no intercept column, a dropped
+direction - leaves a residual of order the vector itself, which is four orders
+of magnitude above this.
+"""
+
+
+def _basis_coordinates(basis: np.ndarray, target: np.ndarray, *, what: str) -> np.ndarray:
+    """Exact coordinates of ``target`` in the column space of ``basis``.
+
+    ``basis`` is a rank-revealing orthonormal basis for the column space of the
+    nuisance design, so anything that *is* a linear combination of nuisance
+    columns has exact coordinates in it and the least-squares solve below
+    returns them rather than an approximation. Both vectors this is asked for
+    qualify: the shared linear predictor is ``nuisance @ beta`` by
+    construction, and the all-ones vector is the nuisance design's own
+    intercept column.
+
+    A non-zero residual therefore does not mean "close enough" - it means the
+    premise failed, and the coefficients built from these coordinates would
+    describe a different selection model than the one that was fitted. That
+    would corrupt every p-value silently, so it is an error.
+    """
+
+    basis = np.asarray(basis, dtype=np.float64)
+    target = np.asarray(target, dtype=np.float64).reshape(-1)
+    # Solved through the (rank x rank) Gram matrix rather than by an SVD of the
+    # (cells x rank) basis: the answer is the same least-squares solution, and
+    # the cell axis runs to hundreds of thousands.
+    coordinates = np.linalg.lstsq(basis.T @ basis, basis.T @ target, rcond=None)[0]
+    residual = float(np.max(np.abs(basis @ coordinates - target))) if target.size else 0.0
+    scale = max(1.0, float(np.max(np.abs(target))) if target.size else 1.0)
+    if residual > _BASIS_SOLVE_TOLERANCE * scale:
+        raise ValueError(
+            f"The shared propensity {what} does not lie in the span of the nuisance design's "
+            f"propensity basis (residual {residual:.3e} against a scale of {scale:.3e}). "
+            "The likely causes are a nuisance design whose first column is not an intercept, "
+            "or a basis that dropped a direction the shared coefficients use as rank-deficient."
+        )
+    return coordinates
+
+
 def _target_propensity_key(seed: int, target_name: str) -> jax.Array:
     """A JAX key stable to target ordering and chunk composition."""
 
@@ -428,6 +474,7 @@ def precompute_low_moi_permutations(
     resampling_mechanism: str = "permutation",
     draw_resamples: bool = True,
     propensity_target_batch_size: int = 64,
+    shared_propensity_coefficients: np.ndarray | None = None,
 ) -> TargetPermutations:
     """Draw every target's resamples once, for reuse across gene chunks.
 
@@ -435,6 +482,20 @@ def precompute_low_moi_permutations(
     make on its own: both key their generator on the target's name via
     :func:`target_permutation_rng`, so passing the result back in leaves the
     p-values unchanged.
+
+    ``shared_propensity_coefficients`` are screen-wide logistic selection
+    coefficients in the *original* nuisance parametrisation - one entry per
+    column of ``design.nuisance_design``, in that order. When they are given
+    and the mechanism is ``"propensity"``, the covariate part of every target's
+    selection model is theirs and only the intercept is fitted per target. That
+    is the same shared-slope estimator as fitting "carries a targeting guide"
+    against "carries a control" inside this design, except that the caller
+    fitted it over the whole screen: perturbation chunking hands this function
+    one chunk at a time, so an in-design fit would make a target's p-value a
+    function of which neighbours the chunk-size flag gave it.
+
+    Leaving them ``None`` fits each target's model on its own pool instead,
+    which is chunk-invariant too but spends far less data on the covariates.
     """
 
     target_codes = getattr(design, "target_codes", None)
@@ -474,16 +535,61 @@ def precompute_low_moi_permutations(
     if resampling_mechanism == "propensity":
         if propensity_target_batch_size < 1:
             raise ValueError("propensity_target_batch_size must be positive.")
-        # One model per target, each fitted on exactly the population used by
-        # its CRT: controls plus that target's own cells. This makes the fitted
-        # assignment law independent of unrelated targets in the same CLI
-        # chunk. Coefficients share a compact rank-revealing basis, so the
-        # saddlepoint can still screen targets in batches without retaining an
-        # all-target x all-cell logit matrix.
+        # Coefficients share a compact rank-revealing basis, so the saddlepoint
+        # can screen targets in batches without retaining an all-target x
+        # all-cell logit matrix: it reads a target's logits as
+        # ``propensity_coef[t] @ propensity_Q[rows].T``.
         propensity_Q = np.asarray(propensity_basis(nuisance), dtype=np.float32)
         propensity_coef = np.zeros(
             (design.num_targets, propensity_Q.shape[1]), dtype=np.float32
         )
+    if propensity_coef is not None and shared_propensity_coefficients is not None:
+        # Shared covariate slopes, per-target intercept. Depth, guide load and
+        # batch act on the *cell*, not on which guide it happened to receive,
+        # so only abundance is target-specific and abundance is the intercept.
+        # The slopes were fitted once over the whole screen by the caller,
+        # which is what makes them independent of this chunk's composition.
+        beta = np.asarray(shared_propensity_coefficients, dtype=np.float64).reshape(-1)
+        if beta.shape[0] != nuisance.shape[1]:
+            raise ValueError(
+                "shared_propensity_coefficients must hold one coefficient per nuisance column "
+                f"(got {beta.shape[0]} for {nuisance.shape[1]} columns)."
+            )
+        eta_shared = nuisance.astype(np.float64) @ beta
+        # ``eta_shared`` is a linear combination of nuisance columns and the
+        # all-ones vector is the nuisance design's intercept column, so both
+        # have exact coordinates in the basis; ``_basis_coordinates`` refuses
+        # to proceed on anything less than exact.
+        b_shared = _basis_coordinates(propensity_Q, eta_shared, what="linear predictor")
+        c_one = _basis_coordinates(
+            propensity_Q, np.ones(nuisance.shape[0]), what="intercept direction"
+        )
+        # Filled for every target here, before the drawing loop: the
+        # saddlepoint-only path skips that loop entirely and still reads these.
+        for target_index in range(design.num_targets):
+            if target_codes is not None:
+                own = target_codes == target_index
+            else:
+                own = target_design[:, target_index] > 0
+            pool = control_mask | own
+            selected = int(np.count_nonzero(own & pool))
+            pool_size = int(np.count_nonzero(pool))
+            if selected == 0 or selected == pool_size:
+                # Not testable; the drawing loop drops it and the saddlepoint
+                # has nothing to evaluate. Leave the row at zero rather than
+                # letting the bisection run to its clip.
+                continue
+            # The intercept that makes the fitted probabilities over this
+            # target's pool sum to its observed cell count - the intercept
+            # score equation of the unpenalized logistic, kept per target.
+            delta = _solve_propensity_intercept(eta_shared[pool], selected)
+            propensity_coef[target_index] = (b_shared + delta * c_one).astype(np.float32)
+    elif propensity_coef is not None:
+        # One model per target, each fitted on exactly the population used by
+        # its CRT: controls plus that target's own cells. This makes the fitted
+        # assignment law independent of unrelated targets in the same CLI
+        # chunk, at the cost of estimating every covariate slope from one
+        # target's worth of events.
         for start in range(0, design.num_targets, int(propensity_target_batch_size)):
             stop = min(start + int(propensity_target_batch_size), design.num_targets)
             targets = np.arange(start, stop, dtype=np.int32)

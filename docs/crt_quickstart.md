@@ -196,9 +196,11 @@ Flags worth knowing:
   stage-two fitting. Co-occurring assignments use gene blocks when the CLI
   would otherwise split perturbations, preserving the joint effect model.
   The all-cells propensity fit is shared across gene blocks, and BH correction
-  happens after all blocks. In the control-anchored test, each propensity model
-  uses only its own target-plus-control pool and resamples are keyed by target
-  name, so unrelated targets in a perturbation chunk do not change its test.
+  happens after all blocks. In the control-anchored test, the selection model's
+  covariate slopes are fitted once over every analysed cell and reused by every
+  chunk, each target's intercept is fitted against its own target-plus-control
+  pool, and resamples are keyed by target name, so unrelated targets in a
+  perturbation chunk do not change its test.
 - Supported configuration is deliberately narrow: plain negative-binomial
   likelihood, observed or fixed size factors, no latent factors, no guide
   random effects. Latent size factors are refused because a per-cell offset fit

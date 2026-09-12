@@ -956,6 +956,93 @@ def _categorical_batch_applies(design) -> bool:
     return is_intercept_and_one_hot(np.asarray(design.nuisance_design))
 
 
+SHARED_SELECTION_FIT_BLOCK = 65_536
+"""Rows per block when projecting the screen-wide predictor back onto the design.
+
+Only the projection is blocked, not the fit. A float64 copy of a 300,000-cell
+design with a 48-level batch one-hot is 120 MB, and it is needed only to
+accumulate a (q x q) Gram matrix.
+"""
+
+
+def fit_shared_propensity_coefficients(
+    nuisance_design: np.ndarray,
+    targeting: np.ndarray,
+    *,
+    max_iterations: int = 25,
+    eta_clip: float = 30.0,
+) -> np.ndarray:
+    """Fit the control-anchored CRT's selection model once, over the whole screen.
+
+    ``nuisance_design`` is the CRT's own nuisance matrix - ``[intercept,
+    covariates]``, the layout :func:`prepare_low_moi_design` builds - with one
+    row per control-pool cell and one per cell that will be tested;
+    ``targeting`` is 1 on a cell carrying a targeting perturbation and 0 on a
+    control cell. The result is the covariate part of the selection model that
+    :func:`run_crt_for_chunk` then shares across every perturbation chunk,
+    fitting only each target's intercept locally.
+
+    The coefficients come back in that *original* parametrisation, one per
+    column, and that choice is load-bearing. The fit itself runs in a
+    rank-revealing orthonormal basis - with a full batch one-hot beside the
+    intercept the design is rank deficient, so the original parametrisation has
+    no unique maximiser - but each chunk builds its own basis from its own
+    cells, and basis coordinates therefore mean different things in different
+    chunks. Column identity is the one thing the screen and its chunks agree
+    on, so that is what the coefficients are expressed in.
+
+    Non-uniqueness is harmless here: two solutions of ``N beta = eta`` differ by
+    a vector in ``N``'s null space, and a chunk's design is a row subset of
+    ``N``, so both give the same linear predictor on every chunk's cells.
+    """
+
+    from perturbo._internal.high_moi.resampling import fit_propensity_coefficients
+
+    design = np.asarray(nuisance_design, dtype=np.float32)
+    response = np.asarray(targeting, dtype=np.float32).reshape(-1)
+    if design.ndim != 2 or design.shape[0] != response.shape[0]:
+        raise ValueError("nuisance_design and targeting must agree on the cell count.")
+    if design.shape[0] == 0:
+        raise ValueError("The screen-wide selection model needs at least one cell.")
+    coefficients, basis = fit_propensity_coefficients(
+        response[None, :],
+        design,
+        max_iterations=int(max_iterations),
+        eta_clip=float(eta_clip),
+    )
+    # The unclipped predictor on purpose. Clipping is a step-halving stand-in
+    # for separation, and a clipped vector need not lie in the design's column
+    # space at all, which is exactly what the projection below relies on.
+    eta = np.asarray(basis, dtype=np.float64) @ np.asarray(
+        coefficients, dtype=np.float64
+    ).reshape(-1)
+
+    num_columns = design.shape[1]
+    gram = np.zeros((num_columns, num_columns), dtype=np.float64)
+    rhs = np.zeros(num_columns, dtype=np.float64)
+    for start in range(0, design.shape[0], SHARED_SELECTION_FIT_BLOCK):
+        stop = start + SHARED_SELECTION_FIT_BLOCK
+        block = design[start:stop].astype(np.float64)
+        gram += block.T @ block
+        rhs += block.T @ eta[start:stop]
+    beta = np.linalg.lstsq(gram, rhs, rcond=None)[0]
+
+    residual = 0.0
+    for start in range(0, design.shape[0], SHARED_SELECTION_FIT_BLOCK):
+        stop = start + SHARED_SELECTION_FIT_BLOCK
+        block = design[start:stop].astype(np.float64)
+        residual = max(residual, float(np.max(np.abs(block @ beta - eta[start:stop]))))
+    scale = max(1.0, float(np.max(np.abs(eta))))
+    if residual > 1e-4 * scale:
+        raise ValueError(
+            "The screen-wide selection model's linear predictor could not be written in the "
+            f"nuisance columns (residual {residual:.3e} against a scale of {scale:.3e}). "
+            "The predictor is fitted in a basis for those columns' own span, so this should be "
+            "exact; a failure points at a design that changed between the fit and the projection."
+        )
+    return beta
+
+
 def run_crt_for_chunk(
     baseline: CRTBaseline,
     chunk_data: PerTurboData,
@@ -972,6 +1059,7 @@ def run_crt_for_chunk(
     saddlepoint_only: bool = False,
     saddlepoint_screen_p_value: float = 0.05,
     saddlepoint_two_sided: str = "equal-tail",
+    shared_propensity_coefficients: np.ndarray | None = None,
 ) -> ChunkCRTResult:
     """Run the CRT for one perturbation chunk, looping inner gene chunks.
 
@@ -991,6 +1079,14 @@ def run_crt_for_chunk(
     axis will not fit; the inner loop puts the gene axis back under control.
     Chunking genes is exact - every quantity here is independent across genes -
     so this changes cost, not answers.
+
+    ``shared_propensity_coefficients`` are the screen-wide logistic selection
+    coefficients, one per column of the chunk design's nuisance matrix and in
+    that order. Passing them keeps the covariate part of the selection model
+    fixed across chunks and fits only each target's intercept here, so a
+    target's p-value does not move when the chunk-size flag changes its
+    neighbours. Leaving them ``None`` fits a separate model per target on that
+    target's own pool.
 
     ``strata`` aligns with ``chunk_data``'s cells. Control cells are given their
     own stratum values from ``control_data`` implicitly: they are prepended, so
@@ -1093,6 +1189,7 @@ def run_crt_for_chunk(
         seed=seed,
         resampling_mechanism=resampling_mechanism,
         draw_resamples=not saddlepoint_only,
+        shared_propensity_coefficients=shared_propensity_coefficients,
     )
 
     counts = np.asarray(design.counts)

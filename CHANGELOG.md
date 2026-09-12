@@ -19,8 +19,13 @@ and this project adheres to [Semantic Versioning][].
     instead of dropping other perturbation columns. Sparse assignments remain
     compact through loading and cell minibatching.
 -   Propensity fits remove dependent covariates without introducing arbitrary QR
-    directions. Each low-MOI target uses its own target-plus-control population,
-    with name-stable resampling keys across chunks.
+    directions, and low-MOI resampling keys are name-stable across chunks.
+-   The low-MOI selection model's covariate slopes are fitted once over every
+    analysed cell and shared by every perturbation chunk, with only each
+    target's intercept fitted against its own target-plus-control pool. The
+    slopes used to come from a fit over whichever cells the current chunk held,
+    so a target's p-value moved when `--perturbation-chunk-size` changed its
+    neighbours.
 -   Baseline diagnostics form count-dependent arrays in gene blocks; all-cells
     CRT gene blocks reuse the same compact propensity fit and receive one global
     multiple-testing correction.
