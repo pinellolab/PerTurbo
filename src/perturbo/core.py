@@ -1045,9 +1045,22 @@ def _project_factor_scores(
 
 
 def _select_count_dtype(counts: np.ndarray) -> np.dtype:
-    max_count = np.max(counts)
-    min_count = np.min(counts)
-    assert min_count >= 0 and float(max_count).is_integer(), "Counts must be non-negative integers."
+    counts = np.asarray(counts)
+    error = "Counts must be finite, non-negative integers. Provide raw, unnormalized counts."
+    if counts.dtype.kind not in "buif" or counts.size == 0:
+        raise ValueError(error)
+    max_count = np.max(counts).item()
+    min_count = np.min(counts).item()
+    if not np.isfinite(min_count) or not np.isfinite(max_count) or min_count < 0:
+        raise ValueError(error)
+    if counts.dtype.kind == "f":
+        # Check every value without allocating a full cells-by-genes temporary.
+        # Buffered iteration also bounds the check for strided gene slices.
+        for block in np.nditer(counts, flags=["external_loop", "buffered"], buffersize=1 << 20):
+            if np.any(block != np.floor(block)):
+                raise ValueError(error)
+    if max_count > np.iinfo(np.int64).max:
+        raise ValueError("Counts exceed the supported int64 range.")
     if min_count >= 0 and max_count <= np.iinfo(np.uint16).max:
         print("[perturbo] Using np.uint16 for count data.")
         return np.uint16
