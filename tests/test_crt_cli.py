@@ -142,6 +142,48 @@ def test_untested_elements_stay_missing_rather_than_becoming_significant() -> No
     assert np.isnan(columns["crt_q_value"][1, 0])
 
 
+def test_saddlepoint_only_accumulator_does_not_store_unavailable_full_grids() -> None:
+    accumulator = CRTAccumulator(
+        element_names=("a", "skipped"),
+        gene_names=("g0", "g1"),
+        tail_families=("saddlepoint",),
+        saddlepoint_only=True,
+    )
+    assert accumulator.p_value is None
+    assert "crt_null_excess_kurtosis" not in accumulator.null_summaries
+
+    shape = (1, 2)
+    accumulator.absorb(ChunkCRTResult(
+        observed_score=np.asarray([[1.0, 2.0]]),
+        p_value=np.full(shape, np.nan),
+        null_converged=np.ones(shape, dtype=bool),
+        target_names=("a",),
+        gene_names=("g0", "g1"),
+        num_resamples=999,
+        parametric={"saddlepoint": {
+            "p_value": np.asarray([[1e-80, 0.2]]),
+            "log_p_value": np.log(np.asarray([[1e-80, 0.2]])),
+            "valid": np.ones(shape, dtype=bool),
+            "used_screen": np.zeros(shape, dtype=bool),
+        }},
+        null_summaries={
+            "crt_null_mean": np.zeros(shape),
+            "crt_null_variance": np.ones(shape),
+            "crt_null_skewness": np.zeros(shape),
+        },
+        saddlepoint_only=True,
+        resampling_mechanism="propensity",
+    ))
+    columns = accumulator.finalize()
+    assert columns["crt_p_value"].strides == (0, 0)
+    assert columns["crt_q_value"].strides == (0, 0)
+    assert columns["crt_null_excess_kurtosis"].strides == (0, 0)
+    assert np.isnan(columns["crt_p_value"]).all()
+    assert columns["crt_saddlepoint_p_value"][0, 0] == 1e-80
+    assert columns["crt_saddlepoint_valid"].dtype == np.float64
+    assert accumulator.finalize(streaming=True)["crt_saddlepoint_valid"].dtype == bool
+
+
 def _write_screen(path, *, num_genes: int = 24, seed: int = 0) -> None:
     rng = np.random.default_rng(seed)
     targets = [f"t{i}" for i in range(4)]

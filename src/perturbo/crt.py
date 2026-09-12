@@ -1802,6 +1802,7 @@ class CRTAccumulator:
     element_names: tuple[str, ...]
     gene_names: tuple[str, ...]
     tail_families: tuple[str, ...] = CRT_TAIL_FAMILIES
+    saddlepoint_only: bool = False
 
     def __post_init__(self) -> None:
         shape = (len(self.element_names), len(self.gene_names))
@@ -1810,7 +1811,7 @@ class CRTAccumulator:
         self._dropped_by_target_chunk: dict[tuple[str, ...], int] = {}
         self.num_multi_assignment_cells_dropped = 0
         self.observed_score = np.full(shape, np.nan, dtype=np.float64)
-        self.p_value = np.full(shape, np.nan, dtype=np.float64)
+        self.p_value = None if self.saddlepoint_only else np.full(shape, np.nan, dtype=np.float64)
         self.null_converged = np.zeros(shape, dtype=bool)
         self.tested = np.zeros(len(self.element_names), dtype=bool)
         self.parametric = {
@@ -1820,10 +1821,10 @@ class CRTAccumulator:
         }
         if CRT_SADDLEPOINT_FAMILY in self.parametric:
             self.parametric[CRT_SADDLEPOINT_FAMILY]["used_screen"] = np.zeros(shape, dtype=bool)
-        self.null_summaries = {
-            name: np.full(shape, np.nan, dtype=np.float64)
-            for name in ("crt_null_mean", "crt_null_variance", "crt_null_skewness", "crt_null_excess_kurtosis")
-        }
+        summary_names = ["crt_null_mean", "crt_null_variance", "crt_null_skewness"]
+        if not self.saddlepoint_only:
+            summary_names.append("crt_null_excess_kurtosis")
+        self.null_summaries = {name: np.full(shape, np.nan, dtype=np.float64) for name in summary_names}
 
     def absorb(self, result: ChunkCRTResult) -> None:
         unknown = [name for name in result.target_names if name not in self._index]
@@ -1844,7 +1845,8 @@ class CRTAccumulator:
         )
         self.num_multi_assignment_cells_dropped = sum(self._dropped_by_target_chunk.values())
         self.observed_score[destination] = result.observed_score
-        self.p_value[destination] = result.p_value
+        if self.p_value is not None:
+            self.p_value[destination] = result.p_value
         self.null_converged[destination] = result.null_converged
         self.tested[rows] = True
         for family, columns in result.parametric.items():
@@ -1857,7 +1859,7 @@ class CRTAccumulator:
             if name in self.null_summaries:
                 self.null_summaries[name][destination] = values
 
-    def finalize(self) -> dict[str, np.ndarray]:
+    def finalize(self, *, streaming: bool = False) -> dict[str, np.ndarray]:
         """Screen-wide columns, with Benjamini-Hochberg over every tested pair.
 
         Each parametric family gets its own q-value, corrected independently
@@ -1866,18 +1868,26 @@ class CRTAccumulator:
         them would be wrong.
         """
 
+        shape = (len(self.element_names), len(self.gene_names))
+        missing = np.broadcast_to(np.asarray(np.nan, dtype=np.float64), shape)
+        empirical_p = missing if self.p_value is None else self.p_value
         columns = {
             "crt_z_value": self.observed_score,
-            "crt_p_value": self.p_value,
-            "crt_q_value": _benjamini_hochberg(self.p_value),
+            "crt_p_value": empirical_p,
+            "crt_q_value": missing if self.p_value is None else _benjamini_hochberg(self.p_value),
         }
         for family, fitted in self.parametric.items():
             columns[f"crt_{family}_p_value"] = fitted["p_value"]
             columns[f"crt_{family}_log_p_value"] = fitted["log_p_value"]
             columns[f"crt_{family}_q_value"] = _benjamini_hochberg(fitted["p_value"])
-            columns[f"crt_{family}_valid"] = fitted["valid"].astype(np.float64)
+            columns[f"crt_{family}_valid"] = (
+                fitted["valid"] if streaming else fitted["valid"].astype(np.float64)
+            )
             for key, values in fitted.items():
                 if key not in ("p_value", "log_p_value", "valid"):
-                    columns[f"crt_{family}_{key}"] = np.asarray(values, dtype=np.float64)
+                    columns[f"crt_{family}_{key}"] = (
+                        values if streaming else np.asarray(values, dtype=np.float64)
+                    )
         columns.update(self.null_summaries)
+        columns.setdefault("crt_null_excess_kurtosis", missing)
         return columns
