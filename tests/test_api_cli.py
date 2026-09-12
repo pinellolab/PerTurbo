@@ -11,6 +11,20 @@ import perturbo.api as api
 from perturbo.api import BaselinePosteriorSummary, BetaFit, ControlFit, PerTurboData, CovariateTransformState
 
 
+@pytest.fixture(autouse=True)
+def _wiring_tests_do_not_run_the_crt(monkeypatch):
+    """These tests stub the loader and the fitters with sentinel objects to check how
+    the CLI wires its flags. The conditional randomization test is on by default and
+    would reach code the sentinels cannot satisfy, so it steps aside here, the way
+    it does for any unsupported configuration."""
+    import perturbo.cli as cli_module
+
+    monkeypatch.setattr(
+        cli_module, "_crt_configuration_problem", lambda args, size_factor_mode: "wiring test: loader and fitters are stubs"
+    )
+
+
+
 def _dummy_control_fit(n_obs: int, n_genes: int = 2) -> ControlFit:
     return ControlFit(
         beta_0=jnp.zeros((n_genes,)),
