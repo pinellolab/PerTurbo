@@ -2467,7 +2467,7 @@ def fit_control(
     model_cls = _resolve_model(model_name)
     model = numpyro.handlers.condition(
         model_cls,
-        data={"beta": jnp.zeros((num_perts, num_genes))},
+        data={"beta": jnp.zeros((num_perts, num_genes), dtype=jnp.float32)},
     )
     guide = AutoNormal(model, init_loc_fn=init_value_fn, create_plates=create_plates)
 
