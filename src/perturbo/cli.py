@@ -75,9 +75,8 @@ from .crt import (
 from .core import measure_realized_moi
 from .results import (
     build_guide_efficiency_df,
-    build_standard_element_effects_df,
     load_pairs_to_test,
-    restrict_effects_to_pairs,
+    write_standard_element_effects_parquet,
 )
 from .training_schedule import resolve_training_schedule
 
@@ -1513,6 +1512,7 @@ def main(argv: list[str] | None = None) -> None:
                 element_names=tuple(str(name) for name in full_data.pert_names),
                 gene_names=tuple(str(name) for name in full_data.gene_names),
                 tail_families=tuple(args.crt_tail_families),
+                saddlepoint_only=bool(args.crt_saddlepoint_only),
             )
         accumulator.absorb(
             run_crt_all_cells(
@@ -1604,6 +1604,7 @@ def main(argv: list[str] | None = None) -> None:
                         element_names=tuple(all_perturbation_names),
                         gene_names=tuple(analysis_gene_names),
                         tail_families=tuple(args.crt_tail_families),
+                        saddlepoint_only=bool(args.crt_saddlepoint_only),
                     )
                 if crt_pool == "all-cells":
                     _run_all_cells_crt(
@@ -1703,6 +1704,7 @@ def main(argv: list[str] | None = None) -> None:
                 element_names=tuple(str(name) for name in all_perturbation_names),
                 gene_names=tuple(str(name) for name in analysis_gene_names),
                 tail_families=tuple(args.crt_tail_families),
+                saddlepoint_only=bool(args.crt_saddlepoint_only),
             )
             for chunk_i, chunk_info in enumerate(chunks):
                 chunk_data = load_analysis_cells(
@@ -1753,6 +1755,7 @@ def main(argv: list[str] | None = None) -> None:
                 element_names=tuple(str(name) for name in all_perturbation_names),
                 gene_names=tuple(str(name) for name in analysis_gene_names),
                 tail_families=tuple(args.crt_tail_families),
+                saddlepoint_only=bool(args.crt_saddlepoint_only),
             )
         posterior_mean = np.zeros((n_perts, n_genes), dtype=np.float32)
         posterior_scale = np.zeros((n_perts, n_genes), dtype=np.float32)
@@ -1946,6 +1949,7 @@ def main(argv: list[str] | None = None) -> None:
                 element_names=tuple(str(name) for name in all_perturbation_names),
                 gene_names=tuple(str(name) for name in analysis_gene_names),
                 tail_families=tuple(args.crt_tail_families),
+                saddlepoint_only=bool(args.crt_saddlepoint_only),
             )
             if crt_shares_selection_model:
                 # Nothing is chunked here, so "over the screen" and "inside the
@@ -2012,7 +2016,7 @@ def main(argv: list[str] | None = None) -> None:
         # Benjamini-Hochberg happens here and only here: it has to see every
         # hypothesis at once, and each chunk was by construction only part of
         # the family.
-        crt_columns = crt_accumulator.finalize()
+        crt_columns = crt_accumulator.finalize(streaming=True)
         if crt_accumulator.num_multi_assignment_cells_dropped:
             print(
                 f"[perturbo] CRT: {crt_accumulator.num_multi_assignment_cells_dropped:,} analysed cells carried more "
@@ -2063,7 +2067,10 @@ def main(argv: list[str] | None = None) -> None:
                 f"[perturbo] CRT {family}: {int(np.count_nonzero(q[finite] < 0.05))} at q<0.05, "
                 f"{int(np.count_nonzero(valid & finite))}/{int(finite.sum())} fits valid."
             )
-    element_effects = build_standard_element_effects_df(
+    requested_pairs = load_pairs_to_test(args.pairs_to_test) if args.pairs_to_test is not None else None
+    element_effects_path = out_dir / "element_effects.parquet"
+    restricted = write_standard_element_effects_parquet(
+        element_effects_path,
         method="perturbo",
         effect_loc=np.asarray(beta_fit.posterior_mean),
         effect_scale=np.asarray(beta_fit.posterior_scale),
@@ -2071,16 +2078,14 @@ def main(argv: list[str] | None = None) -> None:
         gene_names=list(analysis_gene_names),
         null_z_values=null_z_values,
         extra_columns=crt_columns,
+        requested_pairs=requested_pairs,
     )
-    element_effects_path = out_dir / "element_effects.parquet"
-    element_effects.to_parquet(element_effects_path, index=False)
     print(f"[perturbo] Wrote {element_effects_path}")
 
-    if args.pairs_to_test is not None:
+    if requested_pairs is not None:
         # One fit and one test, two tables. The restricted table exists because
         # the multiple-testing family differs, not because the analysis does.
-        requested_pairs = load_pairs_to_test(args.pairs_to_test)
-        restricted = restrict_effects_to_pairs(element_effects, requested_pairs)
+        assert restricted is not None
         missing = len(requested_pairs) - len(restricted)
         restricted_path = out_dir / "element_effects_requested_pairs.parquet"
         restricted.to_parquet(restricted_path, index=False)
