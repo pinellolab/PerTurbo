@@ -125,6 +125,15 @@ def _sample_observations(
     pi_outlier=None,
     count_censoring_threshold=None,
 ):
+    # NumPyro 0.21 draws continuous sites in JAX's default floating dtype even
+    # when a distribution's parameters are float32. The package enables x64
+    # for CRT tails, so keep that policy from doubling the training likelihood.
+    logits = jnp.asarray(logits, dtype=jnp.float32)
+    theta = jnp.asarray(theta, dtype=jnp.float32)
+    noise_scale = None if noise_scale is None else jnp.asarray(noise_scale, dtype=jnp.float32)
+    logits_outlier = None if logits_outlier is None else jnp.asarray(logits_outlier, dtype=jnp.float32)
+    theta_outlier = None if theta_outlier is None else jnp.asarray(theta_outlier, dtype=jnp.float32)
+    pi_outlier = None if pi_outlier is None else jnp.asarray(pi_outlier, dtype=jnp.float32)
     uses_mixture_nb = likelihood in {"mixture_nb"}
     uses_censored_nb = likelihood in {"censored_nb", "censored_negbin"}
     if likelihood in {"nb", "negbin"}:
@@ -287,6 +296,35 @@ def BaseModel(
                 with gene_plate:
                     covariate_coef = numpyro.sample("covariate_coef", dist.Normal(0, 1.0))
 
+    # Preserve the existing x64 latent draws and their RNG streams, but cross
+    # into the float32 likelihood here, before any cells-by-genes products.
+    beta_0 = jnp.asarray(beta_0, dtype=jnp.float32)
+    theta = jnp.asarray(theta, dtype=jnp.float32)
+    beta = jnp.asarray(beta, dtype=jnp.float32)
+    factor_loadings = (
+        None if num_factors is None else jnp.asarray(factor_loadings, dtype=jnp.float32)
+    )
+    covariate_coef = (
+        None if covariate_coef is None else jnp.asarray(covariate_coef, dtype=jnp.float32)
+    )
+    guide_random_effect = (
+        None if guide_random_effect is None else jnp.asarray(guide_random_effect, dtype=jnp.float32)
+    )
+    dispersion_excess_inverse = (
+        None
+        if not fit_perturbation_dispersion
+        else jnp.asarray(dispersion_excess_inverse, dtype=jnp.float32)
+    )
+    noise_scale = (
+        None
+        if likelihood not in {"lnnb", "lognormal_nb"}
+        else jnp.asarray(noise_scale, dtype=jnp.float32)
+    )
+    if uses_mixture_nb:
+        pi_outlier = jnp.asarray(pi_outlier, dtype=jnp.float32)
+        theta_outlier = jnp.asarray(theta_outlier, dtype=jnp.float32)
+        outlier_mean_shift = jnp.asarray(outlier_mean_shift, dtype=jnp.float32)
+
     with cell_plate as sampled_cell_idx:
         counts = _subsample_cell_axis(counts, sampled_cell_idx, num_cells=full_num_cells, name="counts")
         pert_id = _subsample_design_rows(pert_id, sampled_cell_idx, num_cells=full_num_cells, name="pert_id")
@@ -302,6 +340,7 @@ def BaseModel(
             num_cells=full_num_cells,
             name="covariates",
         )
+        covariates = None if covariates is None else jnp.asarray(covariates, dtype=jnp.float32)
         guide_matrix = _subsample_design_rows(
             guide_matrix,
             sampled_cell_idx,
@@ -323,11 +362,16 @@ def BaseModel(
         # lets fixed-shape padded chunk buffers contribute exactly the same
         # likelihood terms as their unpadded counterparts.
         with numpyro.handlers.mask(mask=cell_mask):
-            size_factor = numpyro.sample("size_factor", dist.Normal(0.0, 2.0), obs=size_factor_obs)
+            size_factor = jnp.asarray(
+                numpyro.sample("size_factor", dist.Normal(0.0, 2.0), obs=size_factor_obs),
+                dtype=jnp.float32,
+            )
 
             if num_factors is not None:
                 with factor_plate:
-                    factor_scores = numpyro.sample("factor_scores", dist.Normal(0, 1.0))
+                    factor_scores = jnp.asarray(
+                        numpyro.sample("factor_scores", dist.Normal(0, 1.0)), dtype=jnp.float32
+                    )
 
             if pert_id is None:
                 raise ValueError("pert_id must be provided.")
@@ -491,7 +535,10 @@ def GuideSharedEffectModel(
                 with gene_plate:
                     covariate_coef = numpyro.sample("covariate_coef", dist.Normal(0, 1.0))
 
-    guide_to_element = jnp.asarray(guide_to_element, dtype=beta.dtype)
+    # This contraction is guides-by-genes rather than cells-by-genes, but it is
+    # still a wide likelihood input and follows the same precision boundary.
+    beta = jnp.asarray(beta, dtype=jnp.float32)
+    guide_to_element = jnp.asarray(guide_to_element, dtype=jnp.float32)
     parent_effect = guide_to_element @ beta
     if guide_effect_strategy == "shared":
         guide_effect = parent_effect
@@ -502,16 +549,46 @@ def GuideSharedEffectModel(
                     "guide_relative_efficiency",
                     dist.Beta(5.0, 1.0),
                 )
-        guide_effect = parent_effect * guide_relative_efficiency
+        guide_effect = parent_effect * jnp.asarray(guide_relative_efficiency, dtype=jnp.float32)
     elif guide_effect_strategy == "offset":
         with gene_plate:
             with guide_plate:
                 guide_offset = _sample_effect_site("guide_offset", prior)
-        guide_effect = parent_effect + guide_offset
+        guide_effect = parent_effect + jnp.asarray(guide_offset, dtype=jnp.float32)
     else:
         raise ValueError(f"Unknown guide_effect_strategy: {guide_effect_strategy}")
 
     guide_effect = numpyro.deterministic("guide_effect", guide_effect)
+
+    # Preserve latent sampling while ensuring every likelihood-side contraction
+    # and cells-by-genes intermediate uses the documented training dtype.
+    beta_0 = jnp.asarray(beta_0, dtype=jnp.float32)
+    theta = jnp.asarray(theta, dtype=jnp.float32)
+    beta = jnp.asarray(beta, dtype=jnp.float32)
+    guide_effect = jnp.asarray(guide_effect, dtype=jnp.float32)
+    factor_loadings = (
+        None if num_factors is None else jnp.asarray(factor_loadings, dtype=jnp.float32)
+    )
+    covariate_coef = (
+        None if covariate_coef is None else jnp.asarray(covariate_coef, dtype=jnp.float32)
+    )
+    guide_random_effect = (
+        None if guide_random_effect is None else jnp.asarray(guide_random_effect, dtype=jnp.float32)
+    )
+    guide_dispersion_excess_inverse = (
+        None
+        if not fit_perturbation_dispersion
+        else jnp.asarray(guide_dispersion_excess_inverse, dtype=jnp.float32)
+    )
+    noise_scale = (
+        None
+        if likelihood not in {"lnnb", "lognormal_nb"}
+        else jnp.asarray(noise_scale, dtype=jnp.float32)
+    )
+    if uses_mixture_nb:
+        pi_outlier = jnp.asarray(pi_outlier, dtype=jnp.float32)
+        theta_outlier = jnp.asarray(theta_outlier, dtype=jnp.float32)
+        outlier_mean_shift = jnp.asarray(outlier_mean_shift, dtype=jnp.float32)
 
     with cell_plate as sampled_cell_idx:
         counts = _subsample_cell_axis(counts, sampled_cell_idx, num_cells=full_num_cells, name="counts")
@@ -539,6 +616,7 @@ def GuideSharedEffectModel(
             num_cells=full_num_cells,
             name="covariates",
         )
+        covariates = None if covariates is None else jnp.asarray(covariates, dtype=jnp.float32)
         cell_mask = _subsample_cell_axis(
             cell_mask,
             sampled_cell_idx,
@@ -551,11 +629,16 @@ def GuideSharedEffectModel(
             cell_mask = jnp.asarray(cell_mask, dtype=bool).reshape((-1, 1))
 
         with numpyro.handlers.mask(mask=cell_mask):
-            size_factor = numpyro.sample("size_factor", dist.Normal(0.0, 2.0), obs=size_factor_obs)
+            size_factor = jnp.asarray(
+                numpyro.sample("size_factor", dist.Normal(0.0, 2.0), obs=size_factor_obs),
+                dtype=jnp.float32,
+            )
 
             if num_factors is not None:
                 with factor_plate:
-                    factor_scores = numpyro.sample("factor_scores", dist.Normal(0, 1.0))
+                    factor_scores = jnp.asarray(
+                        numpyro.sample("factor_scores", dist.Normal(0, 1.0)), dtype=jnp.float32
+                    )
 
             # Shared guide effects are element effects. Use the binary grouped
             # element design so two guides aimed at the same element do not
