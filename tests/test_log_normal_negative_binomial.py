@@ -109,3 +109,38 @@ def test_api_supports_lognormal_likelihood_with_baseline_uncertainty() -> None:
     )
     assert beta_fit.posterior_mean.shape == (2, counts.shape[1])
     assert beta_fit.posterior_scale.shape == (2, counts.shape[1])
+
+
+def test_nonzero_noise_likelihood_matches_independent_integration() -> None:
+    """The quadrature must integrate the log-normal mixture, not a reweighting of it.
+
+    ``hermegauss`` returns weights; using them as log-weights made every mixture with
+    a non-zero noise scale wrong. Ported from PerTurbo #59.
+    """
+    import numpy as np
+    from scipy.integrate import quad
+    from scipy.special import expit
+    from scipy.stats import nbinom, norm
+
+    total_count, logits, noise = 5.0, 0.0, 0.5
+    distribution = LogNormalNegativeBinomial(
+        jnp.asarray(total_count), jnp.asarray(logits), jnp.asarray(noise), num_quad_points=32
+    )
+    values = np.array([0, 1, 5, 15])
+    expected = np.array(
+        [
+            quad(
+                lambda z: nbinom.pmf(value, total_count, expit(-logits - noise * z)) * norm.pdf(z),
+                -10.0,
+                10.0,
+                epsabs=1e-12,
+            )[0]
+            for value in values
+        ]
+    )
+    np.testing.assert_allclose(np.exp(distribution.log_prob(values)), expected, rtol=1e-6, atol=1e-10)
+
+
+def test_sample_shape_is_applied_once() -> None:
+    distribution = LogNormalNegativeBinomial(jnp.array([3.0, 5.0]), jnp.zeros(2), jnp.full(2, 0.5))
+    assert distribution.sample(jax.random.key(0), sample_shape=(3, 4)).shape == (3, 4, 2)

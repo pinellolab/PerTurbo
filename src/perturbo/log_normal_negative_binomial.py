@@ -15,7 +15,8 @@ from numpyro.distributions.util import promote_shapes, validate_sample
 def _get_quad_rule(num_quad_points: int, dtype) -> tuple[jnp.ndarray, jnp.ndarray]:
     quad_rule = hermegauss(num_quad_points)
     points = jnp.asarray(quad_rule[0], dtype=dtype)
-    log_weights = jnp.asarray(quad_rule[1], dtype=dtype)
+    # hermegauss returns quadrature *weights*; the mixture needs their logs.
+    log_weights = jnp.log(jnp.asarray(quad_rule[1], dtype=dtype))
     log_weights = log_weights - logsumexp(log_weights)
     return points, log_weights
 
@@ -95,7 +96,8 @@ class LogNormalNegativeBinomial(Distribution):
             total_count=self.total_count,
             logits=self.logits + normals,
         )
-        return nb_dist.sample(nb_key, sample_shape=sample_shape)
+        # The normal draw already expanded the batch by sample_shape.
+        return nb_dist.sample(nb_key)
 
     def expand(self, batch_shape):
         batch_shape = tuple(batch_shape)
