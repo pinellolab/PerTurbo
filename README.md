@@ -28,8 +28,9 @@ docker run --rm --gpus all perturbo:local --help
 The image uses JAX's CUDA 12 pip wheels, so the host must provide the NVIDIA
 Container Toolkit and a Linux NVIDIA driver version 525 or newer. Do not set
 `LD_LIBRARY_PATH` in the container: JAX uses its pip-installed CUDA libraries.
-The established GitHub Actions recipe builds the `linux/amd64` image and
-publishes it to GHCR only for version tags (or an explicit manual dispatch).
+GitHub Actions builds the `linux/amd64` image. Version tags publish releases;
+pushes to `v2-port` refresh the mutable `v2-dev` tag, and manual dispatches can
+also publish. Pull requests build and smoke-test the image without publishing.
 
 ## Quick start
 
