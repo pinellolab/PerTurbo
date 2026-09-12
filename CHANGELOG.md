@@ -12,6 +12,9 @@ and this project adheres to [Semantic Versioning][].
 
 ### Fixed
 
+-   Grouping guides into elements is a sparse product. The dense int8 product had
+    no BLAS kernel and ran for hours on one core on a 233,000-cell screen before
+    anything reached the GPU.
 -   The float32 pin read the variational parameters through their constraints and
     handed them back to the optimizer unconstrained, so every positive scale
     restarted at exp of its value and stage one began 40% above its reference
