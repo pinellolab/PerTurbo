@@ -89,9 +89,13 @@ def design_matrix_product(design, coefficients: jnp.ndarray) -> jnp.ndarray:
     """Return ``design @ coefficients`` without densifying an indexed design."""
     if not isinstance(design, IndexedDesignMatrix):
         return jnp.asarray(design, dtype=coefficients.dtype) @ coefficients
-    safe_indices = jnp.maximum(design.indices, 0)
-    gathered = coefficients[safe_indices]
-    weights = jnp.where(design.indices >= 0, design.values, 0).astype(coefficients.dtype)
+    valid = design.indices >= 0
+    # Keep padding out of both the gather and its transpose. Clamping ``-1`` to
+    # zero makes every padded slot a (zero-weighted) gradient destination for
+    # column zero, which can dominate sparse high-MOI reverse-mode work.
+    indices = jnp.where(valid, design.indices, coefficients.shape[0])
+    gathered = coefficients.at[indices].get(mode="fill", fill_value=0)
+    weights = jnp.where(valid, design.values, 0).astype(coefficients.dtype)
     return jnp.sum(gathered * weights[..., None], axis=1)
 
 
