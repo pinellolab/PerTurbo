@@ -1,6 +1,6 @@
 [build-system]
 build-backend = "hatchling.build"
-requires = ["hatchling"]
+requires = ["hatchling>=1.27"]
 
 [project]
 name = "perturbo"
@@ -8,7 +8,8 @@ version = "2.0.0rc5"
 description = "Bayesian Perturb-seq analysis with NumPyro and JAX."
 readme = "README.md"
 requires-python = ">=3.11"
-license = { file = "LICENSE" }
+license = "GPL-3.0-or-later"
+license-files = ["LICENSE", "NOTICE", "LICENSES/*.txt"]
 authors = [{ name = "Logan Blaine" }]
 maintainers = [{ name = "Logan Blaine", email = "loganblaine@g.harvard.edu" }]
 classifiers = [

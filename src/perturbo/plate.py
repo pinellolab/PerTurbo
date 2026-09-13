@@ -1,3 +1,5 @@
+# Copyright Contributors to the Pyro project.
+# Original NumPyro portions are Apache-2.0 licensed; see NOTICE and LICENSES/Apache-2.0.txt.
 """Local copy of NumPyro's ``plate`` with support for explicit subsample indices.
 
 Adapted from NumPyro 0.20.1 so we can prototype a Pyro-style ``subsample=``

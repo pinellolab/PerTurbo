@@ -124,3 +124,9 @@ the result tables, preprocessing and the simulation entry
 points. The benchmark harness, the evaluation scorers, the Streamlit applications
 and the research diagnostics stay in Cortado, which is why a default install needs
 neither statsmodels nor scikit-learn.
+
+## License
+
+PerTurbo is distributed under the GNU General Public License, version 3 or
+any later version (GPL-3.0-or-later). See [LICENSE](LICENSE) for the full terms
+and [NOTICE](NOTICE) for retained copyright and third-party license notices.

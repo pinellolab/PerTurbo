@@ -1,0 +1,35 @@
+PerTurbo
+Copyright (c) 2023, Logan Blaine
+
+PerTurbo is free software: you can redistribute it and/or modify it under
+the terms of the GNU General Public License as published by the Free
+Software Foundation, either version 3 of the License, or (at your option)
+any later version.
+
+PerTurbo is distributed in the hope that it will be useful, but WITHOUT ANY
+WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+FOR A PARTICULAR PURPOSE. See the GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License along with
+PerTurbo in the LICENSE file. If not, see https://www.gnu.org/licenses/.
+
+Retained MIT notice
+-------------------
+Portions of PerTurbo were previously distributed under the MIT License.
+The original copyright and permission notice is retained in LICENSES/MIT.txt.
+This GPL release does not withdraw permissions granted for earlier copies
+under the MIT License.
+
+NumPyro
+-------
+src/perturbo/plate.py contains code adapted from NumPyro 0.20.1's
+numpyro/primitives.py, modified to support explicit subsample indices.
+
+Copyright Contributors to the Pyro project.
+
+The original NumPyro code is licensed under the Apache License, Version 2.0.
+A copy of that license is included in LICENSES/Apache-2.0.txt. These upstream
+terms and notices are retained for the NumPyro portions of this distribution.
+
+Upstream source:
+https://github.com/pyro-ppl/numpyro/blob/0.20.1/numpyro/primitives.py
