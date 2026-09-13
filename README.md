@@ -1,162 +1,60 @@
 # PerTurbo
 
-PerTurbo is a NumPyro/JAX implementation of Bayesian Perturb-seq analysis for
-low- and high-MOI single-cell CRISPR screens. Version 2 is the production
-successor to the experimental Cortado implementation.
+PerTurbo analyzes Perturb-seq count data to estimate how each targeted gene,
+enhancer, or other element changes gene expression. A Bayesian model provides
+effect estimates and uncertainty; a conditional randomization test (CRT)
+provides complementary frequentist p-values and multiple-testing correction.
+Both use JAX for CPU or NVIDIA GPU computation.
 
-## Installation
+The v2 workflow accepts AnnData and MuData, supports low- and high-MOI screens,
+and uses gene blocks to retain co-occurring perturbation predictors while
+bounding expression buffers. Normal installation uses NumPyro/JAX and does not
+require PyTorch, Pyro, scvi-tools, or pertpy.
 
-PerTurbo requires Python 3.11 or newer.
+## Start here
 
-```bash
-pip install perturbo
-# or, for development in this checkout
-uv sync --group test --group dev
-```
+- [Install PerTurbo](docs/installation.md) and verify CPU/GPU availability.
+- [Run your first analysis](docs/quickstart.md) on a small synthetic screen.
+- [Prepare real data](docs/data_preparation.md): raw counts, called guides, controls, and mappings.
+- [Choose run settings](docs/running_analyses.md): covariates, CRT pools, gene blocks, and fitting budgets.
+- [Understand the method](docs/method.md) and [interpret results](docs/results_guide.md).
+- [Use the Python workflow](docs/python_api.md) or consult the [API reference](docs/api.md).
+- [Troubleshoot a run](docs/troubleshooting.md).
 
-For a compatible NVIDIA/CUDA 12 environment, install `perturbo[cuda]`.
-
-## Container image
-
-Build the GPU-ready image locally with:
-
-```bash
-docker build --tag perturbo:local .
-docker run --rm --gpus all perturbo:local --help
-```
-
-The image uses JAX's CUDA 12 pip wheels, so the host must provide the NVIDIA
-Container Toolkit and a Linux NVIDIA driver version 525 or newer. Do not set
-`LD_LIBRARY_PATH` in the container: JAX uses its pip-installed CUDA libraries.
-GitHub Actions builds the `linux/amd64` image. Version tags publish releases;
-pushes to `v2-port` refresh the mutable `v2-dev` tag, and manual dispatches can
-also publish. Pull requests build and smoke-test the image without publishing.
-
-## Quick start
-
-```python
-import perturbo
-
-perturbo.setup_mudata(
-    mdata,
-    modalities={"rna_layer": "rna", "perturbation_layer": "grna"},
-    guide_by_element_key="element_targeted",
-)
-
-model = perturbo.PERTURBO(mdata, likelihood="nb", guide_random_effects=True)
-model.train(steps=2500, batch_size=1024, accelerator="gpu")
-model.save("perturbo_bundle", overwrite=True)
-```
-
-For reproducible file-based runs, use the CLI:
+These docs describe the v2 release candidate. As checked on 13 September 2026,
+PyPI publication is pending. The tagged source can be installed with:
 
 ```bash
-perturbo --input screen.h5mu --out-dir perturbo_outputs/run --modality-key rna \
-  --perturbation-modality-key grna --perturbation-element-varm-key element_targeted
+python -m pip install "perturbo @ https://github.com/pinellolab/PerTurbo/archive/refs/tags/v2.0.0rc6.zip"
 ```
 
-### The conditional randomization test
+See the installation guide for an isolated environment, CUDA support, and the
+current tag/package-version mismatch. The documentation website is also pending;
+the guides are available in this repository meanwhile.
 
-The conditional randomization test runs alongside the Bayesian effect estimates
-by default (`--no-crt` opts out). It asks whether a gene's expression differs by more than it would had
-the guide landed in a different set of cells with the same covariates, and it
-approximates its tail with a saddlepoint calculation without resampling, so a genome-scale
-screen can be tested against every gene:
+## A file-based analysis
+
+For a prepared MuData containing RNA counts and called guides:
 
 ```bash
-perturbo --input screen.h5mu --out-dir perturbo_outputs/run --modality-key rna \
-  --perturbation-modality-key grna --perturbation-element-varm-key element_targeted \
-  --crt --crt-mechanism propensity --crt-tail-families saddlepoint \
-  --crt-saddlepoint-only --crt-polish-baseline
+perturbo --input screen.h5mu --out-dir results \
+  --modality-key rna --perturbation-modality-key grna \
+  --perturbation-element-varm-key element_targeted \
+  --perturbation-element-names-uns-key element_names \
+  --control-substring non-targeting --library-size-key library_size
 ```
 
-Add `--crt-only` to stop after the test and skip the effect estimates, which is
-the cheaper path for calibration checks and power calculations. The test serves
-both screen designs, chosen with `--crt-pool`: with one perturbation per cell
-(`control-anchored`) each target is tested inside the control pool plus its own
-cells, and with many perturbations per cell (`all-cells`) each element is tested
-as a marginal association over all cells. The default, `auto`, measures the
-design from the data: every cell is used when the median guides per cell
-exceeds 3, the control pool otherwise, and the command line prints what it
-measured and what it chose. Either way it reports how many cells carry only
-control guides and warns when they are fewer than 1,000 or under 1%. A
-low-MOI screen may arrive with a guide-to-element map; the control-anchored
-test collapses the assignment to elements and sets aside cells carrying more
-than one, reporting the count. See `docs/crt_quickstart.md`.
+The CLI defaults to full-batch fitting and a propensity saddlepoint CRT for
+compatible models. For high-MOI memory control, use gene blocks; the [run guide](docs/running_analyses.md)
+explains supported combinations. Verify the selected CRT pool and compare a
+longer fitting budget before interpreting a real screen. Bayesian effect
+uncertainty and CRT p-values are distinct quantities, and calibration depends
+on the design and model assumptions.
 
-### Memory and chunking
+## Development and compatibility
 
-Use `--backed` for files larger than memory. For mutually exclusive assignments,
-perturbation chunks reduce both the number of cells and the number of fitted
-effects. Splitting co-occurring perturbations would omit predictors and can bias
-effects; when these assignments trigger automatic chunking, the CLI instead
-loads 256 genes at a time and retains every cell and predictor. Set
-`--gene-chunk-size 128` to choose a smaller block explicitly.
-
-Gene blocks currently support the plain NB model with observed or fixed-zero
-size factors, shared guide effects, no latent factors, no guide random effects,
-and no perturbation dispersion or baseline uncertainty propagation. Full-panel
-library sizes and the control centering are preserved across blocks. The
-all-cells CRT reuses its propensity fit, and multiple-testing correction happens
-once over the full tested family. Stage-two SVI defaults to 1,024 cells per step
-on this path; use `--minibatch-size-betas` and `--num-epochs-betas` to control
-training coverage. Stochastic fits at different block widths need not be
-numerically identical after a finite number of steps.
-
-For either chunking strategy, compare effect estimates with a longer training
-budget. The default 500 steps can underestimate strong knockdowns; CRT baseline
-polishing does not establish convergence of the Bayesian effect estimates.
-
-Gene blocks bound the count and likelihood buffers, but control fitting still
-loads up to `--max-control-cells` across all genes, and the final effect and CRT
-tables scale as perturbations × genes. A full atlas is therefore a cluster job.
-For a laptop smoke test, load a raw-count AnnData with `backed="r"`, select
-controls and a few perturbations, save full-panel cell totals in an observation
-column, then select a few hundred genes and pass that column with
-`--library-size-key`. A small debug run checks execution, not full-scale speed,
-convergence, or statistical calibration.
-
-### Reporting a subset of pairs
-
-A cis window, or any other preselected pair set, is a question about the
-multiple-testing family rather than about the fit: the estimates and p-values for
-a pair do not depend on which other pairs were requested. Pass a CSV, TSV or
-Parquet table with columns `element` and `gene`:
-
-```bash
-perturbo --input screen.h5mu --out-dir perturbo_outputs/run --modality-key rna \
-  --perturbation-modality-key grna --perturbation-element-varm-key element_targeted \
-  --pairs-to-test cis_pairs.parquet
-```
-
-The run is unchanged; every pair is still fitted and tested. Beside
-`element_effects.parquet` PerTurbo writes `element_effects_requested_pairs.parquet`,
-holding the requested rows with Benjamini-Hochberg recomputed within that set. One
-run therefore yields both a cis-scale comparison and the transcriptome-wide
-analysis. In PerTurbo 2.0 this flag restricted the fit itself; it no longer does,
-and the command line says so at startup.
-
-The main Python entry points are `PERTURBO` / `PerTurboModel`, `fit_from_path`,
-`setup_mudata`, `fit_control`, `fit_perturbation_effects`, and the posterior
-table and trained-model simulation helpers.
-
-## Migrating from PyTorch PerTurbo and Cortado
-
-The deprecated PyTorch/Pyro implementation is available only through the
-optional `perturbo[legacy]` extra and `perturbo.legacy` namespace. It is not
-loaded by a normal PerTurbo import.
-
-| Previous surface | PerTurbo 2 surface |
-| --- | --- |
-| `cortado.PERTURBO` | `perturbo.PERTURBO` |
-| `cortado.CortadoModel` | `perturbo.PerTurboModel` |
-| `cortado` CLI | `perturbo` CLI |
-| PyTorch `perturbo.PERTURBO` | `perturbo.legacy.PERTURBO` |
-
-PerTurbo reads Cortado MuData registrations and fit bundles, warns once during
-the upgrade, and writes the v2 `_perturbo_setup` and bundle format thereafter.
-
-## Development
+See [Contributing](docs/contributing.md), [release notes](CHANGELOG.md), and the
+[scverse-readiness assessment](docs/scverse_readiness.md).
 
 ```bash
 uv sync --group test --group dev
@@ -164,10 +62,6 @@ uv run pytest
 uv build
 ```
 
-The v2 production source is ported from the Cortado repository, which remains the
-home for experiments, benchmarks, notebooks, apps and paper analyses. What ships
-here is the analysis package: the models, the two-stage fit, the conditional
-randomization test, the result tables, preprocessing and the simulation entry
-points. The benchmark harness, the evaluation scorers, the Streamlit applications
-and the research diagnostics stay in Cortado, which is why a default install needs
-neither statsmodels nor scikit-learn.
+The deprecated PyTorch implementation is isolated under `perturbo.legacy` and
+requires the optional `legacy` extra. Cortado registrations and fit bundles are
+read with compatibility handling and written in the PerTurbo v2 format.

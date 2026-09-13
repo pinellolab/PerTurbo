@@ -39,3 +39,35 @@ roughly the step size per step, so their product must exceed the largest effect
 in nats with margin. The defaults, 0.01 and 500 steps per stage, were chosen
 against simulated screens with known effects; lowering one without raising the
 other shrinks large effects toward zero.
+
+## Building the documentation
+
+Install the package and its documentation dependencies from the locked
+environment, then run the same strict Sphinx build used in CI:
+
+```bash
+uv sync --locked --extra docs
+JAX_PLATFORM_NAME=cpu MPLBACKEND=Agg \
+  uv run sphinx-build -W --keep-going -b html docs docs/_build/html
+```
+
+`-W` turns warnings, including unresolved cross-references and malformed
+directives, into build failures. `--keep-going` reports all warnings in one
+run. Notebook execution is disabled in `docs/conf.py`, so this check imports
+the current checkout for API documentation but does not execute notebooks.
+
+Write public Python docstrings in NumPy style, with explicit `Parameters`,
+`Returns`, and `Yields` sections where applicable. Document each public object
+on its canonical page under `docs/reference/` so Sphinx has one primary target
+for cross-references. MyST pages can wrap standard reStructuredText autodoc
+directives in an `eval-rst` fence when directive options are clearer in that
+form:
+
+````markdown
+```{eval-rst}
+.. autofunction:: perturbo.results.build_standard_element_effects_df
+```
+````
+
+Keep explanatory shape, ordering, and state contracts beside the canonical
+directive rather than duplicating the generated signature on several pages.

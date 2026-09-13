@@ -6,8 +6,8 @@
 
 # -- Path setup --------------------------------------------------------------
 import sys
+import tomllib
 from datetime import datetime
-from importlib.metadata import metadata
 from pathlib import Path
 
 HERE = Path(__file__).parent
@@ -16,18 +16,16 @@ sys.path.insert(0, str(HERE / "extensions"))
 
 # -- Project information -----------------------------------------------------
 
-# NOTE: If you installed your project in editable mode, this might be stale.
-#       If this is the case, reinstall it to refresh the metadata
-info = metadata("perturbo")
-project_name = info["Name"]
-author = info["Author"]
-copyright = f"{datetime.now():%Y}, {author}."
-version = info["Version"]
-urls = dict(pu.split(", ") for pu in info.get_all("Project-URL"))
-repository_url = urls["Source"]
+# Read this checkout's metadata, rather than a possibly older installed wheel.
+info = tomllib.loads((HERE.parent / "pyproject.toml").read_text())["project"]
+project = project_name = "PerTurbo"
+author = ", ".join(person["name"] for person in info.get("authors", info.get("maintainers", [])))
+copyright = f"{datetime.now():%Y}, {author}"
+version = info["version"]
+repository_url = info["urls"]["Source"]
 
 # The full version, including alpha/beta/rc tags
-release = info["Version"]
+release = version
 
 bibtex_bibfiles = ["references.bib"]
 templates_path = ["_templates"]
@@ -38,7 +36,7 @@ html_context = {
     "display_github": True,  # Integrate GitHub
     "github_user": "pinellolab",
     "github_repo": project_name,
-    "github_version": "main",
+    "github_version": "v2-port",
     "conf_py_path": "/docs/",
 }
 
@@ -64,6 +62,15 @@ extensions = [
 
 autosummary_generate = True
 autodoc_member_order = "groupwise"
+# Resolve source annotation aliases to their public documentation names.
+autodoc_type_aliases = {"jnp.ndarray": "jax.Array"}
+
+
+def typehints_formatter(annotation, config):
+    if getattr(annotation, "__module__", "") == "mudata._core.mudata" and getattr(annotation, "__name__", "") == "MuData":
+        return ":py:class:`mudata.MuData`"
+    return None
+
 default_role = "literal"
 napoleon_google_docstring = False
 napoleon_numpy_docstring = True
@@ -86,6 +93,7 @@ nb_merge_streams = True
 typehints_defaults = "braces"
 
 source_suffix = {
+    ".md": "myst-nb",
     ".rst": "restructuredtext",
     ".ipynb": "myst-nb",
     ".myst": "myst-nb",
@@ -96,7 +104,10 @@ intersphinx_mapping = {
     "anndata": ("https://anndata.readthedocs.io/en/stable/", None),
     "scanpy": ("https://scanpy.readthedocs.io/en/stable/", None),
     "numpy": ("https://numpy.org/doc/stable/", None),
-    "jax": ("https://jax.readthedocs.io/en/latest/", None),
+    "pandas": ("https://pandas.pydata.org/docs/", None),
+    "scipy": ("https://docs.scipy.org/doc/scipy/", None),
+    "mudata": ("https://mudata.readthedocs.io/stable/", None),
+    "jax": ("https://docs.jax.dev/en/latest/", None),
     "numpyro": ("https://num.pyro.ai/en/stable/", None),
 }
 
@@ -126,8 +137,8 @@ html_theme_options = {
 
 pygments_style = "default"
 
+# Internal annotation types are intentionally outside the supported API reference.
 nitpick_ignore = [
-    # If building the documentation fails because of a missing link that is outside your control,
-    # you can add an exception to this list.
-    #     ("py:class", "igraph.Graph"),
+    ("py:class", "perturbo.core._AnalysisDesignCache"),
+    ("py:class", "perturbo._internal.score_resampling.TargetPermutations"),
 ]

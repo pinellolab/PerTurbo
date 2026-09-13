@@ -1,0 +1,31 @@
+name: Docs
+
+on:
+  push:
+    branches: [main, v2-port]
+  pull_request:
+    branches: [main, v2-port]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      JAX_PLATFORM_NAME: cpu
+      MPLBACKEND: Agg
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - run: uv sync --locked --extra docs
+      - run: uv run sphinx-build -W --keep-going -b html docs docs/_build/html
