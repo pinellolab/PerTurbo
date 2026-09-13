@@ -359,7 +359,7 @@ class BaselineNullCheck:
 
     @property
     def failed(self) -> np.ndarray:
-        """Per-gene boolean: too far from the mode, and not degenerate."""
+        """Boolean mask for nondegenerate genes too far from the mode."""
 
         return (~self.degenerate) & ~(self.newton_step <= self.tolerance)
 
@@ -597,6 +597,27 @@ def prepare_crt_baseline(
     (:func:`polish_baseline_to_null_mode`), keeping stage one's dispersion,
     offsets and design; the check then measures the polished baseline and the
     supplied one's check is kept as ``pre_polish_check``.
+
+    Parameters
+    ----------
+    control_data
+        Null-fit cells with counts shaped ``(n_control_cells, n_genes)``.
+    control_fit
+        Stage-one fit on the same cells, genes, offsets, and covariates.
+    step_tolerance
+        Largest accepted per-gene Fisher-scoring displacement, in nats.
+    curvature_jitter
+        Diagonal jitter for nuisance-information solves.
+    strict
+        Raise when a testable gene exceeds the tolerance; otherwise warn.
+    polish
+        Refit unpenalized nuisance coefficients while retaining dispersion and
+        offsets.
+
+    Returns
+    -------
+    CRTBaseline
+        Reusable control-side state whose gene order defines result columns.
     """
 
     nuisance = assemble_control_nuisance(control_data, control_fit)
@@ -1183,6 +1204,48 @@ def run_crt_for_chunk(
     the caller supplies control strata via ``control_data`` ordering. Passing
     ``None`` runs an unstratified CRT.
 
+    Parameters
+    ----------
+    baseline
+        Baseline prepared from ``control_data``.
+    chunk_data
+        Unpadded element-chunk cells on the same gene axis and offset centering.
+    control_data
+        Control pool used for every element-specific design.
+    num_resamples
+        Random null assignments; ignored in saddlepoint-only mode.
+    strata
+        Optional stratum label per ``chunk_data`` row.
+    seed
+        Assignment-resampling seed.
+    gene_chunk_size
+        Genes processed at once; ``None`` uses all genes. Splitting is exact.
+    tail_families
+        Parametric tails fitted alongside the empirical tail.
+    jax_max_gather_gib
+        Optional memory budget for JAX gather batches.
+    jax_targets_per_batch
+        Maximum targets per score-kernel batch.
+    resampling_mechanism
+        Either ``"permutation"`` or ``"propensity"``.
+    saddlepoint_only
+        Use the propensity Bernoulli CGF without random resamples. The CGF is
+        exact under the specified assignment model, but its tail is a
+        saddlepoint approximation and learned propensities require calibration.
+    saddlepoint_screen_p_value
+        Screening threshold before saddlepoint evaluation.
+    saddlepoint_two_sided
+        Convention for combining the two approximate tails.
+    shared_propensity_coefficients
+        Optional screen-wide logistic coefficients in nuisance-column order.
+
+    Returns
+    -------
+    ChunkCRTResult
+        ``(n_chunk_elements, n_genes)`` arrays in ``target_names`` and
+        ``gene_names`` order. Empirical p-values are missing in
+        saddlepoint-only mode.
+
     No q-values are produced. Benjamini-Hochberg has to see every hypothesis at
     once, and a chunk is by construction only part of the family, so the
     correction belongs to whoever concatenates the chunks.
@@ -1472,7 +1535,31 @@ def prepare_all_cells_propensity(
     eta_clip: float = 30.0,
     element_batch_size: int = 64,
 ) -> AllCellsPropensityFit:
-    """Fit the all-cells assignment models once for reuse over gene blocks."""
+    """Fit the all-cells assignment models once for reuse over gene blocks.
+
+    Parameters
+    ----------
+    baseline
+        Baseline prepared on exactly the cells in ``data``.
+    data
+        All analyzed cells; guide assignments may be dense or indexed.
+    min_cells_per_element
+        Minimum observed memberships for a testable element.
+    include_guide_count
+        Add standardized ``log1p`` detected-guide count to the basis.
+    max_iterations
+        Maximum iterations for each logistic fit.
+    eta_clip
+        Absolute bound on propensity linear predictors.
+    element_batch_size
+        Element models fitted together.
+
+    Returns
+    -------
+    AllCellsPropensityFit
+        Gene-independent state with aligned sparse membership coordinates and
+        a propensity ``basis`` containing one row per cell.
+    """
 
     from perturbo._internal.high_moi.resampling import (
         fit_propensity_coefficients,
@@ -1579,7 +1666,7 @@ def run_crt_all_cells(
     log1p count of detected guides when ``include_guide_count_in_propensity``
     (a cell that carries more guides is more likely to carry any given one; the
     outcome model need not know this, the selection model must). The statistic
-    and tail are the research kernel's exact Bernoulli-sum saddlepoint, so the
+    uses the Bernoulli sum's exact CGF and an approximate saddlepoint tail, so the
     result matches ``analysis/gasperini_high_moi.py --resampling-mechanism
     propensity --tail-approximation saddlepoint --saddlepoint-only`` at the same
     dispersion.
@@ -1587,6 +1674,43 @@ def run_crt_all_cells(
     No resamples are drawn; the empirical p-value is left missing. Elements
     with fewer than ``min_cells_per_element`` cells are left NaN. Q-values are
     the caller's, as for the chunked low-MOI path.
+
+    Fitted assignment probabilities are nuisance estimates rather than known
+    randomization probabilities. Check empirical null calibration for the
+    analysis; this calculation does not provide an exact finite-sample p-value.
+
+    Parameters
+    ----------
+    baseline
+        Baseline prepared and normally polished on exactly ``data``.
+    data
+        All analyzed cells on the baseline's gene axis.
+    gene_chunk_size
+        Outer gene slice size; ``None`` uses the full panel.
+    screen_p_value
+        Threshold for saddlepoint refinement after screening.
+    two_sided
+        Convention for combining upper and lower approximate tails.
+    gene_block_size
+        Gene block size inside the saddlepoint kernel.
+    element_batch_size
+        Element models processed together.
+    min_cells_per_element
+        Minimum memberships required to test an element.
+    include_guide_count_in_propensity
+        Add guide burden to the assignment model.
+    propensity_max_iterations
+        Maximum logistic-fit iterations if no fit is supplied.
+    eta_clip
+        Absolute bound on propensity linear predictors.
+    propensity_fit
+        Optional reusable output of :func:`prepare_all_cells_propensity`.
+
+    Returns
+    -------
+    ChunkCRTResult
+        Element-by-gene arrays. Empirical ``p_value`` is missing; saddlepoint
+        values are stored in ``parametric``.
     """
 
     from perturbo._internal.saddlepoint import fit_high_moi_propensity_saddlepoint
@@ -1827,6 +1951,7 @@ class CRTAccumulator:
         self.null_summaries = {name: np.full(shape, np.nan, dtype=np.float64) for name in summary_names}
 
     def absorb(self, result: ChunkCRTResult) -> None:
+        """Scatter a chunk into screen-wide arrays by element and gene name."""
         unknown = [name for name in result.target_names if name not in self._index]
         if unknown:
             raise ValueError(f"Chunk reported elements absent from the screen: {unknown[:5]}")
@@ -1866,6 +1991,18 @@ class CRTAccumulator:
         over the whole screen. They are alternative nulls for the same
         statistic, not a multiple-testing family among themselves, so pooling
         them would be wrong.
+
+        Parameters
+        ----------
+        streaming
+            Keep validity arrays boolean. By default they are converted to
+            floating arrays for homogeneous result-table columns.
+
+        Returns
+        -------
+        dict[str, numpy.ndarray]
+            Named ``(n_elements, n_genes)`` arrays with p/q-values, validity
+            fields, and null diagnostics.
         """
 
         shape = (len(self.element_names), len(self.gene_names))

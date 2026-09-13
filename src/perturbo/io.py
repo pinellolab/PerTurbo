@@ -25,6 +25,36 @@ _SAVED_SIZE_FACTOR_KEY = "_perturbo_saved_size_factor"
 
 @dataclass
 class MuDataSetup:
+    """Registration metadata connecting a MuData object to PerTurbo.
+
+    Attributes
+    ----------
+    rna_modality, perturbation_modality
+        Keys of the RNA and guide modalities in ``mdata.mod``.
+    perturbation_layer
+        Guide-count layer, or ``None`` to use the perturbation modality's ``X``.
+    batch_key, continuous_covariates_keys
+        RNA ``obs`` columns used as categorical and continuous covariates.
+    library_size_key, size_factor_key
+        RNA ``obs`` columns holding library sizes and centered log size factors.
+    guide_by_element_key
+        Perturbation ``varm`` key mapping guide rows to element columns.
+    guide_element_uns_key
+        Perturbation ``uns`` key containing element names when the map has no
+        labeled columns.
+    gene_name_key
+        RNA ``var`` column used as gene names, or ``None`` for ``var_names``.
+    control_substring
+        Substring used to identify control guides or elements.
+    size_factor_mode, size_factor_provenance
+        Recorded normalization mode and provenance for persistence and reload.
+
+    Notes
+    -----
+    ``gene_by_element_key`` and ``rna_element_uns_key`` are retained for bundle
+    compatibility. The current guide-based workflow uses the corresponding
+    guide mapping fields.
+    """
     rna_modality: str = "rna"
     perturbation_modality: str = "grna"
     perturbation_layer: str | None = None
@@ -42,12 +72,31 @@ class MuDataSetup:
     size_factor_provenance: str | None = None
 
     def to_json_dict(self) -> dict[str, Any]:
+        """Return registration fields as a JSON-compatible dictionary.
+
+        Missing continuous covariate keys become an empty list. The setup
+        object is not modified.
+        """
         payload = asdict(self)
         payload["continuous_covariates_keys"] = list(self.continuous_covariates_keys or [])
         return payload
 
     @classmethod
     def from_json_dict(cls, payload: dict[str, Any]) -> "MuDataSetup":
+        """Construct registration metadata from serialized fields.
+
+        Parameters
+        ----------
+        payload
+            Setup field names and values. Continuous covariate names are
+            normalized to a list of strings; missing values become an empty
+            list. The supplied dictionary is not modified.
+
+        Returns
+        -------
+        MuDataSetup
+            Reconstructed registration.
+        """
         values = dict(payload)
         raw_covariates = values.get("continuous_covariates_keys")
         if raw_covariates is None:
@@ -133,10 +182,59 @@ def setup_mudata(
     size_factor_mode: str | None = None,
     size_factor_provenance: str | None = None,
 ) -> MuDataSetup:
-    """Register MuData metadata for perturbo workflows.
+    """Register an in-memory MuData object for PerTurbo workflows.
 
-    This mutates the in-memory object to ensure basic fields exist and stores the
-    registration payload in ``mdata.uns["_cortado_setup"]``.
+    Parameters
+    ----------
+    mdata
+        MuData object containing aligned RNA and perturbation modalities.
+    modalities
+        Mapping with required keys ``"rna_layer"`` and
+        ``"perturbation_layer"``. Their values name modalities in ``mdata.mod``.
+    batch_key
+        Optional categorical batch column in RNA ``obs``.
+    library_size_key, size_factor_key
+        RNA ``obs`` columns to use. Missing columns are computed from RNA ``X``;
+        omitted names default to ``"_library_size"`` and ``"_size_factor"``.
+    continuous_covariates_keys
+        Optional continuous RNA ``obs`` columns included in both fitting stages.
+    guide_by_element_key
+        Perturbation ``varm`` key for a ``guides x elements`` mapping.
+    guide_element_uns_key
+        Perturbation ``uns`` key with element names when the mapping does not
+        expose labeled columns.
+    gene_by_element_key, rna_element_uns_key
+        RNA mapping metadata retained for bundle compatibility. The current
+        guide-based workflow uses ``guide_by_element_key`` and
+        ``guide_element_uns_key`` instead.
+    gene_name_key
+        Optional RNA ``var`` column used for gene names.
+    control_substring
+        Substring identifying controls. If omitted, a limited name-based
+        inference searches for NTC, non-targeting, or control labels.
+    perturbation_layer
+        Perturbation layer to read instead of the modality's ``X``.
+    size_factor_mode, size_factor_provenance
+        Normalization metadata stored for later fitting and bundle reload.
+
+    Returns
+    -------
+    MuDataSetup
+        The registration stored in ``mdata.uns["_perturbo_setup"]``.
+
+    Raises
+    ------
+    ValueError
+        If ``modalities`` is not provided.
+    KeyError
+        If required modality keys or named modalities are absent.
+
+    Notes
+    -----
+    This function mutates ``mdata``. It may add library size and centered log
+    size-factor columns to RNA ``obs``, add ``"_gene_mean"`` to RNA ``var``,
+    write ``"_perturbo_setup"`` to ``mdata.uns``, and remove the deprecated
+    ``"_cortado_setup"`` key.
     """
     if modalities is None:
         raise ValueError("modalities must be provided.")
@@ -189,6 +287,28 @@ def setup_mudata(
 
 
 def get_mudata_setup(mdata: md.MuData) -> MuDataSetup:
+    """Read a PerTurbo registration from a MuData object.
+
+    Parameters
+    ----------
+    mdata
+        Registered MuData object.
+
+    Returns
+    -------
+    MuDataSetup
+        Parsed registration metadata.
+
+    Raises
+    ------
+    KeyError
+        If neither the current nor legacy registration key exists.
+
+    Notes
+    -----
+    Reading a legacy ``"_cortado_setup"`` registration warns, writes the same
+    payload under ``"_perturbo_setup"``, and removes the legacy key in memory.
+    """
     if _SETUP_UNS_KEY in mdata.uns:
         payload = mdata.uns[_SETUP_UNS_KEY]
         mdata.uns.pop(_LEGACY_SETUP_UNS_KEY, None)
@@ -275,6 +395,35 @@ def save_fit_bundle(
     guide_posteriors: dict[str, Any] | None = None,
     guide_efficacy: np.ndarray | None = None,
 ) -> Path:
+    """Write a complete fitted-model bundle.
+
+    Parameters
+    ----------
+    out_dir
+        Destination directory, created if needed.
+    metadata
+        JSON-serializable model and workflow metadata. Producer and version
+        fields are added by this function.
+    mdata
+        Registered data written as ``mdata.h5mu``.
+    control_arrays, beta_arrays
+        Named arrays written to ``control_fit.npz`` and ``beta_fit.npz``.
+    element_effects
+        Optional long-form element table written as Parquet.
+    guide_posteriors, guide_efficacy
+        Optional guide-level arrays.
+
+    Returns
+    -------
+    pathlib.Path
+        The bundle directory.
+
+    Notes
+    -----
+    Existing files with the standard bundle names are overwritten. This
+    low-level writer does not perform the non-empty-directory check used by
+    :meth:`perturbo.PerTurboModel.save`.
+    """
     bundle_dir = Path(out_dir)
     bundle_dir.mkdir(parents=True, exist_ok=True)
     mdata.write_h5mu(bundle_dir / "mdata.h5mu")
@@ -491,6 +640,36 @@ def _load_light_bundle_mdata(root: Path, metadata: dict[str, Any], source_data: 
 
 
 def load_fit_bundle(bundle_dir: str | Path, *, source_data: Any | None = None) -> dict[str, Any]:
+    """Load a complete or light fitted-model bundle.
+
+    Parameters
+    ----------
+    bundle_dir
+        Directory containing ``metadata.json`` and fitted array archives.
+    source_data
+        Optional AnnData or MuData source for a light bundle. If omitted, the
+        source path recorded in metadata is opened, backed when supported.
+
+    Returns
+    -------
+    dict
+        Metadata, reconstructed ``mdata``, control and beta arrays, optional
+        element effects, guide posteriors, and guide efficacy.
+
+    Raises
+    ------
+    FileNotFoundError
+        If required metadata or a referenced light-bundle source is missing.
+    ValueError
+        If a light source has an unsupported extension, incompatible genes or
+        cell counts, or invalid saved size factors.
+
+    Notes
+    -----
+    Complete bundles load ``mdata.h5mu`` from disk. Light bundles reconstruct
+    the registered data from ``source_data`` or recorded source metadata and
+    restore the exact saved size-factor vector when present.
+    """
     root = Path(bundle_dir)
     metadata = read_json(root / "metadata.json")
     mdata_path = root / "mdata.h5mu"

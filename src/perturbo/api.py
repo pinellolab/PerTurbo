@@ -160,16 +160,21 @@ def fit_from_path(
     crt_pool: str | None = None,
     crt_only: bool = False,
 ) -> PerTurboModel | None:
-    """Run the CLI-equivalent end-to-end fit from Python.
+    """Run the file-oriented fitting workflow from Python.
 
-    Keyword names are snake_case versions of the CLI flags. The implementation
-    delegates to ``perturbo.api.main`` so Python and CLI fits share the same
-    validation, loading, chunking, fitting, output, and light-bundle behavior.
+    Keyword names are snake_case versions of the CLI flags. The Python defaults
+    are not identical to the CLI signature defaults; in particular, this
+    function declares ``crt=False``, ``step_size=0.003``, and
+    ``size_factor_mode="infer"``. A false ``crt`` value leaves the CLI's
+    automatic CRT selection active rather than explicitly passing ``--no-crt``.
+    The implementation delegates to ``perturbo.api.main``, so Python and CLI
+    fits share validation, loading, chunking, fitting, output, and light-bundle
+    behavior.
 
     ``crt=True`` also runs the conditional randomization test against the
     stage-one baseline and adds ``crt_*`` columns to ``element_effects.parquet``.
-    ``crt_tail_families=None`` keeps the CLI default (the moment-fitted
-    families); pass ``("saddlepoint",)`` with ``crt_mechanism="propensity"`` and
+    ``crt_tail_families=None`` keeps the CLI default tail family; pass
+    ``("saddlepoint",)`` with ``crt_mechanism="propensity"`` and
     ``crt_saddlepoint_only=True`` for the exact-CGF saddlepoint without any
     resampling. An empty tuple switches the continuous tails off. ``crt_pool``
     selects the resampling pool (``'control-anchored'`` for low MOI,
@@ -182,6 +187,233 @@ def fit_from_path(
     table restricted to those pairs is written beside the transcriptome-wide
     one, with Benjamini-Hochberg recomputed within that smaller family, so a
     single run yields both a cis-scale comparison and the full analysis.
+
+    Parameters
+    ----------
+    input_path
+        Path to an AnnData ``.h5ad`` or MuData ``.h5mu`` file.
+    out_dir
+        Output directory. It is created if necessary; existing files with the
+        standard output names may be replaced.
+    pairs_to_test
+        Optional CSV, TSV, or Parquet file with ``element`` and ``gene``
+        columns. It requests a second restricted table without restricting the
+        fit or transcriptome-wide hypothesis family.
+    modality_key
+        MuData modality containing expression counts. Leave unset for AnnData.
+    perturbation_key
+        Expression ``obs`` column with one perturbation label per cell. Required
+        when ``perturbation_modality_key`` is absent.
+    perturbation_modality_key
+        MuData modality containing a cell-by-guide or cell-by-perturbation
+        matrix.
+    perturbation_layer
+        Optional layer in the perturbation modality. ``None`` uses its ``X``.
+    perturbation_element_varm_key
+        Optional perturbation ``varm`` key containing a guide-by-element binary
+        map. When present, effects are fit and reported at element level.
+    perturbation_element_names_uns_key
+        Perturbation ``uns`` key containing element labels when the mapping has
+        no labeled columns.
+    control_substring
+        Regular-expression substring identifying control labels, guides, or
+        mapped elements. It is required for one-label-per-cell input and for a
+        control-anchored CRT.
+    max_control_cells
+        Maximum control cells used in stage one. Larger pools are subsampled
+        without replacement with a fixed seed.
+    continuous_covariates
+        Expression ``obs`` columns adjusted as continuous covariates. Count-like
+        values receive ``log1p`` before z-scoring; other values are z-scored.
+    batch_covariate
+        Optional categorical expression ``obs`` column, one-hot encoded after
+        dropping the most frequent control level.
+    size_factor_key
+        Expression ``obs`` column containing already transformed, centered log
+        offsets. Do not use this for raw library counts.
+    library_size_key
+        Expression ``obs`` column containing raw positive integer library sizes.
+        PerTurbo applies ``log1p`` and a shared control-derived center.
+    size_factor_mode
+        ``"infer"`` estimates latent size factors, ``"observed"`` conditions on
+        supplied or count-derived offsets, and ``"none"`` fixes offsets to zero.
+        This facade defaults to ``"infer"``.
+    gene_name_key
+        Optional expression ``var`` column used as unique gene labels;
+        otherwise ``var_names`` are used.
+    clip_gene_expression_percentile
+        Percentile used to derive per-gene count thresholds. ``100`` disables
+        threshold-based handling. ``censored_nb`` requires a value below 100.
+    gene_outlier_action
+        ``"none"`` or ``"filter_cells"``. Filtering removes cells whose number
+        of genes above their thresholds reaches ``outlier_cell_min_genes``.
+    gene_outlier_threshold_floor
+        Minimum integer threshold after per-gene percentile estimation.
+    winsorize_gene_expression_outliers
+        Cap remaining counts at the per-gene thresholds after optional cell
+        filtering.
+    outlier_cell_min_genes
+        Minimum outlier-gene burden for ``gene_outlier_action="filter_cells"``.
+        It must be positive when filtering and zero otherwise.
+    device
+        JAX device specification such as ``"cpu"``, ``"gpu"``, or ``"gpu:1"``.
+        ``None`` uses JAX's default device.
+    prior
+        Perturbation-effect prior, ``"normal"`` or ``"cauchy"``.
+    likelihood
+        Observation model: ``"nb"``/``"negbin"``, ``"censored_nb"``,
+        ``"lognormal_nb"``, or ``"mixture_nb"``.
+    guide_effect_strategy
+        ``"shared"`` gives guides targeting one element the same effect;
+        ``"relative"`` learns guide-by-gene relative efficiencies and requires
+        a guide-to-element map.
+    guide_activity_mode
+        Guide activity interpretation. ``"always_on"`` is supported;
+        ``"absolute"`` is accepted by argument parsing but rejected by the
+        current stage-two SVI implementation.
+    guide_random_effects
+        Fit hierarchical gene-wise guide variability in stage one and carry
+        that calibration into stage two.
+    num_steps
+        Shared raw SVI update count for both stages. Step- and epoch-based
+        schedules cannot be mixed. If every schedule argument is ``None``, the
+        CLI uses 500 control updates and 500 effect updates.
+    num_epochs
+        Shared number of data passes for both stages. With full-batch SVI, one
+        epoch is one update; with minibatching, steps use ceiling division by
+        the effective batch size.
+    num_steps_control, num_steps_betas
+        Stage-specific raw update counts. Both must be provided together and
+        cannot be combined with a shared or epoch-based schedule.
+    num_epochs_control, num_epochs_betas
+        Stage-specific data-pass counts. Both must be provided together and
+        cannot be combined with a shared or step-based schedule.
+    num_particles
+        Monte Carlo particles in the ELBO estimate. Must be at least one.
+    step_size
+        Adam learning rate for both stages. This facade defaults to ``0.003``.
+    num_factors
+        Number of shared latent factors. Zero disables factors.
+    minibatch_size
+        Shared cells per SVI update when positive. Zero requests full batch
+        unless a stage-specific value overrides it.
+    minibatch_size_control
+        Control-stage cells per update when positive; zero falls back to
+        ``minibatch_size``.
+    minibatch_size_betas
+        Effect-stage cells per update when positive; zero falls back to
+        ``minibatch_size``.
+    perturbation_chunk_size
+        Maximum perturbation elements per stage-two chunk. Zero chooses a size
+        automatically from ``max_chunk_size``. Co-occurring predictors cannot
+        be split across element chunks.
+    max_chunk_size
+        Maximum cells in an automatically constructed perturbation chunk.
+    backed
+        Open AnnData/MuData in disk-backed mode and use bounded reads where the
+        execution path supports them.
+    use_observed_size_factors
+        Backward-compatible alias forcing ``size_factor_mode="observed"``. It
+        cannot be combined with ``size_factor_mode="none"``.
+    propagate_baseline_uncertainty
+        Marginalize stage-two baseline intercept and dispersion over the
+        stage-one variational posterior rather than conditioning on medians.
+        This is unsupported for ``mixture_nb``.
+    progress
+        Show SVI progress bars. False forwards the CLI's no-progress flag.
+    progress_chunk_size
+        Positive number of full-batch SVI updates between progress refreshes.
+    single_frame
+        Compatibility option forwarded as ``--single-frame``. The current CLI
+        does not read this parsed value; standard outputs remain Parquet tables.
+    save_model_params
+        Write the light, simulation-ready model bundle in ``out_dir``.
+    return_model
+        Load and return :class:`perturbo.PerTurboModel` after the files are
+        written. This requires ``save_model_params=True``.
+    crt
+        If true, explicitly request the conditional randomization test and
+        forward the CRT options below. If false, no ``--no-crt`` flag is sent;
+        the CLI may still enable the CRT automatically when its configuration
+        is supported.
+    crt_num_resamples
+        Resampled null assignments for empirical and moment-fitted tails. Must
+        be at least one, including when the saddlepoint-only path draws none.
+    crt_seed
+        Random seed for CRT permutation or propensity resampling.
+    crt_gene_chunk_size
+        Genes per inner CRT score block. Smaller blocks reduce peak score-gather
+        memory without changing the hypothesis family.
+    crt_max_gather_gib
+        Maximum estimated GiB for a CRT score gather before the implementation
+        reduces its internal gene or resample block.
+    crt_tail_families
+        Continuous-null families. ``None`` keeps the CLI default
+        (``"saddlepoint"``); an empty tuple disables continuous tails. Other
+        supported families include moment-fitted ``"skew_normal"`` and
+        ``"student_t"``.
+    crt_mechanism
+        ``"permutation"`` keeps the target count fixed within its pool;
+        ``"propensity"`` uses Bernoulli draws from fitted cell selection
+        probabilities. This facade defaults to ``"permutation"``.
+    crt_saddlepoint_only
+        Request no resampling pass and report the propensity-model saddlepoint
+        tail alone. A false value is not forwarded explicitly, so the CLI may
+        still activate its automatic saddlepoint-only default.
+    crt_screen_p_value
+        Evaluate the saddlepoint only for pairs whose Pearson-III screen
+        p-value is at or below this threshold. Must lie in ``(0, 1]``.
+    crt_two_sided
+        Saddlepoint two-sided convention: ``"equal-tail"`` doubles the tail on
+        the observed side; ``"symmetric"`` uses an absolute-score event.
+    crt_baseline_step_tolerance
+        Maximum permitted per-gene Newton step, in nats, between the supplied
+        stage-one baseline and the control-cell null mode. ``None`` keeps the
+        CLI default.
+    crt_allow_unconverged_baseline
+        Request warning instead of failure when the baseline null-mode check
+        exceeds tolerance. False is not forwarded explicitly in this facade,
+        so the CLI's true default remains in effect.
+    crt_polish_baseline
+        Request Fisher-scoring refinement of stage-one nuisance coefficients at
+        fixed dispersion before the CRT. False is not forwarded explicitly, so
+        the CLI's true default remains in effect.
+    crt_pool
+        ``"control-anchored"`` tests each low-MOI target among its cells and
+        controls; ``"all-cells"`` runs the high-MOI marginal propensity
+        saddlepoint; ``None`` lets the CLI choose from realized guide load.
+    crt_only
+        Skip stage-two effect fitting and emit CRT columns with missing effect
+        estimates. This option is currently forwarded only when ``crt=True``.
+
+    Returns
+    -------
+    PerTurboModel or None
+        A loaded model when ``return_model=True``; otherwise ``None`` after all
+        requested files are written.
+
+    Raises
+    ------
+    FileNotFoundError
+        If an input or requested-pairs path does not exist.
+    KeyError
+        If a requested modality, layer, metadata column, or mapping key is
+        absent.
+    ValueError
+        If input counts, names, shapes, schedules, or option combinations fail
+        validation, or if ``return_model`` is requested without saved params.
+
+    Notes
+    -----
+    Boolean CRT options are not tri-state in this Python signature. Only
+    ``crt=True`` forwards the CRT configuration block, and several false values
+    omit a negative CLI flag. The descriptions above state the resulting
+    behavior; set scientifically important options explicitly and inspect the
+    recorded run metadata.
+
+    This facade does not expose every current CLI switch. In particular,
+    gene-axis stage-two chunking and perturbation-specific dispersion are CLI
+    options in this release.
     """
     argv = ["--input", str(input_path), "--out-dir", str(out_dir)]
     _append_cli_arg(argv, "--pairs-to-test", pairs_to_test)

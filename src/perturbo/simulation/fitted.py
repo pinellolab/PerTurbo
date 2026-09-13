@@ -269,6 +269,31 @@ def simulate_data_from_trained_model(
     count sampler (and the guide random effects, from ``seed + 1``); callers that
     simulate several datasets from one model should vary it, otherwise every
     dataset shares one set of underlying draws.
+
+    Parameters
+    ----------
+    model
+        Trained or loaded model with both control and perturbation fits.
+    guide_obs
+        Cell-by-guide observation matrix.
+    guide_by_element
+        Guide-by-element mapping matrix.
+    element_by_gene_lfc
+        Element-by-model-gene log fold changes.
+    guide_efficacy
+        One weight per guide.
+    read_depth_adjust_factor
+        Multiplicative adjustment applied to source-cell library sizes.
+    gene_indices, cell_indices
+        Optional indices selecting model genes and source cells.
+    seed
+        Seed for count sampling; guide random effects use ``seed + 1``.
+
+    Returns
+    -------
+    mudata.MuData
+        RNA counts and supplied guide observations, configured with the trained
+        model's modality and metadata keys.
     """
     del module_kwargs, module_init_kwargs, param_values, accelerator, device
     if model.beta_fit is None or model.control_fit is None:
@@ -389,6 +414,10 @@ def simulate_data_from_trained_model(
 
 
 def save_simulated_mudata(mdata: md.MuData, path: str | Path) -> Path:
+    """Write simulated MuData to H5MU, creating parent directories.
+
+    Returns the normalized destination :class:`pathlib.Path`.
+    """
     out_path = Path(path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     mdata.write_h5mu(out_path)

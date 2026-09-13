@@ -259,7 +259,56 @@ class _ModuleCompat:
 
 
 class PerTurboModel:
-    """Notebook-friendly fitted model with a PerTurbo-like public workflow surface."""
+    """Two-stage PerTurbo model for an in-memory registered MuData object.
+
+    Parameters
+    ----------
+    mdata
+        MuData registered with :func:`perturbo.setup_mudata`.
+    setup
+        Registration to use. If omitted, it is read from ``mdata``.
+    likelihood
+        Count likelihood name. Supported choices depend on the requested model
+        features; ``"nb"`` is the standard negative-binomial model.
+    effect_prior_dist
+        Prior for perturbation effects, ``"normal"`` or ``"cauchy"``.
+    efficiency_mode
+        Compatibility name used to infer a guide strategy when
+        ``guide_effect_strategy`` is omitted.
+    guide_effect_strategy
+        Guide sharing strategy: ``"shared"`` or ``"relative"``.
+    guide_activity_mode
+        Guide activity model; currently validated by the core model API.
+    n_factors
+        Number of latent factors, or ``None`` to disable them.
+    clip_gene_expression_percentile
+        Optional percentile used to identify expression outliers.
+    winsorize_gene_expression
+        Whether to clip expression counts at the fitted gene thresholds.
+    gene_outlier_threshold_floor
+        Minimum count threshold used by expression-outlier handling.
+    count_censoring_percentile
+        Censoring threshold percentile for a censored likelihood.
+    guide_random_effects
+        Whether to fit guide-level random effects.
+    fit_perturbation_dispersion
+        Whether to fit perturbation-specific excess inverse dispersion.
+    perturbation_dispersion_prior_rate
+        Rate of its exponential prior.
+    fit_guide_efficacy
+        Compatibility option recorded in saved metadata.
+    library_size_center_log_mean
+        Optional saved centering constant for normalized offsets.
+    svi_config
+        Variational inference configuration. The model API defaults to an SVI
+        step size of ``0.01``.
+
+    Notes
+    -----
+    Construction does not fit the model. Call :meth:`train`. The object stores
+    the supplied MuData by reference and later fitting reads its registered
+    modalities and metadata.
+    """
 
     def __init__(
         self,
@@ -315,10 +364,47 @@ class PerTurboModel:
 
     @classmethod
     def setup_mudata(cls, mdata, **kwargs: Any) -> MuDataSetup:
+        """Register data through :func:`perturbo.setup_mudata`.
+
+        Parameters
+        ----------
+        mdata
+            MuData to register in place.
+        **kwargs
+            Registration arguments accepted by :func:`perturbo.setup_mudata`,
+            including the required ``modalities`` mapping.
+
+        Returns
+        -------
+        MuDataSetup
+            Registration stored on the supplied object.
+        """
         return setup_mudata(mdata, **kwargs)
 
     @classmethod
     def load(cls, bundle_dir: str | Path, adata=None) -> "PerTurboModel":
+        """Restore a fitted model from a complete or light bundle.
+
+        Parameters
+        ----------
+        bundle_dir
+            Directory written by :meth:`save` or the file workflow.
+        adata
+            Optional source AnnData or MuData for a light bundle. Complete
+            bundles use their stored ``mdata.h5mu``.
+
+        Returns
+        -------
+        PerTurboModel
+            Model with fitted control, effect, history, and available guide
+            summaries restored.
+
+        Raises
+        ------
+        FileNotFoundError, ValueError
+            If bundle files or a required light-bundle source are unavailable or
+            incompatible.
+        """
         bundle_path = Path(bundle_dir)
         is_light_bundle = not (bundle_path / "mdata.h5mu").exists()
         loaded = load_fit_bundle(bundle_path, source_data=adata if is_light_bundle else None)
@@ -432,6 +518,7 @@ class PerTurboModel:
         return effect_loc, effect_scale, guide_names, parent_elements
 
     def view_anndata_setup(self) -> dict[str, Any]:
+        """Print and return the active MuData registration as a dictionary."""
         payload = self.setup.to_json_dict()
         print(payload)
         return payload
@@ -451,10 +538,41 @@ class PerTurboModel:
         beta_epochs: int | None = None,
         **_trainer_kwargs: Any,
     ) -> "PerTurboModel":
-        """Fit the control and perturbation-effect stages.
+        """Fit the control baseline and perturbation-effect stages.
 
-        `max_epochs`, `control_epochs`, and `beta_epochs` are true dataset passes.
-        Use `steps`, `control_steps`, or `beta_steps` to request raw SVI step counts.
+        Parameters
+        ----------
+        max_epochs
+            Dataset passes requested for both stages unless stage-specific epoch
+            arguments are supplied.
+        lr
+            SVI step size override.
+        batch_size
+            Cells sampled per SVI step. ``None`` or ``0`` uses every cell.
+        accelerator
+            Device family, such as ``"cpu"`` or ``"gpu"``.
+        device
+            Optional specific device selector.
+        steps
+            Raw SVI steps for both stages unless stage-specific steps are set.
+        control_steps, beta_steps
+            Raw SVI steps for the baseline and effect stages.
+        control_epochs, beta_epochs
+            Dataset passes for the baseline and effect stages.
+        **_trainer_kwargs
+            Accepted for trainer-interface compatibility and otherwise ignored.
+
+        Returns
+        -------
+        PerTurboModel
+            This fitted instance.
+
+        Notes
+        -----
+        Epoch arguments are converted to steps using cell count and batch size.
+        This method updates ``control_fit``, ``beta_fit``, normalized-offset
+        centering, guide efficacy, covariate transforms, and ``history``. It fits
+        effects only and does not run the conditional randomization test.
         """
         device_spec = _infer_device(accelerator, device)
         if lr is not None:
@@ -581,6 +699,21 @@ class PerTurboModel:
         return self.control_fit, self.beta_fit
 
     def posterior_medians(self) -> PosteriorMedians:
+        """Return named fitted posterior medians as arrays.
+
+        Returns
+        -------
+        PosteriorMedians
+            Mapping containing baseline, dispersion, element effects with shape
+            ``(n_elements, n_genes)``, size factors, guide efficacy, and optional
+            model-specific quantities.
+
+        Raises
+        ------
+        RuntimeError
+            If the model has not been trained or required guide efficacy is
+            unavailable.
+        """
         control_fit, beta_fit = self._require_fit()
         values = {
             "beta_0": np.asarray(control_fit.beta_0),
@@ -619,6 +752,20 @@ class PerTurboModel:
 
     @property
     def guide_efficacy(self) -> np.ndarray:
+        """Guide efficacy derived from the fitted guide-sharing strategy.
+
+        Returns
+        -------
+        numpy.ndarray
+            One value per guide for the shared strategy, or the gene-averaged
+            fitted relative efficiency for the relative strategy.
+
+        Raises
+        ------
+        RuntimeError
+            If the model is unfitted or a legacy bundle lacks the required guide
+            posterior quantities.
+        """
         if self._guide_efficacy is None:
             _control_fit, beta_fit = self._require_fit()
             self._guide_efficacy = _guide_efficacy_from_model(
@@ -629,6 +776,18 @@ class PerTurboModel:
         return np.asarray(self._guide_efficacy)
 
     def posterior_parameter_table(self):
+        """Return fitted parameters grouped with available location and scale arrays.
+
+        Returns
+        -------
+        dict
+            Mapping of parameter names to ``PosteriorParameter`` records.
+
+        Raises
+        ------
+        RuntimeError
+            If the model has not been trained.
+        """
         control_fit, beta_fit = self._require_fit()
         params = {
             "beta_0": control_fit.beta_0,
@@ -662,6 +821,14 @@ class PerTurboModel:
         return extract_parameter_table(params)
 
     def get_element_effects(self) -> pd.DataFrame:
+        """Return a long element-by-gene posterior summary table.
+
+        Returns
+        -------
+        pandas.DataFrame
+            Columns ``element``, ``gene``, ``loc``, ``scale``, ``z_value``, and
+            the historically named ``q_value`` normal-tail diagnostic.
+        """
         _control_fit, beta_fit = self._require_fit()
         return build_element_effects_df(
             effect_loc=np.asarray(beta_fit.posterior_mean),
@@ -671,6 +838,19 @@ class PerTurboModel:
         )
 
     def get_guide_effects(self) -> pd.DataFrame:
+        """Return a long guide-by-gene posterior summary table.
+
+        Returns
+        -------
+        pandas.DataFrame
+            Guide, parent element, gene, location, scale, z-value, and the
+            historically named ``q_value`` normal-tail diagnostic.
+
+        Raises
+        ------
+        RuntimeError
+            If the model is unfitted or no guide-to-element map is registered.
+        """
         payload = self._guide_effect_payload()
         if payload is None:
             raise RuntimeError("Guide effects are unavailable because no guide-to-element mapping is registered.")
@@ -690,6 +870,30 @@ class PerTurboModel:
         save_anndata: bool = True,
         overwrite: bool = False,
     ) -> Path:
+        """Persist this fitted model as a complete bundle.
+
+        Parameters
+        ----------
+        out_dir
+            Destination bundle directory.
+        save_anndata
+            Recorded in metadata for compatibility. The current complete-bundle
+            writer stores the registered MuData as ``mdata.h5mu``.
+        overwrite
+            Permit writing into an existing non-empty directory.
+
+        Returns
+        -------
+        pathlib.Path
+            The bundle directory.
+
+        Raises
+        ------
+        RuntimeError
+            If the model has not been trained.
+        FileExistsError
+            If the destination is non-empty and ``overwrite`` is false.
+        """
         self._require_fit()
         out_path = Path(out_dir)
         if out_path.exists() and any(out_path.iterdir()) and not overwrite:

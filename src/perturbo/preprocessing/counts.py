@@ -15,6 +15,19 @@ BACKED_ROW_CHUNK_SIZE = 50_000
 
 
 def to_dense_array(x) -> np.ndarray:
+    """Convert an array or sparse matrix to a dense NumPy array.
+
+    Parameters
+    ----------
+    x : numpy.ndarray or scipy.sparse.spmatrix
+        Input to materialize. Slice backed matrices before calling this helper.
+
+    Returns
+    -------
+    numpy.ndarray
+        Dense array with the input shape. An existing dense array can be
+        returned without copying; sparse inputs allocate dense storage.
+    """
     if hasattr(x, "toarray"):
         return np.asarray(x.toarray())
     if hasattr(x, "A"):
@@ -49,17 +62,47 @@ def compute_gene_clip_thresholds(
     max_histogram_bytes: int = 2 * 1024 * 1024 * 1024,
     row_chunk_size: int | None = None,
 ) -> np.ndarray:
-    """Compute per-gene clip thresholds at the given percentile.
+    """Compute integer gene thresholds from cell-wise count percentiles.
 
-    When ``row_chunk_size`` is set, the matrix is read in row chunks and
-    thresholds are computed via integer histograms — suitable for backed
-    (disk-resident) matrices where column slicing is expensive.
+    Parameters
+    ----------
+    matrix : numpy.ndarray or scipy.sparse.spmatrix
+        Nonnegative integer counts with shape ``(n_cells, n_genes)``.
+        A row-sliceable backed matrix is supported with ``row_chunk_size``.
+    percentile : float
+        Percentile in ``(0, 100]``, computed across all cells including zeros.
+        The linear quantile is rounded upward to an integer.
+    threshold_floor : int, default: 2
+        Nonnegative minimum threshold for every gene.
+    target_dense_bytes : int, default: 67108864
+        Target byte budget for a dense working gene block. This is not a cap
+        on total process memory; at least one gene is processed.
+    max_histogram_bytes : int, default: 2147483648
+        Histogram budget in row-chunked mode. Genes that cannot be represented
+        together require additional passes over the matrix. Other working
+        arrays, including cumulative histograms, need additional memory.
+    row_chunk_size : int or None, default: None
+        Positive number of rows per read. When set, use integer histograms
+        suitable for backed input. Otherwise read gene blocks and use NumPy
+        quantiles directly.
 
-    ``max_histogram_bytes`` bounds the resident histogram and therefore the
-    number of passes over the matrix: a backed row slice reads every gene
-    regardless of which columns are wanted afterwards, so genes whose
-    histograms cannot be held together cost another full read. At the default
-    2 GiB a transcriptome-scale panel needs a single pass.
+    Returns
+    -------
+    numpy.ndarray
+        ``int32`` thresholds of shape ``(n_genes,)`` in the input gene order.
+
+    Raises
+    ------
+    ValueError
+        If the percentile is missing, nonfinite, or outside ``(0, 100]``, or
+        the threshold floor is negative.
+
+    Notes
+    -----
+    The row-chunked histogram path caps input counts at 10,000. Thresholds
+    above that count are therefore capped before applying the floor. Use
+    integer counts; fractional values are cast to integers on this path.
+    The input matrix is not modified.
     """
     percentile = _validate_clip_percentile(percentile)
     if percentile is None:
@@ -164,6 +207,32 @@ def count_gene_outliers_per_cell(
     *,
     row_chunk_size: int | None = None,
 ) -> np.ndarray:
+    """Count genes strictly above their thresholds in each cell.
+
+    Parameters
+    ----------
+    matrix : numpy.ndarray or scipy.sparse.spmatrix
+        Counts with shape ``(n_cells, n_genes)``. Canonical sparse matrices
+        should contain no duplicate entries; implicit zeros are assumed not
+        to exceed the nonnegative thresholds.
+    thresholds : numpy.ndarray
+        Nonnegative thresholds of shape ``(n_genes,)`` in matrix gene order.
+        ``None`` is not accepted.
+    row_chunk_size : int or None, default: None
+        Positive rows per read for backed input; otherwise use the matrix
+        directly. Sparse inputs are compared without densifying.
+
+    Returns
+    -------
+    numpy.ndarray
+        ``int32`` counts of shape ``(n_cells,)``. Values equal to a threshold
+        are not counted. Neither input is modified.
+
+    Raises
+    ------
+    ValueError
+        If thresholds are missing or do not match the gene axis.
+    """
     if thresholds is None:
         raise ValueError("thresholds must not be None when counting gene outliers per cell.")
 
@@ -206,6 +275,28 @@ def count_gene_outliers_per_cell(
 
 
 def winsorize_counts_to_gene_thresholds(counts: np.ndarray, thresholds: np.ndarray | None) -> np.ndarray:
+    """Cap a dense count array at aligned gene-specific thresholds.
+
+    Parameters
+    ----------
+    counts : numpy.ndarray
+        Dense counts of shape ``(n_cells, n_genes)``.
+    thresholds : numpy.ndarray or None
+        Upper cutoffs of shape ``(n_genes,)`` in count-column order.
+        ``None`` disables clipping.
+
+    Returns
+    -------
+    numpy.ndarray
+        Elementwise minimum of counts and thresholds, with the same shape.
+        Clipping returns a new array without modifying counts. When thresholds
+        are ``None``, the original object is returned unchanged.
+
+    Raises
+    ------
+    ValueError
+        If a provided threshold array does not match the gene axis.
+    """
     if thresholds is None:
         return counts
     arr = np.asarray(counts)

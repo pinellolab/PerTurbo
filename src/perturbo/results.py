@@ -20,6 +20,20 @@ from ._statistics import (
 
 @dataclass(frozen=True)
 class PosteriorParameter:
+    """One fitted parameter and its available variational summaries.
+
+    Attributes
+    ----------
+    name
+        NumPyro parameter or sample-site name.
+    value
+        Fitted value array in the site's original shape.
+    loc, scale
+        Optional variational location and scale arrays. Their interpretation
+        depends on the site's constraint transform; they are not automatically
+        effect coefficients on the natural-log expression scale.
+    """
+
     name: str
     value: np.ndarray
     loc: np.ndarray | None = None
@@ -27,7 +41,15 @@ class PosteriorParameter:
 
 
 class PosteriorMedians(Mapping[str, np.ndarray]):
-    """Mapping-like posterior median accessor."""
+    """Read-only mapping interface over named posterior median arrays.
+
+    Parameters
+    ----------
+    values
+        Dictionary of site names and array-like median values. Construction
+        converts values with ``numpy.asarray`` without guaranteeing copies.
+        Arrays retrieved from the mapping should be treated as read-only.
+    """
 
     def __init__(self, values: dict[str, np.ndarray]):
         self._values = {key: np.asarray(value) for key, value in values.items()}
@@ -42,6 +64,7 @@ class PosteriorMedians(Mapping[str, np.ndarray]):
         return len(self._values)
 
     def to_dict(self) -> dict[str, np.ndarray]:
+        """Return a new dictionary whose arrays may share the stored data."""
         return {key: np.asarray(value) for key, value in self._values.items()}
 
 
@@ -52,6 +75,13 @@ def build_element_effects_df(
     element_names: list[str],
     gene_names: list[str],
 ) -> pd.DataFrame:
+    """Build the legacy long element-by-gene posterior table.
+
+    ``effect_loc`` and ``effect_scale`` must both have shape
+    ``(n_elements, n_genes)``. Rows are element-major, then gene-minor. The
+    historical ``q_value`` column is a two-sided standard-Normal tail
+    probability and is not a multiple-testing-adjusted q-value.
+    """
     loc = np.asarray(effect_loc, dtype=float)
     scale = np.clip(np.asarray(effect_scale, dtype=float), a_min=1e-6, a_max=None)
     if loc.shape != scale.shape:
@@ -85,6 +115,12 @@ def build_guide_effects_df(
     guide_parent_elements: list[str],
     gene_names: list[str],
 ) -> pd.DataFrame:
+    """Build the legacy long guide-by-gene posterior table.
+
+    Effect arrays have shape ``(n_guides, n_genes)`` and rows are guide-major,
+    then gene-minor. ``guide_parent_elements`` must align with ``guide_names``.
+    The historical ``q_value`` is an unadjusted Normal tail probability.
+    """
     loc = np.asarray(effect_loc, dtype=float)
     scale = np.clip(np.asarray(effect_scale, dtype=float), a_min=1e-6, a_max=None)
     if loc.shape != scale.shape:
@@ -183,6 +219,13 @@ def build_standard_element_effects_df(
     columns. It exists so an additional test computed over the same grid - the
     CRT, in particular - can travel in the same table without this builder
     having to know what such a test is.
+
+    Returns
+    -------
+    pandas.DataFrame
+        Element-major, gene-minor rows with posterior summaries and optional
+        extra columns. ``empirical_p_value`` is missing if no finite
+        ``null_z_values`` are supplied.
     """
 
     return pd.concat(
@@ -215,6 +258,17 @@ def iter_standard_element_effects_frames(
 
     Blocking avoids the several full-grid float64 temporaries and Python object
     columns that a transcriptome-wide long DataFrame otherwise holds at once.
+
+    Parameters
+    ----------
+    row_block_size
+        Maximum rows yielded per frame; must be positive.
+
+    Yields
+    ------
+    pandas.DataFrame
+        Consecutive element-major, gene-minor blocks with the same schema as
+        :func:`build_standard_element_effects_df`.
     """
 
     loc = np.asarray(effect_loc)
@@ -304,7 +358,24 @@ def write_standard_element_effects_parquet(
     requested_pairs: pd.DataFrame | None = None,
     **kwargs,
 ) -> pd.DataFrame | None:
-    """Write row-major blocks and optionally retain only requested rows."""
+    """Write row-major blocks and optionally retain only requested rows.
+
+    Parameters
+    ----------
+    path
+        Destination Parquet path.
+    requested_pairs
+        Optional table with ``element`` and ``gene`` columns. It affects only
+        the returned in-memory selection; the file contains the full grid.
+    **kwargs
+        Arguments for :func:`iter_standard_element_effects_frames`.
+
+    Returns
+    -------
+    pandas.DataFrame or None
+        ``None`` without ``requested_pairs``; otherwise selected rows, with any
+        q-value columns recalculated over that restricted family.
+    """
 
     import pyarrow as pa
     import pyarrow.parquet as pq
@@ -349,6 +420,11 @@ def build_guide_efficiency_df(
     guide_efficiency_mean: np.ndarray,
     gene_names: list[str],
 ) -> pd.DataFrame:
+    """Build a long guide-by-gene efficiency table.
+
+    ``guide_efficiency_mean`` has shape ``(n_guides, n_genes)``. Rows are
+    guide-major, then gene-minor, and retain each guide's parent element.
+    """
     eff = np.asarray(guide_efficiency_mean, dtype=float)
     if eff.ndim != 2:
         raise ValueError(f"guide_efficiency_mean must be 2D (n_guides × n_genes); got shape {eff.shape}.")
@@ -378,6 +454,11 @@ def build_guide_efficiency_df(
 
 
 def extract_parameter_table(parameters: dict[str, np.ndarray]) -> dict[str, PosteriorParameter]:
+    """Group saved arrays into posterior parameter records.
+
+    Keys ending in ``_loc`` and ``_scale`` are combined under their common base
+    name. Other keys populate ``PosteriorParameter.value`` directly.
+    """
     out: dict[str, PosteriorParameter] = {}
     for name, value in parameters.items():
         arr = np.asarray(value)

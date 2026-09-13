@@ -73,6 +73,23 @@ def _normalize_likelihood_name(likelihood: str) -> str:
 
 @dataclass
 class SVIConfig:
+    """Configuration for stochastic variational inference.
+
+    Attributes
+    ----------
+    elbo
+        ELBO estimator. ``"meanfield"`` uses
+        ``numpyro.infer.TraceMeanField_ELBO``; ``"trace"`` uses
+        ``numpyro.infer.Trace_ELBO``.
+    num_particles
+        Number of Monte Carlo particles used to estimate the ELBO. The default
+        is one.
+    vectorize_particles
+        Whether NumPyro evaluates multiple particles with vectorization.
+    step_size
+        Adam learning rate. The core fitting default is ``0.01``.
+    """
+
     elbo: str = "meanfield"  # "trace" or "meanfield"
     num_particles: int = 1
     vectorize_particles: bool = True
@@ -81,6 +98,58 @@ class SVIConfig:
 
 @dataclass
 class PerTurboData:
+    """Arrays and labels consumed by the two PerTurbo fitting stages.
+
+    The cell and gene axes must remain in exactly the same order across all
+    arrays and across the control and perturbation fits. ``counts`` must contain
+    raw, finite, non-negative integer counts rather than normalized expression.
+
+    Attributes
+    ----------
+    counts
+        Count matrix with shape ``(n_cells, n_genes)``.
+    pert_id
+        Perturbation design aligned to the cell axis. A one-dimensional array
+        contains integer codes into ``pert_names``. A two-dimensional dense
+        array or :class:`~perturbo.sparse_design.IndexedDesignMatrix` has shape
+        ``(n_cells, n_perturbations)`` and supports multiple active
+        perturbations per cell.
+    pert_names
+        Perturbation or element names in design-column order.
+    gene_names
+        Gene names in count-column order.
+    cell_mask
+        Optional Boolean vector of length ``n_cells``. False entries are padded
+        cells and are excluded from the likelihood and downstream null pools.
+    size_factors
+        Optional centered log-library offsets with shape ``(n_cells, 1)``.
+        Fitting functions use these as fixed offsets only when
+        ``use_observed_size_factors=True``; otherwise they initialize latent
+        size factors.
+    covariates
+        Optional float matrix with shape ``(n_cells, n_covariates)``.
+    covariate_names
+        Covariate names in matrix-column order.
+    guide_matrix
+        Optional cell-by-guide design, dense or indexed, with shape
+        ``(n_cells, n_guides)``. Required for guide-specific effects.
+    guide_names
+        Guide names in ``guide_matrix`` column order.
+    guide_to_element
+        Optional guide-by-element mapping with shape
+        ``(n_guides, n_perturbations)``. Guide-sharing models require each
+        non-padding guide to map to exactly one element.
+    library_size_center_log_mean
+        Mean of ``log1p(library_size)`` subtracted when count-derived or raw
+        library-size offsets were created. Reuse it to keep control and analysis
+        offsets on the same scale.
+    categorical_batch_codes
+        Optional integer batch codes aligned to cells, retained for consumers
+        that need categorical strata.
+    categorical_batch_names
+        Names corresponding to ``categorical_batch_codes``.
+    """
+
     counts: jnp.ndarray
     pert_id: jnp.ndarray | IndexedDesignMatrix
     pert_names: list[str]
@@ -125,6 +194,20 @@ class _AnalysisDesignCache:
 
 @dataclass
 class BaselinePosteriorSummary:
+    """Compact variational posterior for gene-wise baseline parameters.
+
+    Attributes
+    ----------
+    beta_0_loc
+        Location of the log-mean intercept posterior, shape ``(n_genes,)``.
+    beta_0_scale
+        Positive scale of the intercept posterior, shape ``(n_genes,)``.
+    theta_log_loc
+        Location of the log-dispersion posterior, shape ``(n_genes,)``.
+    theta_log_scale
+        Positive scale of the log-dispersion posterior, shape ``(n_genes,)``.
+    """
+
     beta_0_loc: jnp.ndarray
     beta_0_scale: jnp.ndarray
     theta_log_loc: jnp.ndarray
@@ -133,6 +216,57 @@ class BaselinePosteriorSummary:
 
 @dataclass
 class ControlFit:
+    """Stage-one baseline fit on control cells.
+
+    Gene-indexed arrays use the same order as the ``PerTurboData.gene_names``
+    supplied to :func:`fit_control`. Optional fields are populated only by the
+    corresponding likelihood or model feature.
+
+    Attributes
+    ----------
+    beta_0
+        Posterior-median baseline log mean, shape ``(n_genes,)``.
+    theta
+        Posterior-median negative-binomial dispersion, shape ``(n_genes,)``.
+    noise_scale
+        Gene-wise log-normal noise scale. For other likelihoods this retains
+        the initialization value.
+    factor_loadings
+        Optional latent-factor loadings with shape
+        ``(n_factors, 1, n_genes)``.
+    factor_scores
+        Optional fitted control-cell scores with shape
+        ``(n_factors, n_control_cells, 1)``.
+    factor_center
+        Optional gene-wise center used for PCA initialization and projection.
+    pca_loadings
+        Optional PCA loadings used to initialize the latent factors, shape
+        ``(n_factors, 1, n_genes)``.
+    size_factors
+        Fitted or fixed centered log-library factors, shape
+        ``(n_control_cells, 1)``.
+    losses
+        ELBO loss for each SVI update.
+    svi_result
+        Final NumPyro SVI state.
+    baseline_posterior
+        Location/scale summary used when stage two propagates baseline
+        uncertainty.
+    pi_outlier, theta_outlier, outlier_mean_shift
+        Optional gene-wise parameters for the mixture negative-binomial model.
+    covariate_coef
+        Optional covariate coefficients with shape
+        ``(n_covariates, n_genes)``.
+    guide_random_effect_tau
+        Optional gene-wise guide random-effect scale.
+    guide_random_effect_log_tau_loc, guide_random_effect_log_tau_scale
+        Optional scalar variational parameters for the random-effect scale
+        hyperprior.
+    count_censoring_threshold
+        Optional gene-wise count threshold computed in stage one for the
+        censored negative-binomial likelihood and reused unchanged in stage two.
+    """
+
     beta_0: jnp.ndarray
     theta: jnp.ndarray
     noise_scale: jnp.ndarray
@@ -156,6 +290,39 @@ class ControlFit:
 
 @dataclass
 class BetaFit:
+    """Stage-two perturbation-effect posterior summary.
+
+    Attributes
+    ----------
+    posterior_mean
+        Variational location for element effects, shape
+        ``(n_perturbations, n_genes)``.
+    posterior_scale
+        Positive variational scale for element effects, with the same shape.
+    z_values
+        Element-effect location divided by scale.
+    losses
+        ELBO loss for each SVI update.
+    svi_result
+        Final NumPyro SVI state.
+    guide_effect_mean, guide_effect_scale, guide_effect_z_values
+        Optional guide-specific effect summaries, shape
+        ``(n_guides, n_genes)``. Shared guide effects need not duplicate the
+        element arrays and can therefore be absent.
+    guide_relative_efficiency_mean, guide_relative_efficiency_scale
+        Optional guide efficiencies for the ``"relative"`` strategy, shape
+        ``(n_guides, n_genes)``.
+    guide_offset_mean, guide_offset_scale
+        Optional additive guide offsets for guide models that expose them,
+        shape ``(n_guides, n_genes)``.
+    dispersion_excess_inverse
+        Optional element-by-gene perturbation-specific excess inverse
+        dispersion.
+    guide_dispersion_excess_inverse
+        Optional guide-by-gene excess inverse dispersion when guide-level input
+        is retained.
+    """
+
     posterior_mean: jnp.ndarray
     posterior_scale: jnp.ndarray
     z_values: jnp.ndarray
@@ -197,6 +364,36 @@ class _PerturbationChunk:
 
 @dataclass
 class CovariateTransformState:
+    """Fitted preprocessing state for a reusable covariate design matrix.
+
+    Fit this state on control-cell metadata and apply it to analysis-cell
+    metadata so imputation, scaling, batch reference, feature order, and dropped
+    constant columns are identical in both fitting stages.
+
+    Attributes
+    ----------
+    continuous_covariates
+        Deduplicated continuous columns in requested order.
+    batch_covariate
+        Optional categorical batch column.
+    continuous_medians
+        Training-set medians used to impute non-finite continuous values.
+    continuous_transforms
+        Per-column transform names: ``"zscore"`` or ``"log1p+zscore"``.
+    continuous_means, continuous_stds
+        Training-set moments applied after imputation and optional ``log1p``.
+    batch_reference
+        Most frequent training batch, omitted from dummy variables.
+    batch_levels
+        Non-reference batch levels in deterministic feature order.
+    all_feature_names
+        Candidate feature names before constant columns are removed.
+    feature_names
+        Retained design columns in output order.
+    dropped_features
+        Zero-variance candidate columns excluded from the design.
+    """
+
     continuous_covariates: list[str]
     batch_covariate: str | None
     continuous_medians: dict[str, float]
@@ -850,6 +1047,41 @@ def fit_covariate_transform(
     continuous_covariates: list[str] | None,
     batch_covariate: str | None,
 ) -> CovariateTransformState:
+    """Fit covariate preprocessing on a reference set of cells.
+
+    Numeric values that resemble non-negative counts are transformed with
+    ``log1p`` before standardization; other numeric values are standardized
+    directly. Non-finite continuous entries are replaced with the training
+    median. The most frequent batch is the reference category, ties following
+    pandas' value-count order. Constant columns are recorded and removed.
+
+    Parameters
+    ----------
+    obs
+        Cell metadata whose rows define the reference population, normally the
+        control cells used in stage one.
+    continuous_covariates
+        Names of numeric ``obs`` columns. Duplicate names are ignored after
+        their first occurrence. Pass ``None`` for no continuous covariates.
+    batch_covariate
+        Optional categorical ``obs`` column. ``None``, ``""``, and ``"None"``
+        disable batch encoding. Missing values form a ``"__missing__"`` level.
+
+    Returns
+    -------
+    CovariateTransformState
+        Immutable-by-convention preprocessing statistics and feature order for
+        :func:`apply_covariate_transform`.
+
+    Raises
+    ------
+    KeyError
+        If a requested metadata column is absent.
+    ValueError
+        If a continuous column has no numeric values, no features were
+        requested, or every resulting feature has zero variance.
+    """
+
     continuous = _dedupe_preserve_order(continuous_covariates)
     batch_col = None if batch_covariate in (None, "", "None") else str(batch_covariate)
 
@@ -929,6 +1161,34 @@ def apply_covariate_transform(
     obs: pd.DataFrame,
     transform_state: CovariateTransformState,
 ) -> tuple[np.ndarray, list[str]]:
+    """Apply a fitted covariate transform without refitting its statistics.
+
+    Parameters
+    ----------
+    obs
+        Cell metadata to transform. Rows are preserved in their current order.
+    transform_state
+        State returned by :func:`fit_covariate_transform`, typically fitted on
+        control cells. New batch labels absent during fitting produce zeros for
+        all retained batch indicators.
+
+    Returns
+    -------
+    matrix
+        ``float32`` array with shape ``(n_cells, n_covariates)``.
+    feature_names
+        Column labels in exactly the same order as ``matrix``.
+
+    Raises
+    ------
+    KeyError
+        If a required source column is absent.
+    ValueError
+        If ``transform_state`` is missing or contains an unsupported transform.
+    RuntimeError
+        If the saved retained-feature list cannot be reconstructed.
+    """
+
     if transform_state is None:
         raise ValueError("transform_state must be provided.")
 
@@ -1922,6 +2182,101 @@ def load_controls(
     infer_control_guides: bool = False,
     only_control_guides: bool = False,
 ) -> PerTurboData | tuple[PerTurboData, CovariateTransformState | None]:
+    """Load and prepare control cells for stage-one fitting.
+
+    The expression matrix is read from the selected AnnData modality's ``X``.
+    It must contain raw, finite, non-negative integer counts. All returned cell
+    arrays share the selected control-cell order, and all gene-indexed arrays
+    follow the expression ``var`` order (or ``gene_name_key`` labels).
+
+    Parameters
+    ----------
+    data
+        :class:`anndata.AnnData` or :class:`mudata.MuData` input.
+    perturbation_key
+        ``obs`` column containing one perturbation label per cell. Required for
+        AnnData-style labels and ignored when ``perturbation_modality_key`` is
+        used.
+    control_selector
+        Control definition. For ``obs`` labels, a string is a regular-expression
+        substring matched against ``obs[perturbation_key]``; a callable receives
+        the selected ``obs`` frame; and an iterable is a Boolean cell mask. For
+        a perturbation modality, the callable receives guide ``var`` and an
+        iterable masks guide columns; strings match guide or mapped-element
+        names. ``None`` selects all cells unless control guides are inferred.
+    modality_key
+        Expression modality in MuData. Leave unset for AnnData.
+    perturbation_modality_key
+        MuData modality containing a cell-by-guide or cell-by-perturbation
+        matrix. Its cells are aligned to the expression modality by name.
+    perturbation_layer
+        Optional layer in the perturbation modality; ``None`` uses ``X``.
+    perturbation_element_varm_key
+        Optional guide ``varm`` key containing a guide-by-element mapping. It is
+        used to recognize controls through element names when requested.
+    perturbation_element_names_uns_key
+        ``uns`` key holding element names when the guide-to-element mapping has
+        no labeled columns.
+    max_control_cells
+        Maximum controls to retain. Larger pools are subsampled without
+        replacement using a fixed seed, then restored to source-cell order.
+        Pass ``None`` to keep every selected control.
+    size_factor_key
+        ``obs`` column containing an already transformed, centered log offset.
+        These values are not re-centered. Do not pass raw library sizes here.
+    library_size_key
+        ``obs`` column containing positive integer library sizes. Values become
+        ``log1p(library_size)`` minus their control-cell mean. If neither size
+        key is set, totals over the full loaded count panel are transformed in
+        the same way.
+    gene_name_key
+        Optional expression ``var`` column used as unique gene labels; otherwise
+        ``var_names`` are used.
+    device
+        JAX device or device specification receiving the prepared arrays.
+        ``None`` uses JAX's default device.
+    cell_keep_mask
+        Optional Boolean mask over all source expression cells, applied before
+        control selection and subsampling.
+    clip_gene_expression_percentile, gene_outlier_threshold_floor
+        Compatibility arguments. These loaders do not derive clipping
+        thresholds; compute ``gene_clip_thresholds`` upstream.
+    winsorize_gene_expression
+        Whether to cap counts at the supplied per-gene thresholds.
+    gene_clip_thresholds
+        Per-gene count thresholds in expression-column order. Required by the
+        intended winsorization workflow.
+    continuous_covariates
+        Numeric ``obs`` columns to preprocess and include in the design.
+    batch_covariate
+        Optional categorical ``obs`` column encoded relative to its most common
+        control level.
+    return_covariate_transform_state
+        If true, also return the fitted preprocessing state so stage two can
+        apply exactly the control-derived transformation.
+    infer_control_guides
+        For perturbation-matrix input with no selector, infer control guides
+        from mapped element or guide names containing ``random``, ``scrambled``,
+        or ``non-targeting`` variants.
+    only_control_guides
+        For perturbation-matrix input, retain only cells that carry a selected
+        control guide and no other guide. When false, cells may also carry
+        targeting guides.
+
+    Returns
+    -------
+    PerTurboData or tuple of PerTurboData and CovariateTransformState or None
+        Prepared control counts, design, labels, offsets, and covariates. The
+        tuple form is returned only when ``return_covariate_transform_state`` is
+        true.
+
+    Notes
+    -----
+    To align stage-two offsets with stage one, pass the returned
+    ``library_size_center_log_mean`` to :func:`load_analysis_cells` whenever
+    offsets were derived from raw library sizes or count totals.
+    """
+
     print("[perturbo] Loading controls...")
     adata = _resolve_adata(data, modality_key)
 
@@ -2090,6 +2445,105 @@ def load_analysis_cells(
     _design_cache: _AnalysisDesignCache | None = None,
     _return_design_cache: bool = False,
 ) -> PerTurboData | tuple[PerTurboData, _AnalysisDesignCache]:
+    """Load and prepare cells for stage-two perturbation-effect fitting.
+
+    Counts are read from the selected expression modality's ``X`` and must be
+    raw, finite, non-negative integers. Cell, gene, perturbation, guide, and
+    covariate order is preserved explicitly in the returned labels.
+
+    Parameters
+    ----------
+    data
+        :class:`anndata.AnnData` or :class:`mudata.MuData` input.
+    perturbation_key
+        ``obs`` column containing one perturbation label per cell. Required for
+        one-label-per-cell input when no perturbation modality is selected.
+    modality_key
+        Expression modality in MuData. Leave unset for AnnData.
+    perturbation_modality_key
+        MuData modality holding the cell-by-guide or cell-by-perturbation
+        matrix. Matrix rows are aligned to expression cells by name.
+    perturbation_layer
+        Optional perturbation-modality layer; ``None`` uses ``X``.
+    perturbation_element_varm_key
+        Optional guide ``varm`` key containing the guide-by-element map. When
+        present, guide columns are grouped into element predictors.
+    perturbation_element_names_uns_key
+        ``uns`` key holding element names when the map has no labeled columns.
+    size_factor_key
+        ``obs`` column containing already transformed, centered log offsets.
+        Values are used as supplied and must not be raw library counts.
+    library_size_key
+        ``obs`` column of positive integer library sizes, transformed to
+        centered ``log1p`` offsets.
+    gene_name_key
+        Optional expression ``var`` column used as unique gene labels; otherwise
+        ``var_names`` are used.
+    device
+        JAX device or device specification receiving prepared arrays.
+    selected_perturbations
+        Optional perturbation names to retain, in the requested output order.
+        Cells without a selected predictor are removed. A matrix-based subset
+        is rejected if a retained cell also carries an excluded predictor,
+        because dropping a co-occurring effect would change the fitted model.
+    cell_keep_mask
+        Optional Boolean mask over every source expression cell, applied before
+        perturbation filtering.
+    clip_gene_expression_percentile, gene_outlier_threshold_floor
+        Compatibility arguments. These loaders do not derive clipping
+        thresholds; compute ``gene_clip_thresholds`` upstream.
+    winsorize_gene_expression
+        Whether to cap counts at supplied per-gene thresholds.
+    gene_clip_thresholds
+        Thresholds in full expression-gene order. When genes are selected, the
+        corresponding thresholds are selected in the same order.
+    continuous_covariates, batch_covariate
+        Metadata columns used to construct covariates if no fitted transform is
+        supplied.
+    covariate_transform_state
+        State fitted on controls by :func:`fit_covariate_transform`. Supplying
+        it keeps imputation, scaling, reference levels, and design-column order
+        identical between stages.
+    retain_guide_structure
+        Preserve the cell-by-guide design, guide names, and guide-to-element map
+        in addition to grouped element predictors. This requires
+        ``perturbation_element_varm_key`` and is needed for guide-specific
+        effects or dispersion.
+    library_size_center_log_mean
+        Control-derived center for ``log1p(library_size)``. Reusing it prevents
+        control and analysis offsets from being normalized to different
+        origins.
+    selected_gene_indices
+        Slice, integer indices, or full-length Boolean mask selecting expression
+        columns. Output counts and ``gene_names`` follow this exact order;
+        duplicates and out-of-range indices are rejected.
+    full_panel_library_sizes
+        Optional non-negative totals for the full expression panel, either one
+        per source cell or one per selected analysis cell. Use this with gene
+        chunks so offsets do not depend on the current slice. If omitted during
+        gene selection, totals are read from the full panel in bounded row
+        blocks.
+    indexed_perturbation_design
+        Represent sparse matrix-based perturbation and guide designs as
+        :class:`~perturbo.sparse_design.IndexedDesignMatrix` instead of dense
+        cell-by-feature arrays.
+
+    Returns
+    -------
+    PerTurboData
+        Prepared counts, perturbation design, names, offsets, and optional
+        covariates/guide structure. Internal callers may request an additional
+        gene-independent design-cache object.
+
+    Notes
+    -----
+    ``_design_cache`` and ``_return_design_cache`` are internal CLI
+    optimizations. They are not a stable public interface; cached calls require
+    identical source objects, cell/gene identity and order, and loading options.
+    Counts, offsets, and gene labels remain gene-specific and are reloaded for
+    every block.
+    """
+
     subset_suffix = " for selected perturbations" if selected_perturbations is not None else ""
     print(f"[perturbo] Loading analysis cells{subset_suffix}...")
     adata = _resolve_adata(data, modality_key)
@@ -2398,6 +2852,67 @@ def fit_control(
     progress_chunk_size: int = 100,
     guide_random_effects: bool = False,
 ) -> ControlFit:
+    """Fit the stage-one baseline model on control cells.
+
+    Perturbation effects are conditioned to zero, so this stage estimates the
+    gene-wise baseline, dispersion, optional covariate effects, and optional
+    latent or guide variation needed by stage two.
+
+    Parameters
+    ----------
+    data
+        Control-cell data returned by :func:`load_controls`. Counts have shape
+        ``(n_control_cells, n_genes)`` and must be raw non-negative integers.
+    num_steps
+        Number of SVI optimizer updates. The core API default is 1,000.
+    prior
+        Effect prior family, ``"normal"`` or ``"cauchy"``. In stage one this
+        applies to latent perturbation sites even though their effects are fixed
+        to zero.
+    svi_config
+        ELBO and optimizer configuration. ``None`` uses :class:`SVIConfig`.
+    model_name
+        Likelihood: ``"negbin"``/``"nb"``, ``"censored_nb"``,
+        ``"lognormal_nb"``/``"lnnb"``, or ``"mixture_nb"``.
+    num_factors
+        Number of latent factors. ``None`` disables factors. A positive value
+        uses PCA initialization and must be reused in stage two; zero is not a
+        valid request in this core function.
+    use_observed_size_factors
+        If true, condition on ``data.size_factors`` as fixed offsets. If false,
+        infer latent size factors, using supplied or count-derived factors only
+        for initialization.
+    count_censoring_percentile
+        Upper percentile used to compute one censoring threshold per gene for
+        ``censored_nb``. The thresholds are stored in the result for exact reuse
+        in stage two; it is ignored by other likelihoods.
+    minibatch_size
+        Cells per stochastic update. ``None`` is the full-batch default. A value
+        larger than the control set is converted to full batch.
+    progress
+        Display an SVI progress bar.
+    progress_chunk_size
+        Number of full-batch compiled updates between progress refreshes. Must
+        be positive; it does not change the statistical fit.
+    guide_random_effects
+        Estimate gene-wise variation among control guide labels. The control
+        perturbation design must identify at least two guide columns or codes
+        with variation across cells.
+
+    Returns
+    -------
+    ControlFit
+        Baseline posterior summaries, fitted/fixed nuisance quantities, loss
+        history, and final SVI state in the input gene order.
+
+    Raises
+    ------
+    ValueError
+        If a model option is invalid, censoring lacks a percentile, latent
+        factors cannot be initialized, or guide random effects lack an
+        identifiable control-guide design.
+    """
+
     print("[perturbo] Fitting control model...")
     counts = data.counts
     pert_id = data.pert_id
@@ -2754,6 +3269,91 @@ def fit_perturbation_effects(
     perturbation_dispersion_prior_rate: float = 10.0,
     _runner_cache: dict[str, _ReusableSVIRunner] | None = None,
 ) -> BetaFit:
+    """Fit stage-two perturbation effects with the stage-one baseline.
+
+    Element-effect rows follow ``data.pert_names`` and columns follow
+    ``data.gene_names``. Unless baseline uncertainty propagation is requested,
+    the stage-one baseline and dispersion are fixed during this fit.
+
+    Parameters
+    ----------
+    data
+        Analysis-cell data from :func:`load_analysis_cells`.
+    control_fit
+        Stage-one result aligned to the same genes, covariate design, likelihood,
+        factor specification, and offset convention as ``data``.
+    num_steps
+        Number of SVI optimizer updates. The core API default is 1,000.
+    prior
+        Perturbation-effect prior, ``"normal"`` or ``"cauchy"``.
+    svi_config
+        ELBO and optimizer configuration. ``None`` uses :class:`SVIConfig`.
+    model_name
+        Likelihood: ``"negbin"``/``"nb"``, ``"censored_nb"``,
+        ``"lognormal_nb"``/``"lnnb"``, or ``"mixture_nb"``. It should match
+        stage one.
+    num_factors
+        Number of latent factors used in stage one. ``None`` disables factors;
+        a positive value requires compatible control loadings.
+    propagate_baseline_uncertainty
+        If true, sample the baseline intercept and dispersion from the compact
+        variational posterior in ``control_fit`` instead of fixing their
+        medians. This is unavailable for ``mixture_nb``.
+    use_observed_size_factors
+        If true, condition on ``data.size_factors`` as fixed offsets. Use the
+        same setting and normalization convention as stage one.
+    count_censoring_percentile
+        Accepted for stage symmetry. A censored stage-two fit always reuses
+        ``control_fit.count_censoring_threshold`` rather than recomputing it on
+        perturbed cells.
+    minibatch_size
+        Cells per stochastic update. ``None`` is the full-batch default; values
+        larger than the data set are converted to full batch.
+    progress
+        Display an SVI progress bar.
+    progress_chunk_size
+        Number of full-batch compiled updates between progress refreshes.
+    guide_effect_strategy
+        ``"shared"`` gives all guides targeting an element the same effect.
+        ``"relative"`` multiplies the parent element effect by a learned
+        guide-by-gene efficiency and requires retained guide structure with a
+        one-parent-per-guide mapping.
+    guide_activity_mode
+        Guide activity interpretation. ``"always_on"`` is supported.
+        ``"absolute"`` is reserved but the current stage-two SVI path rejects
+        it explicitly.
+    guide_random_effects
+        Carry stage-one guide variability into stage two. With retained guide
+        structure it enters the guide-level model and requires the stage-one
+        random-effect scale. Without a guide map, the same scale conservatively
+        inflates element posterior uncertainty.
+    fit_perturbation_dispersion
+        Estimate non-negative perturbation-specific excess inverse dispersion.
+        This is supported for negative-binomial likelihoods. Without guide
+        structure, each cell may have at most one active perturbation.
+    perturbation_dispersion_prior_rate
+        Positive finite rate of the exponential prior on excess inverse
+        dispersion.
+
+    Returns
+    -------
+    BetaFit
+        Element posterior locations, scales, z-values, loss history, and any
+        requested guide or perturbation-dispersion summaries.
+
+    Raises
+    ------
+    ValueError
+        If names and design columns disagree, stage-one quantities are missing
+        or misaligned, or the requested likelihood, guide, dispersion, factor,
+        or uncertainty combination is unsupported.
+
+    Notes
+    -----
+    ``_runner_cache`` is an internal CLI compilation cache and is not a stable
+    user API. It is used only for compatible, same-shaped full-batch fits.
+    """
+
     print("[perturbo] Fitting perturbation effects...")
     counts = data.counts
     pert_id = data.pert_id
@@ -3087,6 +3687,34 @@ def summarize_betas(
     gene_names: list[str],
     single_frame: bool = False,
 ) -> dict[str, pd.DataFrame] | pd.DataFrame:
+    """Convert an element-effect posterior to labeled pandas tables.
+
+    ``posterior_prob`` is the two-sided standard-normal tail probability
+    ``2 * sf(abs(z))``. It is a posterior z-score summary; conditional
+    randomization-test p-values and multiple-testing-adjusted q-values are
+    produced by the higher-level results pipeline instead.
+
+    Parameters
+    ----------
+    beta_fit
+        Stage-two result with arrays shaped
+        ``(n_perturbations, n_genes)``.
+    pert_names
+        Row labels in exactly the same order as ``beta_fit`` perturbation rows.
+    gene_names
+        Column labels in exactly the same order as ``beta_fit`` gene columns.
+    single_frame
+        If false, return three wide matrices. If true, return one long table in
+        perturbation-major, gene-minor order.
+
+    Returns
+    -------
+    dict of str to pandas.DataFrame or pandas.DataFrame
+        Wide output maps ``posterior_mean``, ``posterior_scale``, and
+        ``posterior_prob`` to perturbation-by-gene frames. Long output has
+        ``pert``, ``gene``, and the same three value columns.
+    """
+
     print("[perturbo] Summarizing posterior estimates...")
     mean = beta_fit.posterior_mean
     scale = beta_fit.posterior_scale
