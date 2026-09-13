@@ -4,6 +4,10 @@ PerTurbo is a NumPyro/JAX implementation of Bayesian Perturb-seq analysis for
 low- and high-MOI single-cell CRISPR screens. Version 2 is the production
 successor to the experimental Cortado implementation.
 
+Statistical testing builds on [SCEPTRE](https://doi.org/10.1186/s13059-024-03254-2)
+and [spaCRT](https://arxiv.org/abs/2407.08911). These statistical methods are prior
+work; PerTurbo provides an implementation integrated with its analysis workflow.
+
 ## Installation
 
 PerTurbo requires Python 3.11 or newer.

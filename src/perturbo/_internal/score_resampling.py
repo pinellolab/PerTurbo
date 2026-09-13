@@ -1,24 +1,10 @@
 """Pairwise low-MOI negative-binomial score permutations.
 
-For each target and gene, the nuisance-only NB model is fit once on that
-target's cells plus pooled NTC cells. Observed and permuted perturbation
-assignments then reuse the null residuals, weights, and nuisance projection.
-No optimization occurs inside the resampling loop.
-
-Two backends compute the same statistic:
-
-``per_pair``
-    One scipy L-BFGS fit per (target, gene) pair. This is the reference
-    implementation: readable, and the thing the batched path is validated
-    against.
-
-``batched``
-    The null model is a fixed-dispersion NB GLM, so Fisher scoring converges in
-    a handful of steps, and the fit batches across genes because only ``y[:, g]``
-    and ``theta_g`` change. Score statistics likewise batch across genes and
-    resamples as a small number of matrix products. This removes both the
-    per-pair optimizer call and the per-pair JAX recompilation that the
-    reference path incurs from building a fresh closure each time.
+The score-resampling methodology builds on SCEPTRE (Barry et al., 2024,
+https://doi.org/10.1186/s13059-024-03254-2) and the permuted score test
+(Barry et al., 2025, https://arxiv.org/abs/2501.03530).
+PerTurbo implements these established statistical ideas with batched
+computation; the underlying score-resampling method is prior work.
 """
 
 from __future__ import annotations

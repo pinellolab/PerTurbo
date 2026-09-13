@@ -168,9 +168,11 @@ def fit_from_path(
 
     ``crt=True`` also runs the conditional randomization test against the
     stage-one baseline and adds ``crt_*`` columns to ``element_effects.parquet``.
+    The testing methods build on SCEPTRE and spaCRT; see :mod:`perturbo.crt`
+    for references. PerTurbo does not introduce these statistical methods.
     ``crt_tail_families=None`` keeps the CLI default (the moment-fitted
     families); pass ``("saddlepoint",)`` with ``crt_mechanism="propensity"`` and
-    ``crt_saddlepoint_only=True`` for the exact-CGF saddlepoint without any
+    ``crt_saddlepoint_only=True`` for a saddlepoint tail approximation without
     resampling. An empty tuple switches the continuous tails off. ``crt_pool``
     selects the resampling pool (``'control-anchored'`` for low MOI,
     ``'all-cells'`` for high MOI; ``None`` lets the CLI choose from the design).

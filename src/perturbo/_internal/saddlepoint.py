@@ -1,38 +1,13 @@
-"""Saddlepoint tail probabilities for permutation-style score nulls.
+"""JAX implementations of saddlepoint tail approximations.
 
-The score a CRT computes for one (target, gene) pair is a sum over the cells
-assigned to that target of a per-cell contribution, and its null is generated
-by reassigning which cells those are. So the null is the distribution of a sum
-of ``m`` values drawn from a pool of ``n``, and its cumulant generating
-function is available in closed form from the pool itself - no parametric
-family need be assumed at all.
+The Bernoulli-propensity CRT approach builds on spaCRT (Niu et al.,
+https://arxiv.org/abs/2407.08911). The saddlepoint tail formula is established
+methodology; see Lugannani and Rice (1980), Daniels (1987), and Butler (2007).
+PerTurbo does not introduce saddlepoint calibration of the CRT.
 
-Why this rather than matching three or four moments:
-
-  Edgeworth-type expansions - Cornish-Fisher, and in spirit a moment-matched
-  skew-normal - control *absolute* error. Out where a p-value is 1e-50 that is
-  worth nothing. With the correct CGF, a saddlepoint approximation controls
-  *relative* error and does so uniformly into the tail. It is also evaluated in
-  the exponent, so the log tail is native rather than the log of a number that
-  already underflowed. The with-replacement surrogate below adds a separate
-  finite-population modeling error which must be measured empirically.
-
-  Concretely it removes both failure modes the skew-normal has here: the tail
-  pinning at 2.2e-308 past |z| ~ 38, and the hard ceiling at |skewness| <
-  0.995272 that leaves a genuinely more skewed null with no representable fit.
-
-The CRT samples a fixed number of cells without replacement inside every
-stratum.  The exact treatment needs a conditional/double saddlepoint (Booth &
-Butler 1990).  This prototype instead adds the CGFs of independent
-with-replacement draws, one per stratum.  An optional power-CGF correction
-matches the exact finite-population variance while retaining the original
-support; it is a heuristic, not the without-replacement CGF.  The maximum
-within-stratum sampling fraction is returned with every fit so callers can
-measure where this approximation is being leaned on.
-
-References: Lugannani & Rice (1980); Daniels (1987); Robinson (1982) for
-permutation distributions specifically; Butler, *Saddlepoint Approximations
-with Applications* (2007).
+This module also retains experimental stratified approximations. Tail
+probabilities are approximate; an exact cumulant-generating function does
+not make a saddlepoint tail probability exact.
 """
 
 from __future__ import annotations

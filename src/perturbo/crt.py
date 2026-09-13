@@ -1,51 +1,13 @@
-"""Conditional randomization test (CRT) against the production SVI baseline.
+"""Integration of conditional randomization and score-resampling methods.
 
-The CRT is a negative-binomial score-permutation test: for each (perturbation,
-gene) pair it forms an efficient score statistic under the null that the
-perturbation label carries no information, then calibrates it by resampling the
-label within a pool of control cells. The statistic and its resampling machinery
-live in :mod:`perturbo._internal.score_resampling`; this module is the layer
-that lets the *production* two-stage fit supply the null instead of the
-research pipeline's own control-only GLM fit.
+The testing framework builds on SCEPTRE (Barry et al., 2024,
+https://doi.org/10.1186/s13059-024-03254-2) and score-resampling work
+(Barry et al., 2025, https://arxiv.org/abs/2501.03530).
+The Bernoulli saddlepoint-tail approach builds on spaCRT (Niu et al.,
+https://arxiv.org/abs/2407.08911).
 
-Why that substitution is sound, and where it is not
----------------------------------------------------
-Per gene ``g``, with ``eta_i = o_i + z_i' gamma_g`` and ``mu = exp(eta)``, the
-test consumes exactly four things: the offsets ``o``, the dispersion ``theta``,
-the nuisance design ``Z``, and the nuisance coefficients ``gamma``. It needs
-nothing else from whatever produced them.
-
-* ``gamma`` is **first-order neutral**. The statistic subtracts
-  ``x'WZ (Z'WZ)^-1 Z'r``, and that correction is precisely the first-order
-  Taylor term for ``gamma`` being off the null mode: writing
-  ``gamma~ = gamma^ + delta`` gives ``r(gamma~) ~ r(gamma^) - W Z delta``, whose
-  contribution the correction cancels, leaving ``O(||delta||^2)``. So a
-  variational posterior median, complete with prior shrinkage, substitutes for
-  the GLM MLE at second-order cost.
-* The first-order neutrality above holds for the projection *over the pool the
-  target is tested against*. The contributions arrive efficient under the
-  control-only fit, so the saddlepoint assembly re-projects each target's pool
-  onto the pool's nuisance fit (``fit_low_moi_propensity_saddlepoint`` with the
-  ``weight`` group of arguments); without that step a target's out-of-sample
-  residuals inflate the statistic by a factor near ``1 + W_own / W_controls``.
-* ``theta`` affects **power, never calibration**. Both the observed and the
-  resampled statistics are computed from the same fixed ``r`` and ``W``, so a
-  misspecified dispersion rescales them together.
-* Neither of the above can break type-I error at all. CRT validity is
-  *conditional*: given fixed ``(r, W, Z, I)``, the statistic is a deterministic
-  function of the label, so resampling the label is exact whatever estimated
-  those quantities.
-* ``o`` is the exception, and it is a validity break rather than an efficiency
-  one. Under ``--size-factor-mode=infer`` the offset is a per-cell latent fit by
-  SVI, and in stage two it is fit *jointly with the effect* on the perturbed
-  cells. A perturbed cell's offset then depends on its own label, which is
-  exactly what exchangeability forbids. Hence :func:`validate_crt_config`
-  requires observed or fixed offsets.
-
-Because ``gamma`` is only first-order neutral, the expansion has to actually be
-in its valid regime. :func:`check_baseline_is_null_mode` is that guard: it
-measures the distance from the supplied baseline to the control-cell null mode
-and lets the caller refuse to proceed when the baseline is not near it.
+PerTurbo provides a software implementation integrated with its fitting and
+output workflow. It does not introduce the CRT or saddlepoint testing methods.
 """
 
 from __future__ import annotations

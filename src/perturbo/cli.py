@@ -467,7 +467,8 @@ def main(argv: list[str] | None = None) -> None:
         action=argparse.BooleanOptionalAction,
         default=None,
         help=(
-            "Run the conditional randomization test against the stage-1 baseline, adding "
+            "Run conditional randomization testing based on SCEPTRE and spaCRT, against "
+            "the stage-1 baseline, adding "
             "crt_p_value/crt_q_value/crt_z_value to element_effects.parquet. On by default; "
             "--no-crt fits the effects alone. It needs --size-factor-mode observed (or none), "
             "--likelihood nb, --num-factors 0, no --guide-random-effects, and one perturbation "
@@ -549,8 +550,8 @@ def main(argv: list[str] | None = None) -> None:
             "inside the control cells plus its own cells, with the null fit on controls. 'all-cells' "
             "(high MOI) tests each element as a marginal association over every analysed cell, with "
             "the null fit on all cells; it needs the guide-to-element map "
-            "(--perturbation-element-varm-key) and no control cells, and runs the exact "
-            "Bernoulli-sum saddlepoint with no resamples. 'auto' picks all-cells when the element "
+            "(--perturbation-element-varm-key) and no control cells, and uses a "
+            "Bernoulli-sum saddlepoint tail approximation with no resamples. 'auto' picks all-cells when the element "
             "map is given, control-anchored otherwise."
         ),
     )
@@ -617,12 +618,9 @@ def main(argv: list[str] | None = None) -> None:
         action=argparse.BooleanOptionalAction,
         default=True,
         help=(
-            "Before the CRT, move the stage-1 nuisance coefficients onto the control-cell null "
-            "mode by Fisher scoring at the stage-1 dispersion. The resampling null is exact either "
-            "way; this restores the efficiency of the score statistic when stage one sits off the "
-            "mode, as it does with a batch covariate, and it is what makes the test insensitive to "
-            "how long stage one trained. On by default; --no-crt-polish-baseline tests the "
-            "stage-one coefficients as they came out of SVI."
+            "Before testing, update the stage-1 nuisance coefficients by Fisher scoring "
+            "at the stage-1 dispersion. On by default; --no-crt-polish-baseline uses "
+            "the stage-one coefficients as they came out of SVI."
         ),
     )
     parser.add_argument("--gene-name-key", default=None, help="Var field for gene names")
