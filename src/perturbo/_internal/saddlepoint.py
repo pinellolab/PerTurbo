@@ -21,6 +21,11 @@ import numpy as np
 from jax.scipy import stats as jstats
 from jax.scipy.special import gammainc, gammaincc, logsumexp
 
+from perturbo._internal.bordered import (
+    BorderedInfo, detect_bordered_design, has_reference_dependency, to_dense_numpy,
+)
+from perturbo._internal.bordered_scores import BorderedPoolProjection
+
 # Below this |t| the saddlepoint is effectively at the mean, where the
 # Lugannani-Rice correction term 1/w - 1/u is 0/0. Daniels' limiting form is
 # used instead.
@@ -675,13 +680,41 @@ def _high_moi_spa_gene_block(
     )
 
 
+def _high_moi_nuisance_direction(
+    *,
+    num_genes: int,
+    num_nuisance: int,
+    nuisance_information_inverse: np.ndarray | None,
+    nuisance_score: np.ndarray | None,
+    nuisance_direction: np.ndarray | None,
+) -> jnp.ndarray:
+    """Return ``H^-1 (Z'r)`` as (nuisance, genes), without requiring an inverse."""
+    if nuisance_direction is not None:
+        if nuisance_information_inverse is not None:
+            raise ValueError("Provide nuisance_direction or nuisance_information_inverse, not both.")
+        direction = jnp.asarray(nuisance_direction, dtype=jnp.float64)
+        if direction.shape != (num_nuisance, num_genes):
+            raise ValueError("nuisance_direction must have shape (nuisance, genes).")
+        return direction
+    if nuisance_information_inverse is None or nuisance_score is None:
+        raise ValueError("Provide nuisance_direction, or both nuisance_information_inverse and nuisance_score.")
+    inverse = jnp.asarray(nuisance_information_inverse, dtype=jnp.float64)
+    gradient = jnp.asarray(nuisance_score, dtype=jnp.float64)
+    if inverse.shape != (num_genes, num_nuisance, num_nuisance):
+        raise ValueError("nuisance_information_inverse has the wrong shape.")
+    if gradient.shape != (num_nuisance, num_genes):
+        raise ValueError("nuisance_score has the wrong shape.")
+    return jnp.einsum("gqr,rg->qg", inverse, gradient)
+
+
 def fit_high_moi_stratified_saddlepoint(
     *,
     score_residual: np.ndarray,
     observation_weight: np.ndarray,
     nuisance_design: np.ndarray,
-    nuisance_information_inverse: np.ndarray,
-    nuisance_score: np.ndarray,
+    nuisance_information_inverse: np.ndarray | None = None,
+    nuisance_score: np.ndarray | None = None,
+    nuisance_direction: np.ndarray | None = None,
     cell_index: np.ndarray,
     element_index: np.ndarray,
     num_elements: int,
@@ -709,6 +742,10 @@ def fit_high_moi_stratified_saddlepoint(
     All numerical kernels run in JAX float64. This is intentional: the method
     exists to distinguish extreme log tails, where a silent float32 downcast
     would erase the accuracy it is meant to add.
+
+    ``nuisance_direction`` can supply the solved ``H^-1 (Z'r)`` directly as
+    ``(nuisance, genes)``; otherwise the existing inverse-plus-score interface
+    is used. The direct form avoids allocating a dense nuisance inverse.
     """
 
     if not jax.config.read("jax_enable_x64"):
@@ -717,21 +754,17 @@ def fit_high_moi_stratified_saddlepoint(
     residual = jnp.asarray(score_residual, dtype=jnp.float64)
     weight = jnp.asarray(observation_weight, dtype=jnp.float64)
     nuisance = jnp.asarray(nuisance_design, dtype=jnp.float64)
-    inverse = jnp.asarray(nuisance_information_inverse, dtype=jnp.float64)
-    nuisance_gradient = jnp.asarray(nuisance_score, dtype=jnp.float64)
     cell_device = jnp.asarray(cell_index, dtype=jnp.int32).reshape(-1)
     element_device = jnp.asarray(element_index, dtype=jnp.int32).reshape(-1)
     labels = np.asarray(strata).reshape(-1)
     if residual.ndim != 2 or weight.shape != residual.shape:
         raise ValueError("score_residual and observation_weight must share (cells, genes) shape.")
     num_cells, num_genes = residual.shape
+    if nuisance.ndim != 2:
+        raise ValueError("nuisance_design must be a cells-by-nuisance matrix.")
     num_nuisance = nuisance.shape[1]
     if nuisance.shape != (num_cells, num_nuisance) or labels.shape != (num_cells,):
         raise ValueError("nuisance_design and strata must align with the cell axis.")
-    if inverse.shape != (num_genes, num_nuisance, num_nuisance):
-        raise ValueError("nuisance_information_inverse has the wrong shape.")
-    if nuisance_gradient.shape != (num_nuisance, num_genes):
-        raise ValueError("nuisance_score has the wrong shape.")
     if cell_device.shape != element_device.shape or bool(
         jnp.any((element_device < 0) | (element_device >= num_elements))
     ):
@@ -741,13 +774,19 @@ def fit_high_moi_stratified_saddlepoint(
     if gene_block_size < 1:
         raise ValueError("gene_block_size must be positive.")
 
-    direction = jnp.einsum("gqr,rg->gq", inverse, nuisance_gradient)
+    direction = _high_moi_nuisance_direction(
+        num_genes=num_genes,
+        num_nuisance=num_nuisance,
+        nuisance_information_inverse=nuisance_information_inverse,
+        nuisance_score=nuisance_score,
+        nuisance_direction=nuisance_direction,
+    )
     # As a matmul then an elementwise product, not one einsum. The einsum form
     # sums over the nuisance axis last, which lets XLA materialize an
     # (cells, nuisance, genes) intermediate - 4 GB at 205,797 cells, six
     # covariates and a 400-gene chunk. Contracting first keeps every array
     # (cells, genes).
-    contribution = residual - weight * (nuisance @ direction.T)
+    contribution = residual - weight * (nuisance @ direction)
     observed = _segment_sum_in_pair_blocks(
         contribution, cell_device, element_device, num_elements
     )
@@ -1191,8 +1230,9 @@ def fit_high_moi_propensity_saddlepoint(
     score_residual: np.ndarray,
     observation_weight: np.ndarray,
     nuisance_design: np.ndarray,
-    nuisance_information_inverse: np.ndarray,
-    nuisance_score: np.ndarray,
+    nuisance_information_inverse: np.ndarray | None = None,
+    nuisance_score: np.ndarray | None = None,
+    nuisance_direction: np.ndarray | None = None,
     cell_index: np.ndarray,
     element_index: np.ndarray,
     num_elements: int,
@@ -1225,6 +1265,10 @@ def fit_high_moi_propensity_saddlepoint(
     Screening moments are formed in float32 because they decide candidacy
     rather than any reported number; every candidate's tail is then evaluated
     in float64, which is the accuracy this method exists to provide.
+
+    Supply ``nuisance_direction`` as ``(nuisance, genes)`` to use a previously
+    solved ``H^-1 (Z'r)`` without forming a dense inverse. Existing callers
+    may continue supplying ``nuisance_information_inverse`` and ``nuisance_score``.
     """
     _check_two_sided(two_sided)
 
@@ -1234,8 +1278,6 @@ def fit_high_moi_propensity_saddlepoint(
     residual = jnp.asarray(score_residual, dtype=jnp.float64)
     weight = jnp.asarray(observation_weight, dtype=jnp.float64)
     nuisance = jnp.asarray(nuisance_design, dtype=jnp.float64)
-    inverse = jnp.asarray(nuisance_information_inverse, dtype=jnp.float64)
-    nuisance_gradient = jnp.asarray(nuisance_score, dtype=jnp.float64)
     coefficients = jnp.asarray(propensity_coefficients, dtype=jnp.float64)
     basis = jnp.asarray(propensity_basis, dtype=jnp.float64)
     cell_device = jnp.asarray(cell_index, dtype=jnp.int32).reshape(-1)
@@ -1244,13 +1286,11 @@ def fit_high_moi_propensity_saddlepoint(
     if residual.ndim != 2 or weight.shape != residual.shape:
         raise ValueError("score_residual and observation_weight must share (cells, genes) shape.")
     num_cells, num_genes = residual.shape
+    if nuisance.ndim != 2:
+        raise ValueError("nuisance_design must be a cells-by-nuisance matrix.")
     num_nuisance = nuisance.shape[1]
     if nuisance.shape != (num_cells, num_nuisance):
         raise ValueError("nuisance_design must align with the cell axis.")
-    if inverse.shape != (num_genes, num_nuisance, num_nuisance):
-        raise ValueError("nuisance_information_inverse has the wrong shape.")
-    if nuisance_gradient.shape != (num_nuisance, num_genes):
-        raise ValueError("nuisance_score has the wrong shape.")
     if coefficients.ndim != 2 or coefficients.shape[0] != num_elements:
         raise ValueError("propensity_coefficients must be (elements, basis).")
     if basis.shape != (num_cells, coefficients.shape[1]):
@@ -1260,13 +1300,19 @@ def fit_high_moi_propensity_saddlepoint(
     if gene_block_size < 1 or element_batch_size < 1:
         raise ValueError("block sizes must be positive.")
 
-    direction = jnp.einsum("gqr,rg->gq", inverse, nuisance_gradient)
+    direction = _high_moi_nuisance_direction(
+        num_genes=num_genes,
+        num_nuisance=num_nuisance,
+        nuisance_information_inverse=nuisance_information_inverse,
+        nuisance_score=nuisance_score,
+        nuisance_direction=nuisance_direction,
+    )
     # As a matmul then an elementwise product, not one einsum. The einsum form
     # sums over the nuisance axis last, which lets XLA materialize an
     # (cells, nuisance, genes) intermediate - 4 GB at 205,797 cells, six
     # covariates and a 400-gene chunk. Contracting first keeps every array
     # (cells, genes).
-    contribution = residual - weight * (nuisance @ direction.T)
+    contribution = residual - weight * (nuisance @ direction)
     observed = _segment_sum_in_pair_blocks(
         contribution, cell_device, element_device, num_elements
     )
@@ -1396,6 +1442,7 @@ def fit_low_moi_propensity_saddlepoint(
     nuisance_design: np.ndarray | None = None,
     batch_codes: np.ndarray | None = None,
     control_information: np.ndarray | None = None,
+    bordered_design=None,
 ) -> SaddlepointTailFit:
     """Exact-CGF saddlepoint for the low-MOI propensity CRT.
 
@@ -1560,6 +1607,7 @@ def fit_low_moi_propensity_saddlepoint(
         nuisance_design=nuisance_design,
         batch_codes=batch_codes,
         control_information=control_information,
+        bordered_design=bordered_design,
         num_cells=num_cells,
         num_genes=num_genes,
         num_targets=num_targets,
@@ -1806,15 +1854,48 @@ class _LowMoiPoolProjection:
 
     @classmethod
     def build(cls, *, weight, nuisance_design, batch_codes, control_information, num_cells, num_genes, num_targets,
-              control_rows, own_rows, own_codes, all_rows, codes_all, own_contribution, target_valid):
+              control_rows, own_rows, own_codes, all_rows, codes_all, own_contribution, target_valid,
+              bordered_design=None):
         if weight is None:
-            if nuisance_design is not None or batch_codes is not None or control_information is not None:
+            if any(value is not None for value in (nuisance_design, batch_codes, control_information, bordered_design)):
                 raise ValueError("The pool projection needs weight together with the nuisance representation.")
             return None
-        if control_information is None or (nuisance_design is None) == (batch_codes is None):
+        if control_information is None or sum(value is not None for value in (nuisance_design, batch_codes, bordered_design)) != 1:
             raise ValueError(
-                "The pool projection needs control_information and exactly one of nuisance_design or batch_codes."
+                "The pool projection needs control_information and exactly one nuisance representation."
             )
+        if bordered_design is None and nuisance_design is not None:
+            bordered_design = detect_bordered_design(np.asarray(nuisance_design))
+            if bordered_design is not None and has_reference_dependency(bordered_design.take(np.asarray(control_rows))):
+                bordered_design = None
+        if bordered_design is not None:
+            if bordered_design.border.shape[0] != num_cells or np.shape(weight) != (num_cells, num_genes):
+                raise ValueError("The bordered design and weights must align with the cell and gene axes.")
+            information = control_information
+            if not isinstance(information, BorderedInfo):
+                dense = jnp.asarray(information, dtype=jnp.float64)
+                if dense.shape != (num_genes, bordered_design.num_columns, bordered_design.num_columns):
+                    raise ValueError("control_information must match the original nuisance columns.")
+                b, h = jnp.asarray(bordered_design.border_indices), jnp.asarray(bordered_design.group_indices)
+                # Direct callers may already have constructed the dense control
+                # block. Keep its exact penalty/jitter; pool additions are still
+                # structured. Arbitrary off-diagonal penalties require dense.
+                group_block = np.asarray(dense[:, h[:, None], h[None, :]])
+                off_diagonal = group_block.copy()
+                off_diagonal[:, np.arange(len(h)), np.arange(len(h))] = 0.0
+                if np.any(off_diagonal != 0.0):
+                    if nuisance_design is None:
+                        nuisance_design = to_dense_numpy(bordered_design)
+                    bordered_design = None
+                else:
+                    information = BorderedInfo(dense[:, b[:, None], b[None, :]], dense[:, b[:, None], h[None, :]], dense[:, h, h])
+            if bordered_design is not None:
+                return BorderedPoolProjection.build(
+                    design=bordered_design, information=information, weight=weight,
+                    num_targets=num_targets, control_rows=control_rows, own_rows=own_rows,
+                    own_codes=own_codes, all_rows=all_rows, codes_all=codes_all,
+                    own_contribution=own_contribution, target_valid=target_valid,
+                )
         # Weights stay in their float32 storage: on GWPS the (cells, genes) chunk is
         # 2.1M x 250, and every float64 copy of it is 4 GB. Per-row work below runs
         # in row chunks and casts each chunk as it goes.

@@ -18,6 +18,18 @@ import jax.numpy as jnp
 import numpy as np
 from scipy import sparse
 
+from perturbo._internal.bordered import (
+    detect_bordered_design,
+    has_reference_dependency,
+    matmul as bordered_matmul,
+    solve as bordered_solve,
+    transpose_dot as bordered_transpose_dot,
+    weighted_information as bordered_information,
+)
+from perturbo._internal.bordered_scores import (
+    prepare_target_scores as prepare_bordered_target_scores,
+    score_from_indices as bordered_score_from_indices,
+)
 from perturbo._internal.analytic_null import (
     DEFAULT_JMAX as ANALYTIC_DEFAULT_JMAX,
     categorical_batch_null_raw_moments,
@@ -534,6 +546,7 @@ def precompute_low_moi_permutations(
     # pulls in its api, which imports this module back.
     from perturbo._internal.high_moi.resampling import (
         fit_masked_propensity_coefficients,
+        prepare_bordered_propensity,
         propensity_basis,
         propensity_logits_from_coefficients,
         sample_propensity_indices,
@@ -541,6 +554,7 @@ def precompute_low_moi_permutations(
     nuisance = np.asarray(design.nuisance_design, dtype=np.float32)
     propensity_coef = None
     propensity_Q = None
+    propensity_context = None
     if resampling_mechanism == "propensity":
         if propensity_target_batch_size < 1:
             raise ValueError("propensity_target_batch_size must be positive.")
@@ -549,6 +563,9 @@ def precompute_low_moi_permutations(
         # all-cell logit matrix: it reads a target's logits as
         # ``propensity_coef[t] @ propensity_Q[rows].T``.
         propensity_Q = np.asarray(propensity_basis(nuisance), dtype=np.float32)
+        propensity_design = detect_bordered_design(nuisance)
+        if propensity_design is not None:
+            propensity_context = prepare_bordered_propensity(propensity_design, propensity_Q)
         propensity_coef = np.zeros(
             (design.num_targets, propensity_Q.shape[1]), dtype=np.float32
         )
@@ -612,6 +629,7 @@ def precompute_low_moi_permutations(
                     indicators,
                     inclusion,
                     propensity_Q,
+                    bordered_design=propensity_context,
                 )
             )
     pair_rows: list[np.ndarray | None] = []
@@ -1090,7 +1108,14 @@ def newton_step_magnitude(
     construction and the solve never sees an indefinite matrix.
     """
 
-    design = np.asarray(nuisance_design, dtype=np.float64)
+    from perturbo._internal import bordered
+
+    if isinstance(nuisance_design, bordered.BorderedDesign):
+        structured = nuisance_design._replace(border=np.asarray(nuisance_design.border, dtype=np.float64))
+        design = None
+    else:
+        design = np.asarray(nuisance_design, dtype=np.float64)
+        structured = bordered.detect_bordered_design(design)
     coefficients = np.asarray(beta, dtype=np.float64)
     count_panel = np.asarray(counts)
     offset_panel = np.asarray(offsets, dtype=np.float64)
@@ -1112,10 +1137,25 @@ def newton_step_magnitude(
     # (genes, nuisance, nuisance) tensor, 4.4 GiB here, when only one block is
     # ever live.
     num_genes = int(coefficients.shape[1])
-    num_nuisance = int(design.shape[1])
+    num_nuisance = structured.num_columns if structured is not None else int(design.shape[1])
+    ridge_array = np.asarray(ridge, dtype=np.float64)
+    # This diagnostic also accepts dense prior information. Only a diagonal
+    # ridge preserves the grouped design's bordered information matrix.
+    dense_fallback = (
+        ridge_array.shape != (num_nuisance, num_nuisance)
+        or np.any(ridge_array != np.diag(np.diag(ridge_array)))
+        or (structured is not None and bordered.has_reference_dependency(structured))
+    )
+    if dense_fallback:
+        if design is None:
+            design = bordered.to_dense_numpy(structured)
+        structured = None
     block = max(1, min(num_genes, _NEWTON_STEP_GENE_BLOCK))
     magnitude = np.empty(num_genes, dtype=np.float64)
-    curvature = np.empty((block, num_nuisance, num_nuisance), dtype=np.float64)
+    curvature = (
+        np.empty((block, num_nuisance, num_nuisance), dtype=np.float64)
+        if structured is None else None
+    )
     for start in range(0, num_genes, block):
         stop = min(start + block, num_genes)
         width = stop - start
@@ -1125,17 +1165,27 @@ def newton_step_magnitude(
         block_offsets = (
             offset_panel if offset_panel.shape[1] == 1 else offset_panel[:, start:stop]
         )
-        eta = block_offsets + design @ block_beta
+        eta = block_offsets + (
+            design @ block_beta if structured is None
+            else bordered.matmul_numpy(structured, block_beta)
+        )
         mean = np.exp(np.clip(eta, -_ETA_CLIP, _ETA_CLIP))
         denominator = block_theta + mean
         residual = block_theta * (block_counts - mean) / denominator
         weight = block_theta * mean / denominator
-        gradient = design.T @ residual - prior_precision * block_beta
-        for offset in range(width):
-            column = weight[:, offset, None]
-            curvature[offset] = design.T @ (design * column)
-        block_curvature = curvature[:width] + ridge
-        step = np.linalg.solve(block_curvature, gradient.T[:, :, None])[:, :, 0].T
+        if structured is None:
+            gradient = design.T @ residual - prior_precision * block_beta
+            for offset in range(width):
+                column = weight[:, offset, None]
+                curvature[offset] = design.T @ (design * column)
+            block_curvature = curvature[:width] + ridge
+            step = np.linalg.solve(block_curvature, gradient.T[:, :, None])[:, :, 0].T
+        else:
+            gradient = bordered.transpose_dot_numpy(structured, residual).T - prior_precision * block_beta
+            information = bordered.weighted_information_numpy(
+                structured, weight, np.diag(ridge_array)
+            )
+            step = bordered.solve_numpy(structured, information, gradient.T).T
         magnitude[start:stop] = np.max(np.abs(step), axis=0)
     return magnitude
 
@@ -1389,6 +1439,7 @@ def _run_jax_control_only_score_permutations(
     control_nuisance_score: jnp.ndarray,
     batch_codes: jnp.ndarray | None = None,
     num_batches: int | None = None,
+    bordered_design=None,
     null_converged: np.ndarray,
     dummy_index: int,
     analytic_null_moments: bool = False,
@@ -1513,7 +1564,7 @@ def _run_jax_control_only_score_permutations(
             )
         )
 
-    num_nuisance = nuisance_design.shape[1]
+    num_nuisance = nuisance_design.shape[1] if bordered_design is None else bordered_design.num_border
     for width, entries in grouped.items():
         # ``target x resample`` alone does not bound memory: each gathered
         # block is also ``width x genes``. A rare, very large perturbation can
@@ -1530,6 +1581,13 @@ def _run_jax_control_only_score_permutations(
         # populated, that strands most targets in narrow buckets at a batch
         # sized for the widest one.
         per_target_bytes = (2 + num_nuisance) * width * num_genes * np.dtype(np.float32).itemsize
+        if bordered_design is not None:
+            d, k = bordered_design.num_border, bordered_design.num_groups
+            # Grouped cross-vectors and their solved directions still have K
+            # entries, even when a draw selects very few cells. Include those
+            # buffers and conservatively charge the shared information blocks
+            # per assignment so the gather cap also bounds the projection.
+            per_target_bytes += (5 * (d + k) + d * d + d * k + k) * num_genes * np.dtype(np.float32).itemsize
         if analytic_null_moments:
             # The closed-form null draws nothing, so the resample axis is absent
             # from every gathered tensor and the whole budget goes to targets.
@@ -1551,6 +1609,8 @@ def _run_jax_control_only_score_permutations(
             # score compilation unnecessarily expensive on CPU and does not
             # improve the subsequent target-specific CGF work.
             batch_size = targets_per_batch
+            if max_gather_bytes is not None:
+                batch_size = min(batch_size, max(1, max_gather_bytes // max(per_target_bytes, 1)))
             resamples_by_target_batch = max(1, max_target_resample_batch // batch_size)
             if max_gather_bytes is None:
                 resamples_by_memory = resamples_by_target_batch
@@ -1567,7 +1627,12 @@ def _run_jax_control_only_score_permutations(
                     columns=width,
                     dummy_index=dummy_index,
                 )[0]
-            if batch_codes is None:
+            if bordered_design is not None:
+                information_inverse, nuisance_score, observed = prepare_bordered_target_scores(
+                    jnp.asarray(target_indices), score_residual, observation_weight,
+                    bordered_design, control_information, control_nuisance_score,
+                )
+            elif batch_codes is None:
                 information_inverse, nuisance_score, observed = prepare_control_only_target_scores(
                     jnp.asarray(target_indices),
                     score_residual,
@@ -1623,7 +1688,12 @@ def _run_jax_control_only_score_permutations(
                     if batch_codes is None
                     else batched_efficient_score_from_indices_categorical_batch
                 )
-                if batch_codes is None:
+                if bordered_design is not None:
+                    score_block = bordered_score_from_indices(
+                        jnp.asarray(padded_block), score_residual, observation_weight,
+                        bordered_design, information_inverse, nuisance_score,
+                    )
+                elif batch_codes is None:
                     score_block = kernel(
                         jnp.asarray(padded_block),
                         score_residual,
@@ -2140,7 +2210,11 @@ def run_low_moi_score_permutations(
         theta_jax = jnp.asarray(dispersion, dtype=jnp.float32)
         control_indices_np = np.flatnonzero(control_mask)
         control_indices = jnp.asarray(control_indices_np)
+        bordered_design = None
         if categorical_batch_codes is None:
+            bordered_design = detect_bordered_design(nuisance_design)
+            if bordered_design is not None and has_reference_dependency(bordered_design.take(control_indices_np)):
+                bordered_design = None
             nuisance_jax = jnp.asarray(nuisance_design, dtype=jnp.float32)
             if nuisance_coefficients is None:
                 control_beta, _, _ = fisher_nb_null(
@@ -2167,18 +2241,28 @@ def run_low_moi_score_permutations(
             # the full weighted design only when assignments will be resampled.
             control_weighted_nuisance_jax = (
                 jnp.empty((counts.shape[0], 0), dtype=jnp.float32)
-                if saddlepoint_only
+                if saddlepoint_only or bordered_design is not None
                 else (control_weight_jax[:, :, None] * nuisance_jax[:, None, :]).reshape(
                     counts.shape[0], design.num_genes * num_nuisance
                 )
             )
-            control_information_jax = jnp.einsum(
-                "nq,ng,nr->gqr",
-                nuisance_jax[control_indices],
-                control_weight_jax[control_indices],
-                nuisance_jax[control_indices],
-            ) + jnp.asarray(ridge, dtype=jnp.float32)
-            control_nuisance_score_jax = nuisance_jax[control_indices].T @ control_residual_jax[control_indices]
+            if bordered_design is None:
+                control_information_jax = jnp.einsum(
+                    "nq,ng,nr->gqr",
+                    nuisance_jax[control_indices],
+                    control_weight_jax[control_indices],
+                    nuisance_jax[control_indices],
+                ) + jnp.asarray(ridge, dtype=jnp.float32)
+                control_nuisance_score_jax = nuisance_jax[control_indices].T @ control_residual_jax[control_indices]
+            else:
+                control_design = bordered_design.take(control_indices_np)
+                control_information_jax = bordered_information(
+                    control_design, control_weight_jax[control_indices],
+                    ridge=jnp.asarray(prior_precision + curvature_jitter, dtype=jnp.float32),
+                )
+                control_nuisance_score_jax = bordered_transpose_dot(
+                    control_design, control_residual_jax[control_indices]
+                ).T
             control_fit_converged = _newton_step_converged(
                 counts[control_mask].astype(np.float64),
                 nuisance_design[control_mask].astype(np.float64),
@@ -2263,6 +2347,7 @@ def run_low_moi_score_permutations(
             control_nuisance_score=control_nuisance_score_jax,
             batch_codes=batch_codes_jax,
             num_batches=num_batches,
+            bordered_design=None if bordered_design is None else bordered_design.pad_rows(),
             null_converged=control_fit_converged,
             dummy_index=jax_dummy_index,
             analytic_null_moments=analytic_null_moments,
@@ -2286,6 +2371,9 @@ def run_low_moi_score_permutations(
 
             residual = control_residual_jax[:jax_dummy_index]
             weight = control_weight_jax[:jax_dummy_index]
+            if bordered_design is not None:
+                direction = bordered_solve(bordered_design, control_information_jax, control_nuisance_score_jax.T)
+                return residual - weight * bordered_matmul(bordered_design, direction.T)
             if batch_codes_jax is None:
                 inverse = jnp.linalg.inv(control_information_jax)
                 direction = jnp.einsum("gqr,rg->gq", inverse, control_nuisance_score_jax)
@@ -2340,9 +2428,13 @@ def run_low_moi_score_permutations(
                     two_sided=saddlepoint_two_sided or "equal-tail",
                     gene_block_size=saddlepoint_gene_block_size,
                     weight=control_weight_jax[:jax_dummy_index],
-                    nuisance_design=None if batch_codes_jax is not None else nuisance_jax[:jax_dummy_index],
+                    nuisance_design=(
+                        None if batch_codes_jax is not None or bordered_design is not None
+                        else nuisance_jax[:jax_dummy_index]
+                    ),
                     batch_codes=None if batch_codes_jax is None else batch_codes_jax[:jax_dummy_index],
                     control_information=control_information_jax,
+                    bordered_design=bordered_design,
                 )
                 return saddlepoint
             if name != "saddlepoint":

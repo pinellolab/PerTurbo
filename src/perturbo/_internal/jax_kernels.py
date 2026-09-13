@@ -44,6 +44,8 @@ from functools import partial
 import jax
 import jax.numpy as jnp
 
+from perturbo._internal import bordered
+
 # Matches the NumPy kernels so both see the same linear predictor.
 _ETA_CLIP = 30.0
 _MAX_STEP = 5.0
@@ -64,8 +66,29 @@ def _nb_null_terms(
     return residual, expected_weight, observed_weight
 
 
+def _nb_design(design):
+    """Detect a host design before JIT; traced callers retain the dense path."""
+
+    if isinstance(design, bordered.BorderedDesign):
+        if not isinstance(design.codes, jax.core.Tracer) and bordered.has_reference_dependency(design):
+            return bordered.to_dense_numpy(design)
+        return design
+    if isinstance(design, jax.core.Tracer):
+        return design
+    structured = bordered.detect_bordered_design(design)
+    if structured is None or bordered.has_reference_dependency(structured):
+        return design
+    return structured
+
+
+def _nb_design_matmul(design, coefficients):
+    if isinstance(design, bordered.BorderedDesign):
+        return bordered.matmul(design, coefficients)
+    return design @ coefficients
+
+
 @jax.jit
-def nb_null_residual_and_weight(
+def _nb_null_residual_and_weight_kernel(
     counts: jnp.ndarray,
     nuisance_design: jnp.ndarray,
     offsets: jnp.ndarray,
@@ -78,9 +101,23 @@ def nb_null_residual_and_weight(
     cells alone - can be evaluated on cells that took no part in estimating it.
     """
 
-    eta = offsets + nuisance_design @ coefficients
+    eta = offsets + _nb_design_matmul(nuisance_design, coefficients)
     residual, _, observed_weight = _nb_null_terms(counts, eta, theta[None, :])
     return residual, observed_weight
+
+
+def nb_null_residual_and_weight(
+    counts: jnp.ndarray,
+    nuisance_design: jnp.ndarray,
+    offsets: jnp.ndarray,
+    theta: jnp.ndarray,
+    coefficients: jnp.ndarray,
+) -> tuple[jnp.ndarray, jnp.ndarray]:
+    """Evaluate the NB null, using grouped batch operations when available."""
+
+    return _nb_null_residual_and_weight_kernel(
+        counts, _nb_design(nuisance_design), offsets, theta, coefficients
+    )
 
 
 def _fisher_nb_null_impl(
@@ -103,19 +140,29 @@ def _fisher_nb_null_impl(
     scales with the cell count and is not representable in float32.
     """
 
-    num_nuisance = nuisance_design.shape[1]
+    structured = isinstance(nuisance_design, bordered.BorderedDesign)
+    num_nuisance = (
+        len(nuisance_design.border_indices) + len(nuisance_design.group_indices)
+        if structured else nuisance_design.shape[1]
+    )
     theta_row = theta[None, :]
-    eye = jnp.eye(num_nuisance, dtype=counts.dtype)
-    ridge = (prior_precision + jitter) * eye[None, :, :]
+    ridge = prior_precision + jitter
+    if not structured:
+        ridge = ridge * jnp.eye(num_nuisance, dtype=counts.dtype)[None, :, :]
 
     def step(beta: jnp.ndarray) -> tuple[jnp.ndarray, jnp.ndarray]:
-        eta = offsets + nuisance_design @ beta
+        eta = offsets + _nb_design_matmul(nuisance_design, beta)
         residual, expected_weight, _ = _nb_null_terms(counts, eta, theta_row)
-        gradient = nuisance_design.T @ residual - prior_precision * beta
-        curvature = (
-            jnp.einsum("nq,ng,nr->gqr", nuisance_design, expected_weight, nuisance_design) + ridge
-        )
-        delta = jnp.linalg.solve(curvature, gradient.T[:, :, None])[:, :, 0].T
+        if structured:
+            gradient = bordered.transpose_dot(nuisance_design, residual).T - prior_precision * beta
+            information = bordered.weighted_information(nuisance_design, expected_weight, ridge)
+            delta = bordered.solve(nuisance_design, information, gradient.T).T
+        else:
+            gradient = nuisance_design.T @ residual - prior_precision * beta
+            curvature = (
+                jnp.einsum("nq,ng,nr->gqr", nuisance_design, expected_weight, nuisance_design) + ridge
+            )
+            delta = jnp.linalg.solve(curvature, gradient.T[:, :, None])[:, :, 0].T
         return jnp.clip(delta, -_MAX_STEP, _MAX_STEP), gradient
 
     def body(state):
@@ -136,7 +183,7 @@ def _fisher_nb_null_impl(
         body,
         (initial, jnp.asarray(jnp.inf, dtype=counts.dtype), jnp.asarray(0, dtype=jnp.int32)),
     )
-    eta = offsets + nuisance_design @ beta
+    eta = offsets + _nb_design_matmul(nuisance_design, beta)
     residual, _, observed_weight = _nb_null_terms(counts, eta, theta_row)
     final_delta, _ = step(beta)
     per_gene_step = jnp.max(jnp.abs(final_delta), axis=0)
@@ -144,7 +191,7 @@ def _fisher_nb_null_impl(
 
 
 @partial(jax.jit, static_argnames=("max_iterations",))
-def fisher_nb_null(
+def _fisher_nb_null_kernel(
     counts: jnp.ndarray,
     nuisance_design: jnp.ndarray,
     offsets: jnp.ndarray,
@@ -177,8 +224,26 @@ def fisher_nb_null(
     return beta, residual, observed_weight
 
 
+def fisher_nb_null(
+    counts: jnp.ndarray,
+    nuisance_design: jnp.ndarray,
+    offsets: jnp.ndarray,
+    theta: jnp.ndarray,
+    prior_precision: jnp.ndarray,
+    jitter: jnp.ndarray,
+    step_tolerance: jnp.ndarray,
+    max_iterations: int = 50,
+) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+    """Fit NB nuisance coefficients in their original coding by Fisher scoring."""
+
+    return _fisher_nb_null_kernel(
+        counts, _nb_design(nuisance_design), offsets, theta,
+        prior_precision, jitter, step_tolerance, max_iterations,
+    )
+
+
 @partial(jax.jit, static_argnames=("max_iterations",))
-def fit_nb_null_laplace(
+def _fit_nb_null_laplace_kernel(
     counts: jnp.ndarray,
     nuisance_design: jnp.ndarray,
     offsets: jnp.ndarray,
@@ -200,6 +265,17 @@ def fit_nb_null_laplace(
         step_tolerance,
         max_iterations,
     )
+    if isinstance(nuisance_design, bordered.BorderedDesign):
+        num_nuisance = len(nuisance_design.border_indices) + len(nuisance_design.group_indices)
+        information = bordered.weighted_information(
+            nuisance_design, observed_weight, prior_precision + jitter
+        )
+        identity = jnp.broadcast_to(
+            jnp.eye(num_nuisance, dtype=counts.dtype)[:, None, :],
+            (num_nuisance, counts.shape[1], num_nuisance),
+        )
+        covariance = jnp.moveaxis(bordered.solve(nuisance_design, information, identity), 0, -1)
+        return beta, covariance, per_gene_step, iterations
     num_nuisance = nuisance_design.shape[1]
     ridge = (prior_precision + jitter) * jnp.eye(num_nuisance, dtype=counts.dtype)
     information = (
@@ -209,6 +285,24 @@ def fit_nb_null_laplace(
         + ridge[None, :, :]
     )
     return beta, jnp.linalg.inv(information), per_gene_step, iterations
+
+
+def fit_nb_null_laplace(
+    counts: jnp.ndarray,
+    nuisance_design: jnp.ndarray,
+    offsets: jnp.ndarray,
+    theta: jnp.ndarray,
+    prior_precision: jnp.ndarray,
+    jitter: jnp.ndarray,
+    step_tolerance: jnp.ndarray,
+    max_iterations: int = 50,
+) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+    """NB nuisance MAPs and full observed covariance, with structured fitting."""
+
+    return _fit_nb_null_laplace_kernel(
+        counts, _nb_design(nuisance_design), offsets, theta,
+        prior_precision, jitter, step_tolerance, max_iterations,
+    )
 
 
 @partial(jax.jit, static_argnames=("num_batches", "max_iterations"))

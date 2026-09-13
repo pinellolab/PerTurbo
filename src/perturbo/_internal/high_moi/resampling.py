@@ -16,10 +16,22 @@ which is cleared by unsetting the drawn entries rather than by rezeroing.
 from __future__ import annotations
 
 from functools import partial
+from typing import NamedTuple
 
 import jax
 import jax.numpy as jnp
 import numpy as np
+
+from perturbo._internal.bordered import (
+    BorderedDesign,
+    BorderedInfo,
+    has_reference_dependency,
+    matmul,
+    solve,
+    transpose_dot,
+    transpose_dot_numpy,
+    weighted_information,
+)
 
 
 def sample_distinct_indices(
@@ -187,6 +199,118 @@ def _logistic_irls_masked_orthonormal(
     return coef
 
 
+class BorderedPropensityContext(NamedTuple):
+    """Reusable original-design algebra for an existing orthonormal basis."""
+
+    design: BorderedDesign
+    coefficient_mapping: jnp.ndarray
+    gram_info: BorderedInfo
+
+
+def prepare_bordered_propensity(
+    design: BorderedDesign,
+    basis: np.ndarray | jnp.ndarray,
+) -> BorderedPropensityContext | None:
+    """Prepare a conservative structured route once for a shared basis.
+
+    The supplied basis must be the orthonormal basis of this original design.
+    Rank reduction, an absent reference with an intercept, or poorly
+    conditioned original coordinates retain the existing orthonormal solve.
+    The condition check is on the small ``Q.T @ Z`` matrix; indicator columns
+    are never expanded. Its factor-of-1000 limit is deliberately conservative
+    because the original-coordinate normal equations run in float32.
+    """
+
+    if (
+        basis.ndim != 2
+        or basis.shape != (design.border.shape[0], design.num_columns)
+        or has_reference_dependency(design)
+    ):
+        return None
+    original = design.astype(np.float32)
+    mapping = transpose_dot_numpy(original, np.asarray(basis, dtype=np.float64))
+    if not np.isfinite(mapping).all():
+        return None
+    condition = np.linalg.cond(mapping)
+    if not np.isfinite(condition) or condition > 1_000.0:
+        return None
+    original = jax.tree.map(jnp.asarray, original)
+    return BorderedPropensityContext(
+        original,
+        jnp.asarray(mapping, dtype=jnp.float32),
+        weighted_information(original, jnp.ones((basis.shape[0], 1), dtype=jnp.float32)),
+    )
+
+
+@partial(jax.jit, static_argnames=("max_iterations",))
+def _logistic_irls_bordered(
+    indicators: jnp.ndarray,
+    inclusion: jnp.ndarray,
+    context: BorderedPropensityContext,
+    jitter: jnp.ndarray,
+    eta_clip: jnp.ndarray,
+    *,
+    max_iterations: int,
+) -> jnp.ndarray:
+    """The same damped Newton iterations, solved in original coordinates."""
+
+    design = context.design
+    damping = BorderedInfo(*(jitter * block for block in context.gram_info))
+
+    def step(coef, _):
+        probability = jax.nn.sigmoid(jnp.clip(matmul(design, coef.T).T, -eta_clip, eta_clip))
+        weight = jnp.clip(probability * (1.0 - probability), 1e-9, None) * inclusion
+        gradient = transpose_dot(design, ((indicators - probability) * inclusion).T)
+        information = weighted_information(design, weight.T)
+        # eps I in Q coordinates is eps Z'Z here, including all global
+        # design rows even when a model's likelihood uses only a subset.
+        information = BorderedInfo(*(block + damp for block, damp in zip(information, damping)))
+        return coef + solve(design, information, gradient), None
+
+    coef, _ = jax.lax.scan(
+        step,
+        jnp.zeros((indicators.shape[0], design.num_columns), dtype=indicators.dtype),
+        None,
+        length=max_iterations,
+    )
+    return coef @ context.coefficient_mapping.T
+
+
+def _prepared_bordered_context(
+    bordered_design: BorderedDesign | BorderedPropensityContext | None,
+    basis: jnp.ndarray,
+) -> BorderedPropensityContext | None:
+    if isinstance(bordered_design, BorderedPropensityContext):
+        if basis.shape != (bordered_design.design.border.shape[0], bordered_design.design.num_columns):
+            return None
+        return bordered_design
+    if bordered_design is None:
+        return None
+    return prepare_bordered_propensity(bordered_design, basis)
+
+
+@jax.jit
+def _masked_bordered_design_is_full_rank(context: BorderedPropensityContext, inclusion: jnp.ndarray) -> jnp.ndarray:
+    """Reject locally unidentified coefficients without a full Gram matrix.
+
+    Tiny solve damping identifies absent levels only numerically. The two
+    algebraically equivalent float32 routes can then produce different finite
+    coefficients on excluded cells, so these fits keep the established route.
+    """
+
+    information = weighted_information(context.design, inclusion.T)
+    valid = jnp.all(information.diagonal > 0)
+    if context.design.num_border:
+        inverse_diagonal = 1 / jnp.maximum(information.diagonal, 1e-30)
+        schur = information.border - jnp.einsum(
+            "gdk,gek->gde", information.cross * inverse_diagonal[:, None, :], information.cross
+        )
+        scale = jnp.sqrt(jnp.maximum(jnp.diagonal(information.border, axis1=-2, axis2=-1), 1e-30))
+        normalized = schur / (scale[:, :, None] * scale[:, None, :])
+        valid = valid & jnp.all(jnp.linalg.eigvalsh(normalized) > 128 * jnp.finfo(inclusion.dtype).eps)
+    return valid
+
+
 def _rank_revealing_basis(design: np.ndarray | jnp.ndarray) -> jnp.ndarray:
     """An orthonormal basis for exactly the numerical column space of ``design``.
 
@@ -253,6 +377,7 @@ def fit_masked_propensity_coefficients(
     max_iterations: int = 25,
     jitter: float = 1e-6,
     eta_clip: float = 30.0,
+    bordered_design: BorderedDesign | BorderedPropensityContext | None = None,
 ) -> jnp.ndarray:
     """Fit several logistic models on row subsets in one shared basis.
 
@@ -260,6 +385,8 @@ def fit_masked_propensity_coefficients(
     ``inclusion`` is zero contribute neither score nor curvature. This is used
     by the low-MOI CRT to fit each target only against its own valid pool while
     retaining a compact common basis for the saddlepoint calculation.
+    An optional original ``bordered_design`` or prepared context accelerates
+    full-rank pools; locally unidentified coefficients retain the dense solve.
     """
 
     y = jnp.atleast_2d(jnp.asarray(indicators, dtype=jnp.float32))
@@ -269,6 +396,18 @@ def fit_masked_propensity_coefficients(
         raise ValueError("indicators and inclusion must have the same shape.")
     if y.shape[1] != Q.shape[0]:
         raise ValueError("indicators and basis disagree on the cell count.")
+    context = _prepared_bordered_context(bordered_design, Q)
+    if context is not None and bool(_masked_bordered_design_is_full_rank(context, mask)):
+        coefficients = _logistic_irls_bordered(
+            y,
+            mask,
+            context,
+            jnp.asarray(jitter, dtype=jnp.float32),
+            jnp.asarray(eta_clip, dtype=jnp.float32),
+            max_iterations=max_iterations,
+        )
+        if bool(jnp.all(jnp.isfinite(coefficients))):
+            return coefficients
     return _logistic_irls_masked_orthonormal(
         y,
         mask,
@@ -358,6 +497,7 @@ def fit_propensity_coefficients(
     jitter: float = 1e-6,
     eta_clip: float = 30.0,
     basis: np.ndarray | jnp.ndarray | None = None,
+    bordered_design: BorderedDesign | BorderedPropensityContext | None = None,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
     """The same fits, returned as ``(coefficients, basis)`` in an orthonormal basis.
 
@@ -377,6 +517,10 @@ def fit_propensity_coefficients(
     The logit is also the only representable form at the clip: ``eta_clip``
     runs to 30, and ``sigmoid(30) = 1 - 9.4e-14`` rounds to exactly 1.0 in
     float32, whose logit is infinite.
+
+    Pass an original ``bordered_design`` or the reusable result of
+    ``prepare_bordered_propensity`` to select structured Newton solves when
+    the original design is numerically safe. The returned basis is unchanged.
     """
 
     y = jnp.atleast_2d(jnp.asarray(indicators, dtype=jnp.float32))
@@ -386,6 +530,18 @@ def fit_propensity_coefficients(
     basis = _rank_revealing_basis(Z) if basis is None else jnp.asarray(basis, dtype=jnp.float32)
     if basis.ndim != 2 or basis.shape[0] != Z.shape[0]:
         raise ValueError("basis must have shape (cells, rank).")
+    context = _prepared_bordered_context(bordered_design, basis)
+    if context is not None:
+        coefficients = _logistic_irls_bordered(
+            y,
+            jnp.ones_like(y),
+            context,
+            jnp.asarray(jitter, dtype=jnp.float32),
+            jnp.asarray(eta_clip, dtype=jnp.float32),
+            max_iterations=max_iterations,
+        )
+        if bool(jnp.all(jnp.isfinite(coefficients))):
+            return coefficients, basis
     coefficients = _logistic_irls_orthonormal(
         y,
         basis,

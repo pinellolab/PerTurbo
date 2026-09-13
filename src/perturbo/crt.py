@@ -17,6 +17,7 @@ import dataclasses
 import warnings
 from collections.abc import Iterable
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 import jax.numpy as jnp
 import numpy as np
@@ -41,6 +42,9 @@ from perturbo._internal.score_resampling import (
     run_low_moi_score_permutations,
 )
 from perturbo.utils import compute_size_factors
+
+if TYPE_CHECKING:
+    from perturbo._internal.bordered import BorderedDesign
 
 __all__ = [
     "BaselineNullCheck",
@@ -470,6 +474,9 @@ def polish_baseline_to_null_mode(
     coefficients, since their mode is not defined.
     """
 
+    from jax.tree_util import tree_map
+
+    from perturbo._internal.bordered import detect_bordered_design, has_reference_dependency
     from perturbo._internal.jax_kernels import fisher_nb_null
 
     counts = np.asarray(nuisance.counts)
@@ -478,7 +485,14 @@ def polish_baseline_to_null_mode(
         raise ValueError("gene_block and max_iterations must be positive.")
     degenerate = counts.sum(axis=0) <= 0
     coefficients = np.array(nuisance.coefficients, dtype=np.float64, copy=True)
-    design = jnp.asarray(nuisance.nuisance_design, dtype=jnp.float32)
+    host_design = np.asarray(nuisance.nuisance_design, dtype=np.float32)
+    structured = detect_bordered_design(host_design)
+    if structured is not None and has_reference_dependency(structured):
+        structured = None
+    design = (
+        jnp.asarray(host_design) if structured is None
+        else tree_map(jnp.asarray, structured)
+    )
     offsets = np.asarray(nuisance.offsets, dtype=np.float64)
     theta = np.asarray(nuisance.dispersion, dtype=np.float64)
     for start in range(0, num_genes, gene_block):
@@ -606,16 +620,26 @@ class ControlBlock:
     gene's score equation on exactly these cells - but it came from a
     variational posterior instead, so the term is carried explicitly and
     subtracted. Dropping it inflates the statistic substantially.
+
+    A caller supplying a bordered design receives ``nuisance_direction``
+    instead of dense ``information``. The direction is ``H^-1 (Z'r)`` in the
+    original nuisance coordinates, shaped ``(nuisance, genes)``.
     """
 
     score_residual: np.ndarray
     observation_weight: np.ndarray
-    information: np.ndarray
+    information: np.ndarray | None
     nuisance_score: np.ndarray
     gene_names: tuple[str, ...]
+    nuisance_direction: np.ndarray | None = None
 
 
-def control_block_for_genes(baseline: CRTBaseline, gene_slice: slice | None = None) -> ControlBlock:
+def control_block_for_genes(
+    baseline: CRTBaseline,
+    gene_slice: slice | None = None,
+    *,
+    bordered_design: BorderedDesign | None = None,
+) -> ControlBlock:
     """Control-side residuals, weights, and nuisance blocks for a gene slice.
 
     Every quantity is independent across genes, so slicing the gene axis is a
@@ -626,9 +650,18 @@ def control_block_for_genes(baseline: CRTBaseline, gene_slice: slice | None = No
     ``beta_0``, but the score test projects the nuisance out as a fixed effect,
     and the quantity to project against is the observed information ``Z'WZ``.
     Only a jitter is added, to keep the per-gene solve well posed.
+
+    The default retains dense information for existing callers. A supplied
+    ``bordered_design`` must describe this baseline's original design; it
+    computes only the solved correction, retaining the same diagonal jitter.
     """
 
     nuisance = baseline.nuisance
+    if bordered_design is not None:
+        from perturbo._internal.bordered import has_reference_dependency
+
+        if has_reference_dependency(bordered_design):
+            bordered_design = None
     columns = slice(None) if gene_slice is None else gene_slice
     counts = nuisance.counts[:, columns]
     dispersion = nuisance.dispersion[columns]
@@ -642,18 +675,34 @@ def control_block_for_genes(baseline: CRTBaseline, gene_slice: slice | None = No
         theta=dispersion,
         coefficients=coefficients,
     )
-    num_nuisance = nuisance.nuisance_design.shape[1]
-    information = _nuisance_information(
-        nuisance.nuisance_design,
-        weight,
-        ridge=baseline.curvature_jitter * np.eye(num_nuisance),
-    )
+    direction = None
+    if bordered_design is None:
+        num_nuisance = nuisance.nuisance_design.shape[1]
+        information = _nuisance_information(
+            nuisance.nuisance_design,
+            weight,
+            ridge=baseline.curvature_jitter * np.eye(num_nuisance),
+        )
+        nuisance_score = nuisance.nuisance_design.T @ residual
+    else:
+        from perturbo._internal.bordered import solve, transpose_dot, weighted_information
+
+        score_by_gene = transpose_dot(bordered_design, jnp.asarray(residual, dtype=jnp.float64))
+        blocks = weighted_information(
+            bordered_design,
+            jnp.asarray(weight, dtype=jnp.float64),
+            ridge=float(baseline.curvature_jitter),
+        )
+        direction = np.asarray(solve(bordered_design, blocks, score_by_gene)).T
+        nuisance_score = np.asarray(score_by_gene).T
+        information = None
     return ControlBlock(
         score_residual=residual,
         observation_weight=weight,
         information=information,
-        nuisance_score=nuisance.nuisance_design.T @ residual,
+        nuisance_score=nuisance_score,
         gene_names=nuisance.gene_names[columns],
+        nuisance_direction=direction,
     )
 
 
@@ -921,9 +970,9 @@ class ChunkCRTResult:
 def _categorical_batch_applies(design) -> bool:
     """Whether the chunk design is exactly ``[intercept, one-hot batch]``.
 
-    Only that shape is served by the categorical kernel; a continuous covariate
-    beside the batch keeps the dense path. Split out so tests can force the
-    dense path on a batch design and check the two agree.
+    Only that shape is served by the diagonal categorical kernel; mixed
+    covariates instead use the general-design dispatcher, which recognizes
+    supported bordered designs. Split out so tests can compare representations.
     """
     return is_intercept_and_one_hot(np.asarray(design.nuisance_design))
 
@@ -968,7 +1017,12 @@ def fit_shared_propensity_coefficients(
     ``N``, so both give the same linear predictor on every chunk's cells.
     """
 
-    from perturbo._internal.high_moi.resampling import fit_propensity_coefficients
+    from perturbo._internal.high_moi.resampling import (
+        fit_propensity_coefficients, prepare_bordered_propensity, propensity_basis,
+    )
+    from perturbo._internal.bordered import (
+        detect_bordered_design, matmul_numpy, solve_numpy, transpose_dot_numpy, weighted_information_numpy,
+    )
 
     design = np.asarray(nuisance_design, dtype=np.float32)
     response = np.asarray(targeting, dtype=np.float32).reshape(-1)
@@ -976,11 +1030,16 @@ def fit_shared_propensity_coefficients(
         raise ValueError("nuisance_design and targeting must agree on the cell count.")
     if design.shape[0] == 0:
         raise ValueError("The screen-wide selection model needs at least one cell.")
+    basis = propensity_basis(design)
+    structured = detect_bordered_design(design)
+    context = None if structured is None else prepare_bordered_propensity(structured, basis)
     coefficients, basis = fit_propensity_coefficients(
         response[None, :],
         design,
         max_iterations=int(max_iterations),
         eta_clip=float(eta_clip),
+        basis=basis,
+        bordered_design=context,
     )
     # The unclipped predictor on purpose. Clipping is a step-halving stand-in
     # for separation, and a clipped vector need not lie in the design's column
@@ -990,20 +1049,29 @@ def fit_shared_propensity_coefficients(
     ).reshape(-1)
 
     num_columns = design.shape[1]
-    gram = np.zeros((num_columns, num_columns), dtype=np.float64)
-    rhs = np.zeros(num_columns, dtype=np.float64)
-    for start in range(0, design.shape[0], SHARED_SELECTION_FIT_BLOCK):
-        stop = start + SHARED_SELECTION_FIT_BLOCK
-        block = design[start:stop].astype(np.float64)
-        gram += block.T @ block
-        rhs += block.T @ eta[start:stop]
-    beta = np.linalg.lstsq(gram, rhs, rcond=None)[0]
+    if context is not None:
+        original = structured.astype(np.float64)
+        gram = weighted_information_numpy(original, np.ones((design.shape[0], 1)))
+        rhs = transpose_dot_numpy(original, eta[:, None])
+        beta = solve_numpy(original, gram, rhs)[0]
+    else:
+        gram = np.zeros((num_columns, num_columns), dtype=np.float64)
+        rhs = np.zeros(num_columns, dtype=np.float64)
+        for start in range(0, design.shape[0], SHARED_SELECTION_FIT_BLOCK):
+            stop = start + SHARED_SELECTION_FIT_BLOCK
+            block = design[start:stop].astype(np.float64)
+            gram += block.T @ block
+            rhs += block.T @ eta[start:stop]
+        beta = np.linalg.lstsq(gram, rhs, rcond=None)[0]
 
     residual = 0.0
     for start in range(0, design.shape[0], SHARED_SELECTION_FIT_BLOCK):
         stop = start + SHARED_SELECTION_FIT_BLOCK
-        block = design[start:stop].astype(np.float64)
-        residual = max(residual, float(np.max(np.abs(block @ beta - eta[start:stop]))))
+        predicted = (
+            matmul_numpy(original.take(slice(start, stop)), beta[:, None])[:, 0]
+            if context is not None else design[start:stop].astype(np.float64) @ beta
+        )
+        residual = max(residual, float(np.max(np.abs(predicted - eta[start:stop]))))
     scale = max(1.0, float(np.max(np.abs(eta))))
     if residual > 1e-4 * scale:
         raise ValueError(
@@ -1438,8 +1506,10 @@ def prepare_all_cells_propensity(
 
     from perturbo._internal.high_moi.resampling import (
         fit_propensity_coefficients,
+        prepare_bordered_propensity,
         propensity_basis,
     )
+    from perturbo._internal.bordered import detect_bordered_design
 
     num_cells = int(np.asarray(data.counts).shape[0])
     if baseline.num_control_cells != num_cells:
@@ -1477,7 +1547,12 @@ def prepare_all_cells_propensity(
         )
 
     coefficients_parts = []
-    basis = None
+    basis = np.asarray(propensity_basis(propensity_design))
+    structured_propensity = detect_bordered_design(propensity_design)
+    propensity_context = (
+        None if structured_propensity is None
+        else prepare_bordered_propensity(structured_propensity, basis)
+    )
     order = np.argsort(element_index, kind="stable")
     sorted_elements = element_index[order]
     sorted_cells = cell_index[order]
@@ -1487,18 +1562,15 @@ def prepare_all_cells_propensity(
         indicators = np.zeros((stop - start, num_cells), dtype=np.float32)
         for local, element in enumerate(range(start, stop)):
             indicators[local, sorted_cells[starts[element] : starts[element + 1]]] = 1.0
-        coef, basis_batch = fit_propensity_coefficients(
+        coef, _ = fit_propensity_coefficients(
             indicators,
             propensity_design,
             max_iterations=int(max_iterations),
             eta_clip=float(eta_clip),
             basis=basis,
+            bordered_design=propensity_context,
         )
         coefficients_parts.append(np.asarray(coef))
-        if basis is None:
-            basis = np.asarray(basis_batch)
-    if basis is None:
-        basis = np.asarray(propensity_basis(propensity_design))
     coefficients = (
         np.concatenate(coefficients_parts, axis=0)
         if coefficients_parts
@@ -1552,6 +1624,7 @@ def run_crt_all_cells(
     """
 
     from perturbo._internal.saddlepoint import fit_high_moi_propensity_saddlepoint
+    from perturbo._internal.bordered import detect_bordered_design, has_reference_dependency
 
     num_cells = int(np.asarray(data.counts).shape[0])
     if baseline.num_control_cells != num_cells:
@@ -1584,6 +1657,9 @@ def run_crt_all_cells(
     coefficients = propensity_fit.coefficients
     basis = propensity_fit.basis
     num_elements = len(element_names)
+    bordered_design = detect_bordered_design(baseline.nuisance.nuisance_design)
+    if bordered_design is not None and has_reference_dependency(bordered_design):
+        bordered_design = None
 
     num_genes = baseline.num_genes
     width = num_genes if gene_chunk_size is None else int(gene_chunk_size)
@@ -1598,15 +1674,20 @@ def run_crt_all_cells(
     null_skewness = np.full(shape, np.nan)
     for start in range(0, num_genes, width):
         gene_slice = slice(start, min(start + width, num_genes))
-        block = control_block_for_genes(baseline, gene_slice)
-        information = np.asarray(block.information, dtype=np.float64)
-        inverse = np.linalg.inv(information)
+        block = control_block_for_genes(baseline, gene_slice, bordered_design=bordered_design)
+        correction = (
+            {"nuisance_direction": block.nuisance_direction}
+            if block.nuisance_direction is not None
+            else {
+                "nuisance_information_inverse": np.linalg.inv(np.asarray(block.information, dtype=np.float64)),
+                "nuisance_score": np.asarray(block.nuisance_score),
+            }
+        )
         fit = fit_high_moi_propensity_saddlepoint(
             score_residual=np.asarray(block.score_residual),
             observation_weight=np.asarray(block.observation_weight),
             nuisance_design=nuisance_design,
-            nuisance_information_inverse=inverse,
-            nuisance_score=np.asarray(block.nuisance_score),
+            **correction,
             cell_index=cell_index,
             element_index=element_index,
             num_elements=num_elements,
