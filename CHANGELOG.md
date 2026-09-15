@@ -10,6 +10,8 @@ and this project adheres to [Semantic Versioning][].
 
 ## [Unreleased]
 
+## [2.0.0rc8] - 2026-09-15
+
 ### Fixed
 
 -   Perturbation targets with no assigned cell no longer abort a control-anchored
