@@ -1167,29 +1167,105 @@ def measure_realized_moi(
     An AnnData input carries one perturbation label per cell, so its multiplicity is
     one by construction and only the control count has to be counted.
     """
+    mask, per_cell, source = _control_cells_and_multiplicity(
+        data,
+        perturbation_modality_key=perturbation_modality_key,
+        perturbation_layer=perturbation_layer,
+        perturbation_key=perturbation_key,
+        control_substring=control_substring,
+        perturbation_element_varm_key=perturbation_element_varm_key,
+        perturbation_element_names_uns_key=perturbation_element_names_uns_key,
+        modality_key=modality_key,
+    )
+    if per_cell is None:
+        return {
+            "median_guides_per_cell": 1.0,
+            "mean_guides_per_cell": 1.0,
+            "n_cells": float(mask.size),
+            "n_control_cells": float(int(mask.sum())),
+            "source": source,
+        }
+    return {
+        "median_guides_per_cell": float(np.median(per_cell)),
+        "mean_guides_per_cell": float(np.mean(per_cell)),
+        "n_cells": float(per_cell.size),
+        "n_control_cells": float(int(mask.sum())),
+        "source": source,
+    }
+
+
+def control_cell_mask(
+    data,
+    *,
+    perturbation_modality_key: str | None,
+    perturbation_layer: str | None,
+    perturbation_key: str | None = None,
+    control_substring: str | None = None,
+    perturbation_element_varm_key: str | None = None,
+    perturbation_element_names_uns_key: str | None = None,
+    modality_key: str | None = None,
+    obs_names=None,
+) -> np.ndarray:
+    """Per-cell mask of the cells that carry nothing but control perturbations.
+
+    This is the same rule :func:`measure_realized_moi` counts with - a cell is a
+    control when every perturbation it carries is a control one - exposed per cell
+    so a diagnostic can cross it with another obs column. Pass ``obs_names`` to
+    align a MuData's perturbation modality to the analysed cells first, which is
+    what the loaders do before selecting controls.
+    """
+
+    mask, _, _ = _control_cells_and_multiplicity(
+        data,
+        perturbation_modality_key=perturbation_modality_key,
+        perturbation_layer=perturbation_layer,
+        perturbation_key=perturbation_key,
+        control_substring=control_substring,
+        perturbation_element_varm_key=perturbation_element_varm_key,
+        perturbation_element_names_uns_key=perturbation_element_names_uns_key,
+        modality_key=modality_key,
+        obs_names=obs_names,
+    )
+    return mask
+
+
+def _control_cells_and_multiplicity(
+    data,
+    *,
+    perturbation_modality_key: str | None,
+    perturbation_layer: str | None,
+    perturbation_key: str | None = None,
+    control_substring: str | None = None,
+    perturbation_element_varm_key: str | None = None,
+    perturbation_element_names_uns_key: str | None = None,
+    modality_key: str | None = None,
+    obs_names=None,
+) -> tuple[np.ndarray, np.ndarray | None, str]:
+    """Control-cell mask, perturbations per cell, and where both were read from.
+
+    The multiplicity is ``None`` for a one-label-per-cell input, where it is one by
+    construction and nothing has to be counted.
+    """
     if perturbation_modality_key is None or not hasattr(data, "mod"):
         # One label per cell, read from the same obs frame the fit itself uses: the
         # analysed modality's when the input is a MuData, the object's own otherwise.
         adata = _resolve_adata(data, modality_key) if hasattr(data, "mod") else data
-        n_cells = int(adata.n_obs)
-        controls = 0
+        if obs_names is not None:
+            adata = adata[obs_names]
+        mask = np.zeros(int(adata.n_obs), dtype=bool)
         if perturbation_key is not None and perturbation_key in adata.obs:
             labels = adata.obs[perturbation_key].astype(str).to_numpy()
             if control_substring is not None:
-                controls = int(np.sum(np.char.find(labels.astype(str), str(control_substring)) >= 0))
-        return {
-            "median_guides_per_cell": 1.0,
-            "mean_guides_per_cell": 1.0,
-            "n_cells": float(n_cells),
-            "n_control_cells": float(controls),
-            "source": "anndata: one label per cell",
-        }
+                mask = np.char.find(labels.astype(str), str(control_substring)) >= 0
+        return mask, None, "anndata: one label per cell"
 
     pert_adata = _resolve_perturbation_modality(data, perturbation_modality_key)
+    if obs_names is not None:
+        pert_adata = pert_adata[obs_names]
     matrix = _get_layer_matrix(pert_adata, perturbation_layer)
     per_cell = _positive_counts_per_row_bounded(matrix)
     per_cell = per_cell.astype(np.float64)
-    n_control = int(np.sum(per_cell == 0))
+    control_mask = per_cell == 0
     if control_substring is not None:
         # A guide is a control when its own name carries the substring, or when the
         # element it maps to does: the CLI matches the substring against the per-cell
@@ -1216,14 +1292,12 @@ def measure_realized_moi(
                 column_indices=np.flatnonzero(is_control_guide),
             )
             # A cell counts as a control when everything it carries is a control guide.
-            n_control = int(np.sum((carried > 0) & (carried == per_cell)))
-    return {
-        "median_guides_per_cell": float(np.median(per_cell)),
-        "mean_guides_per_cell": float(np.mean(per_cell)),
-        "n_cells": float(per_cell.size),
-        "n_control_cells": float(n_control),
-        "source": f"mudata: guides per cell from '{perturbation_modality_key}'",
-    }
+            control_mask = (carried > 0) & (carried == per_cell)
+    return (
+        control_mask,
+        per_cell,
+        f"mudata: guides per cell from '{perturbation_modality_key}'",
+    )
 
 
 def _resolve_perturbation_modality(data, perturbation_modality_key: str):

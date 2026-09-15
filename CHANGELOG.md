@@ -10,6 +10,38 @@ and this project adheres to [Semantic Versioning][].
 
 ## [Unreleased]
 
+### Added
+
+-   A run with `--batch-covariate` now reports how its control cells sit across the
+    batch levels, and warns when they are confined to one. Measured on a
+    126,154-cell TAP-seq screen with 14 sequencing lanes: all 30 non-targeting
+    guides had been prepared in one lane, so 2,033 of the 2,049 control-only cells
+    sat there and the other 13 lanes held between zero and four each. The batch
+    covariate was supplied and did not help, because the control pool carries no
+    information about the levels it has no cells in. Control-anchored, every lane
+    effect read as a knockdown - 1,241 enhancer guides over 50 Mb "knocked down"
+    MRPL13. All-cells, the non-targeting guides themselves returned 21.9% of tests
+    at p < 0.05 while the targeting guides, spread over every lane, were
+    calibrated. Within the one lane both pools were calibrated at 4.8%.
+
+    Every run with a batch covariate and an identifiable control pool prints one
+    `[perturbo] controls: ...` line with the control cell count, the number of
+    batch levels, the busiest level's share of the control cells, that level's
+    share of the analysed cells and its control fraction, and how many levels hold
+    at least 20 control cells. A `[perturbo] WARNING:` line and a `RuntimeWarning`
+    follow when the controls are confined: the busiest level holds more than 90% of
+    the control cells while holding less than 50% of the analysed cells, or exactly
+    one level holds at least 20 control cells while the screen has more than one
+    level. The warning names the consequence for the pool in use - that the
+    control-anchored pool is effectively a single batch and cannot identify the
+    other levels' effects from controls alone, or that all-cells non-targeting
+    calibration checks are confounded with batch and should be read within the
+    level. The numbers are recorded in `crt_metadata.json` and
+    `covariate_metadata.json` as `control_batch_levels`,
+    `control_top_batch_level`, `control_top_batch_share`,
+    `control_top_batch_screen_share`, `control_batch_represented_levels` and
+    `control_batch_confined`, among others. No numerical result changes.
+
 ## [2.0.0rc8] - 2026-09-15
 
 ### Fixed
