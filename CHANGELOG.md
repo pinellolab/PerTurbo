@@ -12,6 +12,15 @@ and this project adheres to [Semantic Versioning][].
 
 ### Fixed
 
+-   Perturbation targets with no assigned cell no longer abort a control-anchored
+    CRT run. The low-MOI design keeps only cells carrying exactly one
+    perturbation, so a sparse guide can lose every cell - 37 of 4,120 guides on a
+    real TAP-seq screen had none to begin with. Those targets are dropped from the
+    design, reported on stdout with a count and a truncated name list, and counted
+    in `crt_metadata.json` as `targets_without_assigned_cells`. Their
+    `element_effects` rows remain present with missing CRT statistics, so a fixed
+    target set still resolves and an untested target stays distinguishable from one
+    that tested null. An input where *every* target is empty is still fatal.
 -   Grouping guides into elements is a sparse product. The dense int8 product had
     no BLAS kernel and ran for hours on one core on a 233,000-cell screen before
     anything reached the GPU.

@@ -20,7 +20,7 @@ import numpyro.distributions as dist
 from scipy import optimize
 
 from perturbo.core import PerTurboData
-from perturbo.utils import compute_size_factors
+from perturbo.utils import compute_size_factors, summarize_names
 
 
 @dataclass(frozen=True)
@@ -211,7 +211,16 @@ def prepare_joint_nb_design(
     target_counts = target_design[keep].sum(axis=0)
     empty_targets = [name for name, count in zip(target_names, target_counts, strict=True) if count == 0]
     if empty_targets:
-        raise ValueError(f"Target perturbations have no active cells: {empty_targets}")
+        # Still fatal here, unlike the control-anchored CRT, which drops empty
+        # targets and carries on. The joint Laplace fit needs a positive-definite
+        # effect block, and an all-zero design column contributes no curvature at
+        # all: without an effect prior ``low_moi_marginal_variances`` raises
+        # LinAlgError on it, so there is no fit to salvage by dropping the column.
+        raise ValueError(
+            f"{len(empty_targets)} of {len(target_names)} target perturbations have no active cells: "
+            f"{summarize_names(empty_targets)}. The joint fit needs a nonzero design column per "
+            "target; drop them from the design or use the control-anchored CRT, which tolerates them."
+        )
 
     if use_observed_size_factors and data.size_factors is not None:
         offsets = np.asarray(data.size_factors, dtype=np.float32)

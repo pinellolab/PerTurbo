@@ -1,5 +1,5 @@
 import warnings
-from typing import Any
+from typing import Any, Iterable
 
 from anndata import AnnData
 import jax.numpy as jnp
@@ -8,6 +8,22 @@ import pandas as pd
 
 
 VALID_SIZE_FACTOR_MODES = ("sum_log", "median_of_ratios")
+
+
+def summarize_names(names: Iterable[str], limit: int = 8) -> str:
+    """A readable prefix of a name list, for a message a person has to act on.
+
+    The CRT's empty-target guard used to interpolate the whole list, and on a real
+    screen that was 149 guide names on one line - unreadable, and the count that
+    actually mattered was nowhere in it. The full list belongs in a machine-readable
+    record such as ``crt_metadata.json``; this is what goes on stdout.
+    """
+
+    listed = [str(name) for name in names]
+    if not listed:
+        return "none"
+    shown = ", ".join(listed[:limit])
+    return shown if len(listed) <= limit else f"{shown}, ... (+{len(listed) - limit} more)"
 
 
 def compute_size_factors(

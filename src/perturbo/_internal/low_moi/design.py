@@ -9,7 +9,7 @@ import jax.numpy as jnp
 import numpy as np
 
 from perturbo.core import PerTurboData
-from perturbo.utils import compute_size_factors
+from perturbo.utils import compute_size_factors, summarize_names
 
 
 @dataclass(frozen=True)
@@ -33,6 +33,11 @@ class LowMOIDesign:
     source_cell_indices: jnp.ndarray
     batch_codes: jnp.ndarray | None = None
     batch_names: tuple[str, ...] | None = None
+    # Targets no retained cell carries, in screen order. They are absent from
+    # ``target_names`` and ``target_codes`` - there is nothing to test - and travel
+    # here so the run can report them and mark their rows untested rather than
+    # letting them read as a tested target with no signal.
+    empty_target_names: tuple[str, ...] = ()
     _gene_independent_token: object | None = None
 
     @property
@@ -152,9 +157,44 @@ def prepare_low_moi_design(
     target_codes = target_codes[keep]
     target_names = tuple(names[index] for index in target_original)
     target_counts = np.bincount(target_codes[target_codes >= 0], minlength=len(target_names))
-    if np.any(target_counts == 0):
-        missing = [name for name, count in zip(target_names, target_counts, strict=True) if count == 0]
-        raise ValueError(f"Target perturbations have no active cells: {missing}")
+    empty = target_counts == 0
+    empty_target_names: tuple[str, ...] = ()
+    if empty.all():
+        # Every target gone is not a sparse screen, it is a broken one: the
+        # assignment, the control names, or the cell mask is wrong, and there is no
+        # hypothesis left to test. Nothing to proceed through.
+        raise ValueError(
+            f"No target perturbation has an active cell: all {len(target_names)} targets are empty "
+            "after the single-assignment and cell masks. Check the perturbation assignment, the "
+            "control perturbation names, and the cell mask."
+        )
+    if empty.any():
+        # Guides are sparse. The control-anchored design keeps only cells carrying
+        # exactly one perturbation, so a guide with few cells can lose all of them
+        # and a guide with none to begin with never had any - on a real TAP-seq
+        # screen that was 37 of 4,120 guides before masking. Dropping them leaves
+        # the rest of the screen testable; raising threw away 126,000 cells of work
+        # over targets that could not have been tested either way.
+        empty_target_names = tuple(
+            name for name, is_empty in zip(target_names, empty, strict=True) if is_empty
+        )
+        print(
+            f"[perturbo] Dropping {len(empty_target_names)} of {len(target_names)} target "
+            f"perturbations with no active cell: {summarize_names(empty_target_names)}. "
+            "They are left untested rather than aborting the run."
+        )
+        keep_targets = ~empty
+        remap = np.full(len(target_names), -1, dtype=np.int32)
+        remap[keep_targets] = np.arange(int(keep_targets.sum()), dtype=np.int32)
+        # No retained cell carries a dropped code - that is what empty means - so
+        # this renumbers survivors only. The cell axis is untouched, which is why a
+        # design that drops an empty target equals one built without that name.
+        target_codes = np.where(target_codes >= 0, remap[np.maximum(target_codes, 0)], -1).astype(
+            np.int32, copy=False
+        )
+        target_names = tuple(
+            name for name, is_empty in zip(target_names, empty, strict=True) if not is_empty
+        )
 
     if use_observed_size_factors and data.size_factors is not None:
         offsets = np.asarray(data.size_factors, dtype=np.float32)
@@ -207,5 +247,6 @@ def prepare_low_moi_design(
         source_cell_indices=jnp.asarray(np.flatnonzero(keep), dtype=jnp.int32),
         batch_codes=batch_codes,
         batch_names=batch_names,
+        empty_target_names=empty_target_names,
         _gene_independent_token=data._analysis_design_token,
     )

@@ -41,7 +41,7 @@ from perturbo._internal.score_resampling import (
     precompute_low_moi_permutations,
     run_low_moi_score_permutations,
 )
-from perturbo.utils import compute_size_factors
+from perturbo.utils import compute_size_factors, summarize_names
 
 if TYPE_CHECKING:
     from perturbo._internal.bordered import BorderedDesign
@@ -73,6 +73,7 @@ __all__ = [
     "polish_baseline_to_null_mode",
     "run_crt_for_chunk",
     "run_crt_all_cells",
+    "summarize_names",
     "CRT_POOLS",
     "validate_crt_config",
     "validate_offset_compatibility",
@@ -965,6 +966,11 @@ class ChunkCRTResult:
     # Cells the control-anchored test set aside because they carried more than one
     # perturbation; zero on the all-cells pool and on label-vector inputs.
     num_multi_assignment_cells_dropped: int = 0
+    # Targets the design dropped because no cell it could use carried them. They are
+    # absent from ``target_names``, so the screen-wide table leaves their rows
+    # missing; this is how the run knows to say which ones and why. Empty on the
+    # all-cells pool, which tests every element over every cell.
+    empty_target_names: tuple[str, ...] = ()
 
 
 def _categorical_batch_applies(design) -> bool:
@@ -1401,6 +1407,7 @@ def run_crt_for_chunk(
         parametric=parametric,
         null_summaries=null_summaries,
         num_multi_assignment_cells_dropped=num_multi_dropped,
+        empty_target_names=tuple(design.empty_target_names),
         resampling_mechanism=resampling_mechanism,
         saddlepoint_only=saddlepoint_only,
     )
@@ -1853,6 +1860,8 @@ class CRTAccumulator:
         self._gene_index = {name: position for position, name in enumerate(self.gene_names)}
         self._dropped_by_target_chunk: dict[tuple[str, ...], int] = {}
         self.num_multi_assignment_cells_dropped = 0
+        self._empty_by_target_chunk: dict[tuple[str, ...], tuple[str, ...]] = {}
+        self.empty_target_names: tuple[str, ...] = ()
         self.observed_score = np.full(shape, np.nan, dtype=np.float64)
         self.p_value = None if self.saddlepoint_only else np.full(shape, np.nan, dtype=np.float64)
         self.null_converged = np.zeros(shape, dtype=bool)
@@ -1887,6 +1896,14 @@ class CRTAccumulator:
             int(getattr(result, "num_multi_assignment_cells_dropped", 0)),
         )
         self.num_multi_assignment_cells_dropped = sum(self._dropped_by_target_chunk.values())
+        # Keyed by the chunk's tested names, like the cell count above, so a gene
+        # block re-absorbing the same chunk does not double count. Reported in screen
+        # order rather than absorption order, which the chunk decomposition sets.
+        self._empty_by_target_chunk[target_chunk] = tuple(
+            str(name) for name in getattr(result, "empty_target_names", ()) or ()
+        )
+        empty = {name for names in self._empty_by_target_chunk.values() for name in names}
+        self.empty_target_names = tuple(name for name in self.element_names if name in empty)
         self.observed_score[destination] = result.observed_score
         if self.p_value is not None:
             self.p_value[destination] = result.p_value

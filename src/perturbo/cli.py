@@ -70,6 +70,7 @@ from .crt import (
     prepare_crt_baseline,
     run_crt_all_cells,
     run_crt_for_chunk,
+    summarize_names,
     validate_crt_config,
 )
 from .core import measure_realized_moi
@@ -2041,6 +2042,16 @@ def main(argv: list[str] | None = None) -> None:
                 f"[perturbo] CRT: {crt_accumulator.num_multi_assignment_cells_dropped:,} analysed cells carried more "
                 "than one perturbation and were set aside by the control-anchored test."
             )
+        if crt_accumulator.empty_target_names:
+            # Said once for the whole run, beside the per-design message: a gene-block
+            # or chunked run prints that one per block, and the screen-wide count is
+            # the number a person acts on.
+            print(
+                f"[perturbo] CRT: {len(crt_accumulator.empty_target_names):,} of "
+                f"{len(all_perturbation_names):,} elements had no cell the control-anchored test could "
+                f"use and were left untested: {summarize_names(crt_accumulator.empty_target_names)}. "
+                "Their rows carry missing CRT statistics, not zeros; crt_metadata.json lists every name."
+            )
         # A small record of how the test was configured and what it measured, so a
         # pipeline can see which pool ran without parsing the log.
         crt_metadata = {
@@ -2055,6 +2066,11 @@ def main(argv: list[str] | None = None) -> None:
             "tested_control_elements": bool(args.crt_test_control_elements),
             "two_sided": args.crt_two_sided,
             "multi_assignment_cells_set_aside": int(crt_accumulator.num_multi_assignment_cells_dropped),
+            # Untested because no usable cell carried them, not because they tested
+            # null. Their element_effects rows are present with missing CRT columns,
+            # so this is how a pipeline tells the two apart.
+            "targets_without_assigned_cells": len(crt_accumulator.empty_target_names),
+            "targets_without_assigned_cells_names": list(crt_accumulator.empty_target_names),
         }
         (out_dir / "crt_metadata.json").write_text(json.dumps(crt_metadata, indent=2, default=str))
         tested = int(crt_accumulator.tested.sum())
