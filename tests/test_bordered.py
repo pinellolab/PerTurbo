@@ -310,6 +310,41 @@ def test_indicator_contraction_and_scatter_reductions_agree(monkeypatch, groups)
     np.testing.assert_allclose(results["indicator"][1], results["scatter"][1], rtol=2e-12, atol=2e-12)
 
 
+def test_indicator_contraction_matches_the_scatter_in_plain_float32(monkeypatch):
+    """The production dtype, where an accelerator may quietly drop mantissa bits.
+
+    Every earlier case runs under x64, which hides the one risk this rewrite
+    carries: the scatter added float32 terms exactly, while a GEMM is free to
+    run in a reduced precision - TF32 on Ampere and later - unless the
+    contraction asks for otherwise. Compare both routes against a float64
+    reference at a tolerance float32 accumulation over 4,100 rows can meet, so
+    a silently downgraded contraction fails here rather than in a p-value.
+    """
+
+    dense, weights, _ = _problem(n=4100, groups=13, genes=4)
+    design = detect_bordered_design(dense)
+    assert design.num_groups == 13
+    reference = np.einsum("nq,ng->gq", dense, weights)   # float64 on the host
+
+    routes = {}
+    for name, limit in (("indicator", 256), ("scatter", 0)):
+        monkeypatch.setattr(bordered_module, "_DENSE_SEGMENT_GROUP_LIMIT", limit)
+        with _x64(False):
+            result = np.asarray(
+                transpose_dot(design.astype(np.float32), jnp.asarray(weights, dtype=jnp.float32))
+            )
+        assert result.dtype == np.float32
+        routes[name] = result.astype(np.float64)
+
+    # ~4,100 float32 additions per entry. Measured: both routes come within
+    # 6.2e-7 relative of the exact sum, where rounding the same inputs to
+    # TF32's ten mantissa bits costs 1.2e-3 - three orders of magnitude of
+    # margin, so a downgraded contraction cannot slip through this.
+    np.testing.assert_allclose(routes["indicator"], reference, rtol=2e-6, atol=1e-4)
+    np.testing.assert_allclose(routes["scatter"], reference, rtol=2e-6, atol=1e-4)
+    np.testing.assert_allclose(routes["indicator"], routes["scatter"], rtol=2e-6, atol=1e-4)
+
+
 def test_indicator_contraction_respects_the_materialization_budget(monkeypatch):
     """A wide group axis must fall back rather than build a huge indicator."""
 

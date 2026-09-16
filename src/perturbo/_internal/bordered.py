@@ -157,7 +157,12 @@ def _segment_sum(data, codes, num_groups, xp):
     ):
         flat = data.reshape(rows, -1)
         indicator = (codes[:, None] == jnp.arange(num_groups, dtype=codes.dtype)).astype(flat.dtype)
-        return (indicator.T @ flat).reshape((num_groups,) + data.shape[1:])
+        # The scatter this replaces added float32 terms exactly. XLA:GPU would
+        # otherwise be free to run the contraction in TF32 on Ampere and later,
+        # which would silently drop the reduction to ~10 mantissa bits in the
+        # information matrix behind `fisher_nb_null` and the low-MOI score.
+        summed = jnp.matmul(indicator.T, flat, precision=jax.lax.Precision.HIGHEST)
+        return summed.reshape((num_groups,) + data.shape[1:])
     return jax.ops.segment_sum(data, codes, num_segments=num_groups + 1)[:num_groups]
 
 
