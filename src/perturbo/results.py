@@ -200,6 +200,21 @@ def build_standard_element_effects_df(
     )
 
 
+NON_FLOAT_EXTRA_COLUMNS = frozenset(
+    {"crt_observed_nonzero", "crt_low_information"}
+)
+"""Extra columns written in their own dtype rather than cast to float64.
+
+Every other extra column is a probability or a statistic and float64 is the
+right container for it. A cell count is an integer and a flag is a boolean, and
+a consumer that has to compare ``crt_low_information == 1.0`` to read a yes/no
+is being handed the wrong type. Named explicitly rather than inferred from the
+array's dtype, so that adding a boolean column elsewhere cannot silently change
+the parquet schema of a column that already ships as a double (the tail
+families' ``valid`` and ``used_screen`` fields arrive here as booleans).
+"""
+
+
 def iter_standard_element_effects_frames(
     *,
     method: str,
@@ -262,8 +277,10 @@ def iter_standard_element_effects_frames(
             "posterior_prob": pd.Series(dtype=np.float32),
             "empirical_p_value": pd.Series(dtype=np.float32),
         })
-        for name in extras:
-            frame[name] = pd.Series(dtype=np.float64)
+        for name, values in extras.items():
+            frame[name] = pd.Series(
+                dtype=values.dtype if name in NON_FLOAT_EXTRA_COLUMNS else np.float64
+            )
         yield frame
         return
     for start in range(0, flat_loc.size, row_block_size):
@@ -293,8 +310,12 @@ def iter_standard_element_effects_frames(
             "empirical_p_value": empirical.astype(np.float32, copy=False),
         })
         for name, values in extras.items():
-            # Tail columns stay float64 to preserve probabilities below float32 range.
-            frame[name] = np.asarray(values[element_index, gene_index], dtype=np.float64)
+            block = values[element_index, gene_index]
+            if name in NON_FLOAT_EXTRA_COLUMNS:
+                frame[name] = block
+            else:
+                # Tail columns stay float64 to preserve probabilities below float32 range.
+                frame[name] = np.asarray(block, dtype=np.float64)
         yield frame
 
 
@@ -416,6 +437,7 @@ __all__ = [
     "build_element_effects_df",
     "build_standard_element_effects_df",
     "iter_standard_element_effects_frames",
+    "NON_FLOAT_EXTRA_COLUMNS",
     "write_standard_element_effects_parquet",
     "build_guide_efficiency_df",
     "build_guide_effects_df",

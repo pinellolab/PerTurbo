@@ -122,6 +122,28 @@ and this project adheres to [Semantic Versioning][].
 
 ### Added
 
+-   Every CRT pair now says how much data its p-value rests on. The element table
+    gains `crt_observed_nonzero` (how many of the element's cells detected the
+    gene, SCEPTRE's low-MOI effective sample size), `crt_expected_nonzero` (how
+    many the stage-one null expected to, summing `1 - (theta/(theta+mu))^theta`
+    over the same cells at the baseline's own fitted mean) and
+    `crt_low_information`, set when neither reaches
+    `--crt-min-informative-cells` (default 5; 0 keeps the counts and flags
+    nothing). `crt_metadata.json` records the threshold, the flagged-pair count,
+    how many of those are otherwise significant at q<0.05, and how many genes are
+    flagged for every element; the run prints the same counts.
+
+    It is a flag and never a gate: p-values, q-values and every validity field
+    are bit-identical with the threshold set to any value. The two counts are
+    both needed because each is wrong in one direction. On a 26,432-cell Replogle
+    chunk, 403 pairs move by more than 0.1 log10 p between two runs of the
+    identical binary; `max(observed, expected) < 5` catches 386 of them and
+    removes 1 of 116 on-target calls, where observed alone at 7 removes 40 of
+    them (a real knockdown pushes observed to zero) and expected alone at 5
+    removes 164 of 245 induction-like calls (an induction from an undetected
+    baseline expects nothing). Both CRT pools compute the counts, over each
+    element's own cells, as one sparse indicator product per gene block.
+
 -   A separated propensity fit no longer needs to be diagnosed from its output:
     `AllCellsPropensityFit` carries `batch_codes` and `element_support`, and the
     CLI reports how many elements miss a level.

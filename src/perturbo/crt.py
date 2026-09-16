@@ -64,6 +64,7 @@ __all__ = [
     "CRT_ALL_TAIL_FAMILIES",
     "CRT_MECHANISMS",
     "fit_tail_families",
+    "DEFAULT_CRT_MIN_INFORMATIVE_CELLS",
     "DEFAULT_NEWTON_STEP_TOLERANCE",
     "SUPPORTED_LIKELIHOODS",
     "SUPPORTED_SIZE_FACTOR_MODES",
@@ -135,6 +136,95 @@ SUPPORTED_SIZE_FACTOR_MODES = ("observed", "none")
 # statistic stays well under the float32 noise the score kernels already carry.
 # Inspect the reported distribution on a new dataset before trusting it blindly.
 DEFAULT_NEWTON_STEP_TOLERANCE = 0.05
+
+# Below this many informative cells a pair's statistic is a sum over a handful
+# of Bernoulli-ish terms and its tail is being extrapolated from almost nothing.
+#
+# "Informative" is counted two ways and the larger wins:
+# ``observed_nonzero`` is how many of the element's own cells actually detected
+# the gene (SCEPTRE's low-MOI effective sample size) and ``expected_nonzero`` is
+# how many the fitted null expected to. Either alone is wrong in one direction.
+# A real knockdown pushes observed to zero while the null still expected thirty,
+# so an observed-only rule discards the strongest true positives; an induction
+# from an essentially undetected baseline has expected near zero while twenty
+# cells lit up, so an expected-only rule discards those. The maximum keeps both.
+#
+# Measured on a 26,432-cell Replogle chunk (600 genes, 259 elements,
+# control-anchored): 403 pairs move by more than 0.1 log10 p between two runs of
+# the identical binary, and max(observed, expected) < 5 catches 386 of them
+# while removing 1 of 116 on-target calls.
+#
+# This is a flag, never a gate. P-values, q-values and the validity fields are
+# what they were; the column says how much of the pair's tail is real.
+DEFAULT_CRT_MIN_INFORMATIVE_CELLS = 5.0
+
+_INFORMATIVE_ETA_CLIP = 30.0
+"""Linear-predictor clip, matching the score kernel's own ``_ETA_CLIP``."""
+
+
+def _informative_cell_counts(
+    *,
+    counts: np.ndarray,
+    nuisance_design: np.ndarray,
+    offsets: np.ndarray,
+    coefficients: np.ndarray,
+    dispersion: np.ndarray,
+    membership: sp.csr_matrix,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Observed and expected detected-cell counts per (element, gene).
+
+    ``counts``, ``nuisance_design`` and ``offsets`` cover the member cells only
+    - the cells some element carries - in the row order ``membership``'s columns
+    use. ``membership`` is the 0/1 (elements, member cells) indicator; both
+    counts are that indicator applied to a cells-by-genes matrix, so one sparse
+    matmul per gene block serves every element at once and no cells-by-elements
+    product is ever formed.
+
+    ``expected`` sums ``P(count > 0)`` under the same negative-binomial null the
+    score statistic conditions on: ``1 - (theta / (theta + mu))^theta`` at the
+    baseline's own fitted mean ``mu = exp(offset + Z beta)``. Written through
+    ``expm1``/``log1p`` because ``theta`` reaches the hundreds on well-detected
+    genes, where the direct power underflows to zero and would report every cell
+    as certainly detected.
+    """
+
+    member_counts = np.asarray(counts)
+    design = np.asarray(nuisance_design, dtype=np.float64)
+    offset_matrix = np.asarray(offsets, dtype=np.float64)
+    if offset_matrix.ndim == 1:
+        offset_matrix = offset_matrix[:, None]
+    eta = offset_matrix + design @ np.asarray(coefficients, dtype=np.float64)
+    mean = np.exp(np.clip(eta, -_INFORMATIVE_ETA_CLIP, _INFORMATIVE_ETA_CLIP))
+    theta_row = np.asarray(dispersion, dtype=np.float64).reshape(1, -1)
+    detection_probability = -np.expm1(-theta_row * np.log1p(mean / theta_row))
+    observed = membership @ (member_counts > 0).astype(np.float32)
+    expected = membership @ detection_probability.astype(np.float32)
+    return np.asarray(observed, dtype=np.float64), np.asarray(expected, dtype=np.float64)
+
+
+def _membership_matrix(
+    cell_index: np.ndarray, element_index: np.ndarray, num_elements: int
+) -> tuple[np.ndarray, sp.csr_matrix]:
+    """The (elements, member cells) 0/1 indicator, and which cells those are.
+
+    Restricting to the cells that carry at least one element is what keeps the
+    detection counts off the control pool's rows: under the control-anchored
+    pool the pool is most of the design and contributes to no element's count.
+    """
+
+    cells = np.asarray(cell_index, dtype=np.int64).reshape(-1)
+    elements = np.asarray(element_index, dtype=np.int64).reshape(-1)
+    if cells.shape != elements.shape:
+        raise ValueError("cell_index and element_index must be the same length.")
+    member_cells, local = np.unique(cells, return_inverse=True)
+    membership = sp.csr_matrix(
+        (
+            np.ones(local.size, dtype=np.float32),
+            (elements, local.reshape(-1)),
+        ),
+        shape=(int(num_elements), int(member_cells.size)),
+    )
+    return member_cells, membership
 
 
 def validate_crt_config(
@@ -977,6 +1067,12 @@ class ChunkCRTResult:
     # missing; this is how the run knows to say which ones and why. Empty on the
     # all-cells pool, which tests every element over every cell.
     empty_target_names: tuple[str, ...] = ()
+    # Per-pair informativeness, (targets, genes), or None when the caller asked
+    # for no counts. ``observed_nonzero`` is how many of the target's cells
+    # detected the gene; ``expected_nonzero`` is how many the fitted null
+    # expected to. Diagnostics: nothing in the statistic or the tail reads them.
+    observed_nonzero: np.ndarray | None = None
+    expected_nonzero: np.ndarray | None = None
 
 
 def _categorical_batch_applies(design) -> bool:
@@ -1190,6 +1286,7 @@ def run_crt_for_chunk(
     saddlepoint_screen_p_value: float = 0.05,
     saddlepoint_two_sided: str = "equal-tail",
     shared_propensity_coefficients: np.ndarray | None = None,
+    count_informative_cells: bool = True,
     _permutations: TargetPermutations | None = None,
     _return_permutations: bool = False,
 ) -> ChunkCRTResult | tuple[ChunkCRTResult, TargetPermutations]:
@@ -1219,6 +1316,11 @@ def run_crt_for_chunk(
     target's p-value does not move when the chunk-size flag changes its
     neighbours. Leaving them ``None`` fits a separate model per target on that
     target's own pool.
+
+    ``count_informative_cells`` adds the per-pair detected-cell counts
+    (:func:`_informative_cell_counts`) to the result, over each target's own
+    cells. They are diagnostics: no p-value, q-value or validity field reads
+    them.
 
     ``strata`` aligns with ``chunk_data``'s cells. Control cells are given their
     own stratum values from ``control_data`` implicitly: they are prepended, so
@@ -1343,10 +1445,29 @@ def run_crt_for_chunk(
     gene_names = tuple(design.gene_names)
     coefficients = baseline.nuisance.coefficients
 
+    # Per-pair informativeness, over each target's own cells. The control pool
+    # is most of this design's rows and belongs to no target, so the member set
+    # is the cells carrying a target code and everything below is that many
+    # rows wide, not the whole stacked design.
+    observed_nonzero = expected_nonzero = None
+    informative_state = None
+    if count_informative_cells:
+        target_codes = np.asarray(design.target_codes)
+        member_rows = np.flatnonzero(target_codes >= 0)
+        member_cells, membership = _membership_matrix(
+            member_rows, target_codes[member_rows], num_targets
+        )
+        member_design = np.asarray(design.nuisance_design)[member_cells]
+        member_offsets = np.asarray(design.offsets)[member_cells]
+        observed_nonzero = np.zeros(shape, dtype=np.float64)
+        expected_nonzero = np.zeros(shape, dtype=np.float64)
+        informative_state = (member_cells, membership, member_design, member_offsets)
+
     for gene_slice in iter_gene_chunks(num_genes, width):
+        block_counts = counts[:, gene_slice]
         sliced = replace_gene_axis(
             design,
-            counts=jnp.asarray(counts[:, gene_slice]),
+            counts=jnp.asarray(block_counts),
             dispersion=jnp.asarray(dispersion[gene_slice]),
             gene_names=gene_names[gene_slice],
         )
@@ -1402,6 +1523,22 @@ def run_crt_for_chunk(
             block["valid"][:, gene_slice] = np.asarray(fitted_saddlepoint["valid"], dtype=bool)
             if result.parametric_used_fallback is not None:
                 block["used_screen"][:, gene_slice] = np.asarray(result.parametric_used_fallback, dtype=bool)
+        if informative_state is not None:
+            member_cells, membership, member_design, member_offsets = informative_state
+            observed_nonzero[:, gene_slice], expected_nonzero[:, gene_slice] = (
+                _informative_cell_counts(
+                    counts=block_counts[member_cells],
+                    nuisance_design=member_design,
+                    offsets=(
+                        member_offsets
+                        if member_offsets.shape[1] == 1
+                        else member_offsets[:, gene_slice]
+                    ),
+                    coefficients=coefficients[:, gene_slice],
+                    dispersion=dispersion[gene_slice],
+                    membership=membership,
+                )
+            )
 
     result = ChunkCRTResult(
         observed_score=observed,
@@ -1416,6 +1553,8 @@ def run_crt_for_chunk(
         empty_target_names=tuple(design.empty_target_names),
         resampling_mechanism=resampling_mechanism,
         saddlepoint_only=saddlepoint_only,
+        observed_nonzero=observed_nonzero,
+        expected_nonzero=expected_nonzero,
     )
     return (result, permutations) if _return_permutations else result
 
@@ -1958,6 +2097,7 @@ def run_crt_all_cells(
     eta_clip: float = 30.0,
     confine_to_observed_batches: bool = True,
     propensity_fit: AllCellsPropensityFit | None = None,
+    count_informative_cells: bool = True,
 ) -> ChunkCRTResult:
     """The propensity saddlepoint CRT with every analysed cell as the pool (high MOI).
 
@@ -2030,6 +2170,18 @@ def run_crt_all_cells(
     null_mean = np.full(shape, np.nan)
     null_variance = np.full(shape, np.nan)
     null_skewness = np.full(shape, np.nan)
+    # Per-pair informativeness over each element's own cells. Membership is the
+    # same (cell, element) COO the statistic segment-sums over, so an element's
+    # count here is taken over exactly the cells its statistic is taken over.
+    observed_nonzero = expected_nonzero = None
+    member_cells = membership = None
+    if count_informative_cells:
+        member_cells, membership = _membership_matrix(cell_index, element_index, num_elements)
+        observed_nonzero = np.zeros(shape, dtype=np.float64)
+        expected_nonzero = np.zeros(shape, dtype=np.float64)
+        member_design = np.asarray(baseline.nuisance.nuisance_design)[member_cells]
+        member_offsets = np.asarray(baseline.nuisance.offsets)[member_cells]
+        panel_counts = np.asarray(baseline.nuisance.counts)
     for start in range(0, num_genes, width):
         gene_slice = slice(start, min(start + width, num_genes))
         block = control_block_for_genes(baseline, gene_slice, bordered_design=bordered_design)
@@ -2067,6 +2219,21 @@ def run_crt_all_cells(
         null_mean[:, gene_slice] = fit.null_mean
         null_variance[:, gene_slice] = fit.null_variance
         null_skewness[:, gene_slice] = fit.null_skewness
+        if membership is not None:
+            observed_nonzero[:, gene_slice], expected_nonzero[:, gene_slice] = (
+                _informative_cell_counts(
+                    counts=panel_counts[member_cells, gene_slice],
+                    nuisance_design=member_design,
+                    offsets=(
+                        member_offsets
+                        if member_offsets.shape[1] == 1
+                        else member_offsets[:, gene_slice]
+                    ),
+                    coefficients=baseline.nuisance.coefficients[:, gene_slice],
+                    dispersion=baseline.nuisance.dispersion[gene_slice],
+                    membership=membership,
+                )
+            )
     untested = ~testable
     for array in (p_value, log_p, observed, null_mean, null_variance, null_skewness):
         array[untested] = np.nan
@@ -2099,6 +2266,8 @@ def run_crt_all_cells(
         },
         resampling_mechanism="propensity",
         saddlepoint_only=True,
+        observed_nonzero=observed_nonzero,
+        expected_nonzero=expected_nonzero,
     )
 
 
@@ -2206,6 +2375,9 @@ class CRTAccumulator:
     gene_names: tuple[str, ...]
     tail_families: tuple[str, ...] = CRT_TAIL_FAMILIES
     saddlepoint_only: bool = False
+    min_informative_cells: float = DEFAULT_CRT_MIN_INFORMATIVE_CELLS
+    """Threshold for ``crt_low_information``; ``0`` flags nothing. See
+    :data:`DEFAULT_CRT_MIN_INFORMATIVE_CELLS`."""
 
     def __post_init__(self) -> None:
         shape = (len(self.element_names), len(self.gene_names))
@@ -2230,6 +2402,10 @@ class CRTAccumulator:
         if not self.saddlepoint_only:
             summary_names.append("crt_null_excess_kurtosis")
         self.null_summaries = {name: np.full(shape, np.nan, dtype=np.float64) for name in summary_names}
+        # Allocated on the first chunk that carries them, so a caller that turned
+        # the counts off emits no columns rather than a grid of zeros.
+        self.observed_nonzero: np.ndarray | None = None
+        self.expected_nonzero: np.ndarray | None = None
 
     def absorb(self, result: ChunkCRTResult) -> None:
         unknown = [name for name in result.target_names if name not in self._index]
@@ -2271,6 +2447,13 @@ class CRTAccumulator:
         for name, values in result.null_summaries.items():
             if name in self.null_summaries:
                 self.null_summaries[name][destination] = values
+        if result.observed_nonzero is not None and result.expected_nonzero is not None:
+            shape = (len(self.element_names), len(self.gene_names))
+            if self.observed_nonzero is None:
+                self.observed_nonzero = np.zeros(shape, dtype=np.float64)
+                self.expected_nonzero = np.zeros(shape, dtype=np.float64)
+            self.observed_nonzero[destination] = result.observed_nonzero
+            self.expected_nonzero[destination] = result.expected_nonzero
 
     def finalize(self, *, streaming: bool = False) -> dict[str, np.ndarray]:
         """Screen-wide columns, with Benjamini-Hochberg over every tested pair.
@@ -2303,4 +2486,24 @@ class CRTAccumulator:
                     )
         columns.update(self.null_summaries)
         columns.setdefault("crt_null_excess_kurtosis", missing)
+        if self.observed_nonzero is not None:
+            columns["crt_observed_nonzero"] = np.rint(self.observed_nonzero).astype(np.int64)
+            columns["crt_expected_nonzero"] = self.expected_nonzero
+            columns["crt_low_information"] = self.low_information()
         return columns
+
+    def low_information(self) -> np.ndarray:
+        """The per-pair flag, ``max(observed, expected) < min_informative_cells``.
+
+        A flag, not a gate: it is reported beside the p-values and changes none
+        of them. A threshold of zero flags nothing, which is how the column is
+        kept present on a run that wants the counts without the verdict.
+        """
+
+        shape = (len(self.element_names), len(self.gene_names))
+        if self.observed_nonzero is None:
+            return np.zeros(shape, dtype=bool)
+        threshold = float(self.min_informative_cells)
+        if threshold <= 0.0:
+            return np.zeros(shape, dtype=bool)
+        return np.maximum(self.observed_nonzero, self.expected_nonzero) < threshold
