@@ -31,6 +31,42 @@ and this project adheres to [Semantic Versioning][].
     `batch_level_counts`, `batch_levels_source` and
     `unidentifiable_batch_levels`, so a level present in the data is never
     unlisted.
+-   The all-cells propensity CRT resamples each element only within the batch
+    levels where it has cells. With a categorical batch in the design, an element
+    confined to some of its levels is *separated* by the level indicators: no
+    finite coefficient reproduces the zeros, the unpenalized logistic MLE does not
+    exist, and the IRLS - which has no step control - simply walks the
+    coefficients outward on every iteration. By the twenty-fifth step they are
+    large enough that forming the linear predictor in float32 cancels
+    catastrophically, and the fit can collapse onto a degenerate zero/one
+    assignment whose Bernoulli null has no variance at all. The saddlepoint then
+    reports its floor, about 1e-12, for an element that was never perturbed.
+    Restricting the support takes the limit the MLE was already walking towards -
+    zero selection probability in an unoccupied level - and the separated
+    directions leave the likelihood, so what remains is an ordinary identified
+    logistic regression.
+
+    On a 126,154-cell TAP-seq chr8 screen with 14 sequencing lanes, 30 candidate
+    enhancers cut in silico to a single lane went from 7.7% / 4.8% / 4.18% of
+    far-gene pairs at p<0.05 / 0.01 / 0.001 to 3.9% / 1.1% / 0.43%, against 4.7% /
+    1.1% / 0.14% for the untouched enhancers in the same run. Untouched pairs on
+    genes whose baseline reached the null mode are unchanged (Spearman 1.000000,
+    largest p-value difference 5.4e-3). Elements present in every level are
+    unaffected by construction, and a screen where no element misses a level takes
+    the original path. On the unrestricted dataset the cis calls at q<0.05 are
+    identical; the ten screen-wide calls that disappear are eight pairs whose
+    z-value was 5e-5 beside a null variance of 1e-7, plus two whose p-values are
+    unchanged and whose q-values moved only because those eight left the
+    multiplicity pool. The same run also took 172s against the previous 1,109s;
+    the screen promotes the same number of pairs either way (4,246 against
+    4,426), so that is the masked fit and not less tail work, and the two runs
+    were not measured under matched GPU contention.
+
+    `--no-crt-all-cells-batch-support` restores the previous behaviour.
+
+-   A separated propensity fit no longer needs to be diagnosed from its output:
+    `AllCellsPropensityFit` carries `batch_codes` and `element_support`, and the
+    CLI reports how many elements miss a level.
 
 ## [2.0.0rc8] - 2026-09-15
 

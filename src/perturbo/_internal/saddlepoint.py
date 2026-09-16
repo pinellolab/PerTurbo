@@ -1238,6 +1238,8 @@ def fit_high_moi_propensity_saddlepoint(
     num_elements: int,
     propensity_coefficients: np.ndarray,
     propensity_basis: np.ndarray,
+    batch_codes: np.ndarray | None = None,
+    element_support: np.ndarray | None = None,
     empirical_p_value: np.ndarray | None = None,
     eta_clip: float = 30.0,
     screen_p_value: float = 0.01,
@@ -1269,6 +1271,13 @@ def fit_high_moi_propensity_saddlepoint(
     Supply ``nuisance_direction`` as ``(nuisance, genes)`` to use a previously
     solved ``H^-1 (Z'r)`` without forming a dense inverse. Existing callers
     may continue supplying ``nuisance_information_inverse`` and ``nuisance_score``.
+
+    ``batch_codes`` (cells) with ``element_support`` (elements, levels)
+    restricts each element's resampling support to the batch levels it
+    occupies, which is where a selection model holding that batch's indicators
+    puts its own probability. Cells outside an element's support enter the
+    Bernoulli sum with contribution zero, which is exactly ``pi_i = 0``: they
+    move neither the cumulants nor the point masses at the support's ends.
     """
     _check_two_sided(two_sided)
 
@@ -1299,6 +1308,23 @@ def fit_high_moi_propensity_saddlepoint(
         raise ValueError("screen_p_value must lie in (0, 1].")
     if gene_block_size < 1 or element_batch_size < 1:
         raise ValueError("block sizes must be positive.")
+    if (batch_codes is None) != (element_support is None):
+        raise ValueError("batch_codes and element_support must be supplied together.")
+    support_device = None
+    if element_support is not None:
+        codes_host = np.asarray(batch_codes, dtype=np.int64).reshape(-1)
+        support_host = np.asarray(element_support, dtype=bool)
+        if codes_host.shape != (num_cells,):
+            raise ValueError("batch_codes must hold one level per cell.")
+        if support_host.ndim != 2 or support_host.shape[0] != num_elements:
+            raise ValueError("element_support must be (elements, levels).")
+        if codes_host.size and (codes_host.min() < 0 or codes_host.max() >= support_host.shape[1]):
+            raise ValueError("batch_codes index a level element_support does not carry.")
+        # Kept as (elements, levels) and gathered a block at a time. Expanding
+        # it once to (elements, cells) would be 4 GB of booleans at genome-wide
+        # scale, for a mask each block reads exactly once.
+        support_device = jnp.asarray(support_host)
+        codes_device = jnp.asarray(codes_host, dtype=jnp.int32)
 
     direction = _high_moi_nuisance_direction(
         num_genes=num_genes,
@@ -1332,6 +1358,9 @@ def fit_high_moi_propensity_saddlepoint(
             coefficients[start:stop] @ basis.T, -eta_clip, eta_clip
         ).astype(jnp.float32)
         selection = jax.nn.sigmoid(logits)
+        if support_device is not None:
+            # pi_i = 0 outside the element's own batch levels.
+            selection = jnp.where(support_device[start:stop][:, codes_device], selection, 0.0)
         bernoulli = selection * (1.0 - selection)
         null_mean[start:stop] = np.asarray(selection @ single, dtype=np.float64)
         null_variance[start:stop] = np.asarray(bernoulli @ squared, dtype=np.float64)
@@ -1392,6 +1421,13 @@ def fit_high_moi_propensity_saddlepoint(
         padded_elements = jnp.asarray(np.concatenate([elements, np.repeat(elements[-1], pad)]).astype(np.int32))
         padded_genes = jnp.asarray(np.concatenate([genes, np.repeat(genes[-1], pad)]).astype(np.int32))
         block = jnp.take(contribution, padded_genes, axis=1)
+        if support_device is not None:
+            # A zero contribution is pi_i = 0 exactly for this pair's CGF: it
+            # adds nothing to K, K' or K'', and nothing to the log point masses
+            # at the ends of the support, which read only the nonzero entries.
+            block = jnp.where(
+                jnp.take(support_device, padded_elements, axis=0)[:, codes_device].T, block, 0.0
+            )
         logits = jnp.clip(basis @ jnp.take(coefficients, padded_elements, axis=0).T, -eta_clip, eta_clip)
         fitted_log_p, fitted_valid = propensity_saddlepoint_log_two_sided(
             observed[padded_elements, padded_genes],

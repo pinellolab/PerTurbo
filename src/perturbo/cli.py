@@ -594,6 +594,20 @@ def main(argv: list[str] | None = None) -> None:
         ),
     )
     parser.add_argument(
+        "--crt-all-cells-batch-support",
+        dest="crt_all_cells_batch_support",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "All-cells propensity CRT: resample each element only within the batch levels where it "
+            "has cells, which is where a selection model carrying that batch's indicators puts its "
+            "own probability. Without it an element confined to a few levels is separated by those "
+            "indicators, the unpenalized fit has no finite optimum, and the null it walks towards "
+            "can collapse onto a zero-variance point mass. Elements present in every level are "
+            "unaffected; --no-crt-all-cells-batch-support restores the pre-2.0.0rc9 behaviour."
+        ),
+    )
+    parser.add_argument(
         "--crt-baseline-step-tolerance",
         type=float,
         default=DEFAULT_NEWTON_STEP_TOLERANCE,
@@ -1514,7 +1528,23 @@ def main(argv: list[str] | None = None) -> None:
         )
         print(f"[perturbo] CRT baseline: {baseline.null_check.describe()}")
         if gene_chunk_size is not None and all_cells_propensity is None:
-            all_cells_propensity = prepare_all_cells_propensity(baseline, full_data)
+            all_cells_propensity = prepare_all_cells_propensity(
+                baseline,
+                full_data,
+                confine_to_observed_batches=bool(args.crt_all_cells_batch_support),
+            )
+            # An informational line only: read defensively so a caller that
+            # supplies its own prepared fit is never required to carry it.
+            support = getattr(all_cells_propensity, "element_support", None)
+            if support is not None:
+                occupied = support.sum(axis=1)
+                levels = support.shape[1]
+                print(
+                    f"[perturbo] CRT propensity: resampling support restricted to each element's own "
+                    f"batch levels; {int((occupied < levels).sum()):,} of {support.shape[0]:,} elements "
+                    f"miss at least one of {levels} levels "
+                    f"({int((occupied == 1).sum()):,} occupy a single level)."
+                )
         if accumulator is None:
             accumulator = CRTAccumulator(
                 element_names=tuple(str(name) for name in full_data.pert_names),
@@ -1529,6 +1559,7 @@ def main(argv: list[str] | None = None) -> None:
                 gene_chunk_size=args.crt_gene_chunk_size,
                 screen_p_value=args.crt_screen_p_value,
                 two_sided=args.crt_two_sided,
+                confine_to_observed_batches=bool(args.crt_all_cells_batch_support),
                 **({"propensity_fit": all_cells_propensity} if all_cells_propensity is not None else {}),
             )
         )

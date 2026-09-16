@@ -1488,7 +1488,16 @@ def _element_membership(data: PerTurboData) -> tuple[np.ndarray, np.ndarray, int
 
 @dataclass(frozen=True)
 class AllCellsPropensityFit:
-    """Gene-independent state reused across gene blocks of an all-cells CRT."""
+    """Gene-independent state reused across gene blocks of an all-cells CRT.
+
+    ``batch_codes`` and ``element_support`` carry the resampling support when
+    the design has a categorical batch: ``element_support`` is
+    ``(elements, levels)`` and is ``False`` for a level in which the element
+    has no cell at all, which is where the unpenalized selection model's own
+    MLE sends the probability. Both are ``None`` when there is no batch, or
+    when every element is present in every level, in which case the fit is the
+    unrestricted one bit for bit.
+    """
 
     cell_index: np.ndarray
     element_index: np.ndarray
@@ -1497,6 +1506,33 @@ class AllCellsPropensityFit:
     coefficients: np.ndarray
     basis: np.ndarray
     num_cells: int
+    batch_codes: np.ndarray | None = None
+    element_support: np.ndarray | None = None
+
+
+def _element_batch_support(
+    nuisance_design: np.ndarray,
+    cell_index: np.ndarray,
+    element_index: np.ndarray,
+    num_elements: int,
+) -> tuple[np.ndarray, np.ndarray] | None:
+    """Per-element occupied batch levels, or ``None`` when there is no batch.
+
+    Levels are read off the design's mutually exclusive indicator block, with
+    the dropped reference level recovered as its own code, so which level the
+    caller happened to drop does not change the support.
+    """
+
+    from perturbo._internal.bordered import detect_bordered_design
+
+    structured = detect_bordered_design(np.asarray(nuisance_design))
+    if structured is None:
+        return None
+    codes = np.asarray(structured.codes, dtype=np.int32)
+    num_levels = int(structured.num_groups) + 1  # the reference level's sentinel
+    support = np.zeros((num_elements, num_levels), dtype=bool)
+    support[element_index, codes[cell_index]] = True
+    return codes, support
 
 
 def prepare_all_cells_propensity(
@@ -1508,10 +1544,33 @@ def prepare_all_cells_propensity(
     max_iterations: int = 25,
     eta_clip: float = 30.0,
     element_batch_size: int = 64,
+    confine_to_observed_batches: bool = True,
 ) -> AllCellsPropensityFit:
-    """Fit the all-cells assignment models once for reuse over gene blocks."""
+    """Fit the all-cells assignment models once for reuse over gene blocks.
+
+    With a categorical batch in the design, an element that appears in only
+    some of its levels is *separated* by the level indicators: no finite
+    coefficient reproduces the zeros, so the unpenalized MLE does not exist and
+    the IRLS simply walks the coefficients outward every iteration. The limit
+    it is walking towards is well defined - zero selection probability in the
+    levels the element never occupies - but the walk itself is not: by the
+    twenty-fifth step the coefficients are large enough that forming the linear
+    predictor in float32 cancels catastrophically, and a fit can collapse onto
+    a degenerate zero/one assignment whose Bernoulli null has no variance at
+    all. That produces p-values of 1e-300 for an element that was never
+    perturbed.
+
+    ``confine_to_observed_batches`` takes the limit directly instead: each
+    element's selection model is fitted on the cells in the levels where it
+    actually appears, and the probability is exactly zero elsewhere. The
+    separated directions leave the likelihood, so the remaining fit is an
+    ordinary, identified logistic regression. Elements present in every level
+    are untouched - their support is every cell - and when no element is
+    missing a level the whole screen takes the original path.
+    """
 
     from perturbo._internal.high_moi.resampling import (
+        fit_masked_propensity_coefficients,
         fit_propensity_coefficients,
         prepare_bordered_propensity,
         propensity_basis,
@@ -1560,6 +1619,13 @@ def prepare_all_cells_propensity(
         None if structured_propensity is None
         else prepare_bordered_propensity(structured_propensity, basis)
     )
+    batch_codes = element_support = None
+    if confine_to_observed_batches:
+        found = _element_batch_support(nuisance_design, cell_index, element_index, num_elements)
+        # An element with no cells has an empty support row; it is not testable
+        # and never reaches the tail, so it must not force the masked route.
+        if found is not None and not found[1][testable].all():
+            batch_codes, element_support = found
     order = np.argsort(element_index, kind="stable")
     sorted_elements = element_index[order]
     sorted_cells = cell_index[order]
@@ -1569,14 +1635,24 @@ def prepare_all_cells_propensity(
         indicators = np.zeros((stop - start, num_cells), dtype=np.float32)
         for local, element in enumerate(range(start, stop)):
             indicators[local, sorted_cells[starts[element] : starts[element + 1]]] = 1.0
-        coef, _ = fit_propensity_coefficients(
-            indicators,
-            propensity_design,
-            max_iterations=int(max_iterations),
-            eta_clip=float(eta_clip),
-            basis=basis,
-            bordered_design=propensity_context,
-        )
+        if element_support is None:
+            coef, _ = fit_propensity_coefficients(
+                indicators,
+                propensity_design,
+                max_iterations=int(max_iterations),
+                eta_clip=float(eta_clip),
+                basis=basis,
+                bordered_design=propensity_context,
+            )
+        else:
+            coef = fit_masked_propensity_coefficients(
+                indicators,
+                element_support[start:stop][:, batch_codes].astype(np.float32),
+                basis,
+                max_iterations=int(max_iterations),
+                eta_clip=float(eta_clip),
+                bordered_design=propensity_context,
+            )
         coefficients_parts.append(np.asarray(coef))
     coefficients = (
         np.concatenate(coefficients_parts, axis=0)
@@ -1591,6 +1667,8 @@ def prepare_all_cells_propensity(
         coefficients=coefficients,
         basis=basis,
         num_cells=num_cells,
+        batch_codes=batch_codes,
+        element_support=element_support,
     )
 
 
@@ -1607,6 +1685,7 @@ def run_crt_all_cells(
     include_guide_count_in_propensity: bool = True,
     propensity_max_iterations: int = 25,
     eta_clip: float = 30.0,
+    confine_to_observed_batches: bool = True,
     propensity_fit: AllCellsPropensityFit | None = None,
 ) -> ChunkCRTResult:
     """The propensity saddlepoint CRT with every analysed cell as the pool (high MOI).
@@ -1654,6 +1733,7 @@ def run_crt_all_cells(
             max_iterations=int(propensity_max_iterations),
             eta_clip=float(eta_clip),
             element_batch_size=int(element_batch_size),
+            confine_to_observed_batches=bool(confine_to_observed_batches),
         )
     element_names = tuple(str(name) for name in data.pert_names)
     if propensity_fit.num_cells != num_cells or propensity_fit.element_names != element_names:
@@ -1700,6 +1780,8 @@ def run_crt_all_cells(
             num_elements=num_elements,
             propensity_coefficients=coefficients,
             propensity_basis=basis,
+            batch_codes=propensity_fit.batch_codes,
+            element_support=propensity_fit.element_support,
             eta_clip=float(eta_clip),
             screen_p_value=float(screen_p_value),
             two_sided=two_sided,
