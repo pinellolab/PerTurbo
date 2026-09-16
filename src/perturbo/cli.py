@@ -1567,6 +1567,9 @@ def main(argv: list[str] | None = None) -> None:
         )
 
     all_cells_propensity = None
+    # Provenance for the resampling support, recorded whether or not the run is
+    # chunked: (elements missing at least one level, total elements, levels).
+    all_cells_support_counts: tuple[int, int, int] | None = None
 
     def _run_all_cells_crt(
         full_data: PerTurboData,
@@ -1575,7 +1578,7 @@ def main(argv: list[str] | None = None) -> None:
         accumulator=None,
     ) -> CRTAccumulator:
         """The high-MOI CRT over every analysed cell at once, independent of stage-two chunking."""
-        nonlocal all_cells_propensity
+        nonlocal all_cells_propensity, all_cells_support_counts
         started = time.perf_counter()
         print("[perturbo] Preparing the all-cells CRT baseline: stage-1 fit polished over every analysed cell...")
         baseline = prepare_crt_baseline(
@@ -1586,7 +1589,11 @@ def main(argv: list[str] | None = None) -> None:
             polish=True,
         )
         print(f"[perturbo] CRT baseline: {baseline.null_check.describe()}")
-        if gene_chunk_size is not None and all_cells_propensity is None:
+        # The selection models are gene-independent, so fit them once here
+        # whether or not stage two chunks the gene axis - the chunked path used
+        # to be the only one that did, which also hid the support summary from
+        # every unchunked run.
+        if all_cells_propensity is None:
             all_cells_propensity = prepare_all_cells_propensity(
                 baseline,
                 full_data,
@@ -1597,13 +1604,20 @@ def main(argv: list[str] | None = None) -> None:
             support = getattr(all_cells_propensity, "element_support", None)
             if support is not None:
                 occupied = support.sum(axis=1)
-                levels = support.shape[1]
+                levels = int(support.shape[1])
+                missing = int((occupied < levels).sum())
+                all_cells_support_counts = (missing, int(support.shape[0]), levels)
                 print(
                     f"[perturbo] CRT propensity: resampling support restricted to each element's own "
-                    f"batch levels; {int((occupied < levels).sum()):,} of {support.shape[0]:,} elements "
+                    f"batch levels; {missing:,} of {support.shape[0]:,} elements "
                     f"miss at least one of {levels} levels "
                     f"({int((occupied == 1).sum()):,} occupy a single level)."
                 )
+            else:
+                # No batch in the design, so no support to restrict; still record
+                # the element count, read as defensively as the support above.
+                names = getattr(all_cells_propensity, "element_names", ())
+                all_cells_support_counts = (0, len(names), 0)
         if accumulator is None:
             accumulator = CRTAccumulator(
                 element_names=tuple(str(name) for name in full_data.pert_names),
@@ -2165,6 +2179,21 @@ def main(argv: list[str] | None = None) -> None:
             # so this is how a pipeline tells the two apart.
             "targets_without_assigned_cells": len(crt_accumulator.empty_target_names),
             "targets_without_assigned_cells_names": list(crt_accumulator.empty_target_names),
+            # Whether each element's all-cells resampling support was restricted
+            # to the batch levels it occupies, and how many elements that could
+            # have applied to. A run that reads only the p-values cannot tell a
+            # restricted null from an unrestricted one, and the two differ most
+            # for exactly the elements a screen is least sure about.
+            "all_cells_batch_support": bool(args.crt_all_cells_batch_support),
+            "all_cells_elements_missing_a_batch_level": (
+                None if all_cells_support_counts is None else all_cells_support_counts[0]
+            ),
+            "all_cells_elements": (
+                None if all_cells_support_counts is None else all_cells_support_counts[1]
+            ),
+            "all_cells_batch_levels": (
+                None if all_cells_support_counts is None else all_cells_support_counts[2]
+            ),
         }
         # How the control cells sit across the batch levels. Both pools are
         # interpreted differently when the controls are confined to one level, and
@@ -2368,6 +2397,19 @@ def main(argv: list[str] | None = None) -> None:
             "covariate_transform_state": (
                 asdict(covariate_transform_state) if covariate_transform_state is not None else None
             ),
+            # Measured, not requested, so it sits beside cli_args rather than in
+            # it: how many elements the all-cells resampling support could have
+            # restricted. None when the all-cells pool did not run.
+            "crt_all_cells_batch_support_summary": (
+                None
+                if all_cells_support_counts is None
+                else {
+                    "enabled": bool(args.crt_all_cells_batch_support),
+                    "elements_missing_a_batch_level": all_cells_support_counts[0],
+                    "elements": all_cells_support_counts[1],
+                    "batch_levels": all_cells_support_counts[2],
+                }
+            ),
             "source": {
                 "path": str(source_path),
                 "kind": "h5mu" if str(args.input).endswith(".h5mu") else "h5ad",
@@ -2387,6 +2429,7 @@ def main(argv: list[str] | None = None) -> None:
                 "perturbation_element_names_uns_key": args.perturbation_element_names_uns_key,
                 "control_substring": args.control_substring,
                 "crt_pool": (crt_pool if args.crt else None),
+                "crt_all_cells_batch_support": bool(args.crt_all_cells_batch_support),
                 "batch_covariate": batch_covariate,
                 "size_factor_key": size_factor_key_for_loading,
                 "library_size_key": library_size_key_for_loading,

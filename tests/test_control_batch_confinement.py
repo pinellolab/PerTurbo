@@ -414,3 +414,151 @@ def test_without_a_batch_covariate_the_diagnostic_is_skipped(runs) -> None:
     # And the run still finished the test it was asked for.
     assert meta["pool"] == "control-anchored"
     assert not (out / "covariate_metadata.json").exists()
+
+
+# --- the all-cells pool, end to end -----------------------------------------------
+
+ALL_CELLS_LANES = ("lane0", "lane1", "lane2")
+UNSAMPLED_LANE = "lane2"
+
+
+def _write_all_cells_screen(path: Path, *, n_cells: int = 900, n_genes: int = 6, seed: int = 3) -> None:
+    """A high-MOI screen whose control cells never enter one lane.
+
+    ``lane2`` holds a fifth of the analysed cells and not one control cell, so
+    the stage-one fit cannot identify it and only the all-cells refit can. This
+    is the TAP-seq shape reduced to something a test can run: a lane the
+    non-targeting guides were simply never prepared in.
+    """
+
+    rng = np.random.default_rng(seed)
+    n_elements, guides_per_element = 6, 2
+    n_guides = n_elements * guides_per_element
+    guide_to_element = np.zeros((n_guides, n_elements), dtype=np.float32)
+    guide_to_element[np.arange(n_guides), np.repeat(np.arange(n_elements), guides_per_element)] = 1.0
+    targeting_guides = np.arange(guides_per_element * (n_elements - 2))
+    control_guides = np.arange(guides_per_element * (n_elements - 2), n_guides)
+
+    is_control = rng.random(n_cells) < 0.3
+    # Controls sit in the first two lanes only; targeting cells use all three.
+    lane = np.where(
+        is_control,
+        rng.integers(0, len(ALL_CELLS_LANES) - 1, size=n_cells),
+        rng.integers(0, len(ALL_CELLS_LANES), size=n_cells),
+    )
+
+    assignment = np.zeros((n_cells, n_guides), dtype=np.float32)
+    for cell in range(n_cells):
+        if is_control[cell]:
+            assignment[cell, rng.choice(control_guides, size=2, replace=False)] = 1.0
+        else:
+            # High MOI: several targeting guides per cell, so the guide count
+            # itself carries information the selection model has to absorb.
+            drawn = rng.choice(targeting_guides, size=rng.integers(2, 5), replace=False)
+            assignment[cell, drawn] = 1.0
+
+    log_mu = (
+        rng.normal(1.8, 0.3, size=n_genes)[None, :]
+        + rng.normal(0.0, 0.2, size=n_cells)[:, None]
+        # A real lane effect, so dropping the lane's column would be visible.
+        + np.array([0.0, 0.3, -0.4])[lane][:, None]
+    )
+    theta = 5.0
+    counts = rng.negative_binomial(theta, theta / (theta + np.exp(log_mu))).astype(np.float32)
+
+    obs = pd.DataFrame(
+        {
+            "total_umis": counts.sum(axis=1).astype(np.int64) + 50,
+            "lane": pd.Categorical([ALL_CELLS_LANES[i] for i in lane]),
+        },
+        index=[f"cell{i}" for i in range(n_cells)],
+    )
+    gene = ad.AnnData(
+        X=sp.csr_matrix(counts),
+        obs=obs,
+        var=pd.DataFrame(index=[f"gene_{i}" for i in range(n_genes)]),
+    )
+    guide = ad.AnnData(
+        X=sp.csr_matrix(assignment),
+        obs=obs.copy(),
+        var=pd.DataFrame(index=[f"guide{i}" for i in range(n_guides)]),
+    )
+    guide.varm["element_map"] = sp.csr_matrix(guide_to_element)
+    guide.uns["element_names"] = np.array(
+        [f"elem_{e}" for e in range(n_elements - 2)] + ["non-targeting_a", "non-targeting_b"],
+        dtype=object,
+    )
+    md.MuData({"gene": gene, "guide": guide}).write_h5mu(path)
+
+
+@pytest.fixture(scope="module")
+def all_cells_run(tmp_path_factory):
+    root = tmp_path_factory.mktemp("all_cells_unsampled_lane")
+    _write_all_cells_screen(root / "screen.h5mu")
+    out = root / "out"
+    log = io.StringIO()
+    argv = [
+        "--input", str(root / "screen.h5mu"),
+        "--out-dir", str(out),
+        "--device", "cpu",
+        "--modality-key", "gene",
+        "--perturbation-modality-key", "guide",
+        "--perturbation-element-varm-key", "element_map",
+        "--perturbation-element-names-uns-key", "element_names",
+        "--control-substring", "non-targeting",
+        "--library-size-key", "total_umis",
+        "--size-factor-mode", "observed",
+        "--likelihood", "nb",
+        "--batch-covariate", "lane",
+        "--num-steps-control", "60",
+        "--num-steps-betas", "10",
+        "--no-save-model-params",
+        "--crt", "--crt-only",
+        "--crt-pool", "all-cells",
+        "--crt-mechanism", "propensity",
+        "--crt-tail-families", "saddlepoint",
+        "--crt-saddlepoint-only",
+        "--crt-allow-unconverged-baseline",
+    ]
+    with warnings.catch_warnings(), contextlib.redirect_stdout(log):
+        warnings.simplefilter("ignore")
+        cli_main(argv)
+    return out, log.getvalue()
+
+
+def test_the_all_cells_run_keeps_a_column_for_the_lane_the_controls_missed(all_cells_run) -> None:
+    out, _ = all_cells_run
+    meta = json.loads((out / "covariate_metadata.json").read_text())
+
+    assert meta["batch_levels_source"] == "analysed-cells"
+    assert meta["batch_all_levels"] == list(ALL_CELLS_LANES)
+    assert meta["unidentifiable_batch_levels"] == [UNSAMPLED_LANE]
+    # The level the controls never sampled is named *and* still has a design
+    # column, which is the whole point of the all-cells refit.
+    assert f"batch:lane={UNSAMPLED_LANE}" in meta["covariate_names"]
+    # And it is not the reference, so the control design is not aliased with
+    # its own intercept.
+    assert meta["batch_reference"] != UNSAMPLED_LANE
+    assert meta["batch_reference"] in ALL_CELLS_LANES
+
+
+def test_the_all_cells_run_records_its_batch_support(all_cells_run) -> None:
+    out, log = all_cells_run
+    meta = json.loads((out / "crt_metadata.json").read_text())
+    covariates = json.loads((out / "covariate_metadata.json").read_text())
+
+    assert meta["pool"] == "all-cells"
+    assert meta["all_cells_batch_support"] is True
+    # The support is per batch level, and every level is a column or the
+    # reference: its width is the number of levels the data has.
+    assert meta["all_cells_batch_levels"] == len(covariates["batch_all_levels"])
+    assert meta["all_cells_elements"] == 6
+    # The two non-targeting elements are the ones built to miss ``lane2``; the
+    # four targeting ones are spread over every lane by construction.
+    assert meta["all_cells_elements_missing_a_batch_level"] == 2
+    # The summary line is printed by an unchunked run too, not only a chunked one.
+    assert "[perturbo] CRT propensity: resampling support restricted" in log
+    assert f"miss at least one of {len(ALL_CELLS_LANES)} levels" in log
+    # The warning says what it does, and it is what the run actually did.
+    assert f"batch level(s) {UNSAMPLED_LANE} of 'lane'" in log
+    assert "They are kept in the design" in log
