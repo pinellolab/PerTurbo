@@ -1264,6 +1264,10 @@ def main(argv: list[str] | None = None) -> None:
         return_covariate_transform_state=True,
         infer_control_guides=bool(args.guide_random_effects and args.perturbation_modality_key is not None),
         only_control_guides=bool(args.crt and crt_pool == "control-anchored" and args.perturbation_modality_key is not None),
+        # The all-cells pool polishes the stage-one nuisance fit over every
+        # analysed cell, so a batch level the controls never sampled is
+        # identified there and must keep its design column.
+        design_refit_over_analysed_cells=bool(args.crt and crt_pool == "all-cells"),
     )
     if isinstance(controls_loaded, tuple):
         controls, covariate_transform_state = controls_loaded
