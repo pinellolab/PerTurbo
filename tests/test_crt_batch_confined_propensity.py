@@ -152,6 +152,47 @@ def test_support_is_the_elements_own_batch_levels(screen):
     assert unrestricted.element_support is None and unrestricted.batch_codes is None
 
 
+def test_a_two_level_batch_is_still_given_a_support():
+    """Two lanes are coded by one indicator column, and still separate.
+
+    The support used to be read off the bordered factorization, which needs two
+    indicator columns before the split is worth making. A two-level batch has
+    one, so the levels went unseen and ``--crt-all-cells-batch-support`` was a
+    silent no-op for exactly the design that needs the least work to protect.
+    """
+
+    from perturbo._internal.high_moi.resampling import propensity_logits_from_coefficients
+
+    baseline, data, codes, confined_level = _screen(
+        num_levels=2, num_spread=4, num_confined=1, num_cells=3000, num_genes=6
+    )
+    fit = crt.prepare_all_cells_propensity(baseline, data)
+    assert fit.element_support is not None and fit.batch_codes is not None
+    assert fit.element_support.shape == (5, 2)
+    np.testing.assert_array_equal(fit.batch_codes, codes)
+
+    confined = int(np.flatnonzero(confined_level >= 0)[0])
+    assert fit.element_support[confined].tolist() == [True, False]
+    assert fit.element_support[:confined].all(), "the spread elements need both lanes"
+
+    # The mask reached the fit rather than only the metadata: the masked MLE's
+    # own score equation is that the selection probability over the support sums
+    # to the element's cell count, which the unmasked fit spreads over both lanes.
+    probability = np.asarray(
+        1.0 / (1.0 + np.exp(-propensity_logits_from_coefficients(fit.coefficients, fit.basis)))
+    )
+    inside = codes == confined_level[confined]
+    membership = np.asarray(data.pert_id) > 0
+    assert probability[confined][inside].sum() == pytest.approx(
+        int(membership[:, confined].sum()), rel=1e-3
+    )
+    # --no-crt-all-cells-batch-support still opts out, two levels or fourteen.
+    unrestricted = crt.prepare_all_cells_propensity(
+        baseline, data, confine_to_observed_batches=False
+    )
+    assert unrestricted.element_support is None and unrestricted.batch_codes is None
+
+
 def test_the_selection_model_is_fit_on_its_own_support(screen):
     """sum(pi) over the support is the element's own cell count, as the MLE requires."""
 

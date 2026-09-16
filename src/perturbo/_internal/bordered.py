@@ -68,15 +68,20 @@ class BorderedInfo(NamedTuple):
     diagonal: object
 
 
-def detect_bordered_design(nuisance_design) -> BorderedDesign | None:
-    """Recognize at least two mutually exclusive binary indicator columns.
+def indicator_level_codes(nuisance_design, *, min_indicators: int = 1):
+    """Level code per row from a mutually exclusive binary indicator block.
 
-    Detection is intentionally conservative: overlapping binary columns,
-    nonfinite/non-numeric values, and fewer than two indicators return None.
-    All-zero columns retain their original penalties in the diagonal block,
-    so absent batch levels do not enlarge the dense border. All-one columns
-    stay in the border; the original intercept is never replaced by a full
-    set of batch coefficients.
+    Returns ``(group_indices, codes)`` or ``None``. ``codes`` holds the index
+    into ``group_indices`` of the row's indicator, or ``group_indices.size``
+    for a row in the dropped reference level, so the reference is recovered as
+    a level of its own whichever one the caller happened to drop.
+
+    Detection is intentionally conservative: overlapping binary columns and
+    nonfinite/non-numeric values return None. ``min_indicators`` is the number
+    of indicator columns required - two for the bordered factorization, whose
+    diagonal block is not worth splitting off for one column, but one for a
+    caller that only wants the levels, since a two-level factor is coded by a
+    single column and its rows are still separated by it.
     """
     design = np.asarray(nuisance_design)
     if (
@@ -90,15 +95,33 @@ def detect_bordered_design(nuisance_design) -> BorderedDesign | None:
     binary = np.all((design == 0) | (design == 1), axis=0)
     all_one = np.all(design == 1, axis=0)
     group_indices = np.flatnonzero(binary & ~all_one).astype(np.int32)
-    if group_indices.size < 2:
+    if group_indices.size < int(min_indicators):
         return None
     indicator_block = design[:, group_indices]
     if np.any(indicator_block.sum(axis=1) > 1):
         return None
-    border_indices = np.setdiff1d(np.arange(design.shape[1]), group_indices).astype(np.int32)
     codes = np.full(design.shape[0], group_indices.size, dtype=np.int32)
     rows, groups = np.nonzero(indicator_block)
     codes[rows] = groups
+    return group_indices, codes
+
+
+def detect_bordered_design(nuisance_design) -> BorderedDesign | None:
+    """Recognize at least two mutually exclusive binary indicator columns.
+
+    Detection is intentionally conservative: overlapping binary columns,
+    nonfinite/non-numeric values, and fewer than two indicators return None.
+    All-zero columns retain their original penalties in the diagonal block,
+    so absent batch levels do not enlarge the dense border. All-one columns
+    stay in the border; the original intercept is never replaced by a full
+    set of batch coefficients.
+    """
+    found = indicator_level_codes(nuisance_design, min_indicators=2)
+    if found is None:
+        return None
+    group_indices, codes = found
+    design = np.asarray(nuisance_design)
+    border_indices = np.setdiff1d(np.arange(design.shape[1]), group_indices).astype(np.int32)
     return BorderedDesign(design[:, border_indices].copy(), codes, border_indices, group_indices)
 
 

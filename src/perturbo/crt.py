@@ -1785,16 +1785,22 @@ def _element_batch_support(
 
     Levels are read off the design's mutually exclusive indicator block, with
     the dropped reference level recovered as its own code, so which level the
-    caller happened to drop does not change the support.
+    caller happened to drop does not change the support. A single indicator
+    column is enough: a two-level batch is coded by one column, and an element
+    confined to one of its two levels is separated by that column exactly as it
+    would be by thirteen. The codes are the ones the bordered factorization
+    derives wherever that factorization applies, so nothing changes for a
+    design with two or more indicator columns.
     """
 
-    from perturbo._internal.bordered import detect_bordered_design
+    from perturbo._internal.bordered import indicator_level_codes
 
-    structured = detect_bordered_design(np.asarray(nuisance_design))
-    if structured is None:
+    found = indicator_level_codes(np.asarray(nuisance_design), min_indicators=1)
+    if found is None:
         return None
-    codes = np.asarray(structured.codes, dtype=np.int32)
-    num_levels = int(structured.num_groups) + 1  # the reference level's sentinel
+    group_indices, codes = found
+    codes = np.asarray(codes, dtype=np.int32)
+    num_levels = int(group_indices.size) + 1  # the reference level's sentinel
     support = np.zeros((num_elements, num_levels), dtype=bool)
     support[element_index, codes[cell_index]] = True
     return codes, support
