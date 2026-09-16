@@ -129,14 +129,36 @@ def to_dense_numpy(design: BorderedDesign) -> np.ndarray:
     return dense
 
 
+# A scatter-add serializes on the accelerator whenever many rows collide on
+# one output address, so its cost grows as the segment count *falls*. A batch
+# covariate is the worst case: tens of levels over hundreds of thousands of
+# cells. Contracting against the indicator matrix instead is the same sum
+# written as a GEMM, which is measured at 28x the scatter for 13 groups,
+# breaking even near 256 and losing beyond it. The indicator is materialized
+# as (cells, groups), never as the full nuisance design, so the arrow
+# structure of Z'WZ is untouched; only the reduction changes. The element cap
+# bounds that temporary at 256 MB in float32, past which the scatter's serial
+# writes are the cheaper problem to have.
+_DENSE_SEGMENT_GROUP_LIMIT = 256
+_DENSE_SEGMENT_ELEMENT_LIMIT = 1 << 26
+
+
 def _segment_sum(data, codes, num_groups, xp):
     """Sum an array with cells on axis zero; discard the reference sentinel."""
     if xp is np:
         out = np.zeros((num_groups + 1,) + data.shape[1:], dtype=data.dtype)
         np.add.at(out, np.asarray(codes), data)
-    else:
-        out = jax.ops.segment_sum(data, jnp.asarray(codes), num_segments=num_groups + 1)
-    return out[:num_groups]
+        return out[:num_groups]
+    codes = jnp.asarray(codes)
+    rows = data.shape[0]
+    if (
+        0 < num_groups <= _DENSE_SEGMENT_GROUP_LIMIT
+        and rows * num_groups <= _DENSE_SEGMENT_ELEMENT_LIMIT
+    ):
+        flat = data.reshape(rows, -1)
+        indicator = (codes[:, None] == jnp.arange(num_groups, dtype=codes.dtype)).astype(flat.dtype)
+        return (indicator.T @ flat).reshape((num_groups,) + data.shape[1:])
+    return jax.ops.segment_sum(data, codes, num_segments=num_groups + 1)[:num_groups]
 
 
 def _weighted_information(design, weights, ridge, xp):
