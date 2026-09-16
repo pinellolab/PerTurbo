@@ -68,12 +68,13 @@ from .crt import (
     fit_shared_propensity_coefficients,
     prepare_all_cells_propensity,
     prepare_crt_baseline,
+    report_control_batch_confinement,
     run_crt_all_cells,
     run_crt_for_chunk,
     summarize_names,
     validate_crt_config,
 )
-from .core import measure_realized_moi
+from .core import control_cell_mask, measure_realized_moi
 from .results import (
     build_guide_efficiency_df,
     load_pairs_to_test,
@@ -285,6 +286,52 @@ def _crt_configuration_problem(args, size_factor_mode) -> str | None:
     if args.guide_random_effects:
         return "--guide-random-effects adds a per-guide latent outside the nuisance design."
     return None
+
+
+def _control_batch_confinement(
+    data,
+    args,
+    *,
+    analysis_adata,
+    batch_covariate: str | None,
+    crt_pool: str | None,
+):
+    """Report how the control cells sit across the batch levels, or skip quietly.
+
+    Skipped without complaint when there is no batch covariate to be confined
+    within, when the column is not on the analysed cells, or when the run has no
+    way to tell a control cell from a perturbed one. Returns the summary so the
+    run records can carry the numbers, or ``None`` when it was skipped.
+    """
+
+    if batch_covariate is None or batch_covariate not in analysis_adata.obs:
+        return None
+    if args.control_substring is None:
+        return None
+    # A one-label-per-cell design reads the control cells off the analysed obs
+    # frame, which is already in hand; only a perturbation matrix has to be looked
+    # up in the input object and aligned to these cells.
+    if args.perturbation_modality_key is None:
+        source, obs_names = analysis_adata, None
+    else:
+        source, obs_names = data, analysis_adata.obs_names
+    controls = control_cell_mask(
+        source,
+        perturbation_modality_key=args.perturbation_modality_key,
+        perturbation_layer=args.perturbation_layer,
+        perturbation_key=args.perturbation_key,
+        control_substring=args.control_substring,
+        perturbation_element_varm_key=args.perturbation_element_varm_key,
+        perturbation_element_names_uns_key=args.perturbation_element_names_uns_key,
+        modality_key=args.modality_key,
+        obs_names=obs_names,
+    )
+    return report_control_batch_confinement(
+        controls,
+        analysis_adata.obs[batch_covariate].to_numpy(),
+        batch_covariate=batch_covariate,
+        pool=crt_pool,
+    )
 
 
 def _crt_tested_cell_rows(
@@ -965,6 +1012,7 @@ def main(argv: list[str] | None = None) -> None:
         args.crt_saddlepoint_only = args.crt_mechanism == "propensity" and list(args.crt_tail_families) == [
             CRT_SADDLEPOINT_FAMILY
         ]
+    crt_pool: str | None = None
     crt_requested = args.crt is True or bool(args.crt_only)
     if args.crt is False:
         args.crt = False
@@ -1150,6 +1198,17 @@ def main(argv: list[str] | None = None) -> None:
         analysis_adata_for_workflow = analysis_adata[cell_keep_mask]
     else:
         analysis_adata_for_workflow = analysis_adata
+
+    # Said before any fitting, and on the cells the run will actually analyse. A
+    # batch covariate the control pool cannot identify is a property of the input,
+    # so there is nothing to wait for a fit to learn.
+    control_batch = _control_batch_confinement(
+        data,
+        args,
+        analysis_adata=analysis_adata_for_workflow,
+        batch_covariate=batch_covariate,
+        crt_pool=crt_pool,
+    )
 
     should_chunk = False
     retain_guide_structure = args.perturbation_element_varm_key is not None
@@ -2107,6 +2166,11 @@ def main(argv: list[str] | None = None) -> None:
             "targets_without_assigned_cells": len(crt_accumulator.empty_target_names),
             "targets_without_assigned_cells_names": list(crt_accumulator.empty_target_names),
         }
+        # How the control cells sit across the batch levels. Both pools are
+        # interpreted differently when the controls are confined to one level, and
+        # neither the p-values nor the effect sizes say so on their own.
+        if control_batch is not None:
+            crt_metadata.update(control_batch.as_metadata())
         (out_dir / "crt_metadata.json").write_text(json.dumps(crt_metadata, indent=2, default=str))
         tested = int(crt_accumulator.tested.sum())
         primary = (
@@ -2207,6 +2271,12 @@ def main(argv: list[str] | None = None) -> None:
         metadata["covariate_names"] = list(covariate_transform_state.feature_names)
         metadata["continuous_covariates_requested"] = continuous_covariates
         metadata["batch_covariate_requested"] = batch_covariate
+        # Whether the control cells could identify that batch covariate at all.
+        # Recorded here as well as in crt_metadata.json, because a run without the
+        # CRT writes no crt_metadata.json and the question is still about the batch
+        # design rather than about the test.
+        if control_batch is not None:
+            metadata.update(control_batch.as_metadata())
         covariate_metadata_path.write_text(json.dumps(metadata, indent=2))
         print(f"[perturbo] Wrote {covariate_metadata_path}")
 

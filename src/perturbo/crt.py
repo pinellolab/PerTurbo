@@ -50,8 +50,12 @@ __all__ = [
     "BaselineNullCheck",
     "AllCellsPropensityFit",
     "ChunkCRTResult",
+    "ControlBatchConfinement",
     "ControlBlock",
     "ControlNuisance",
+    "CONTROL_BATCH_MIN_CELLS_PER_LEVEL",
+    "CONTROL_BATCH_CONFINED_CONTROL_SHARE",
+    "CONTROL_BATCH_CONFINED_SCREEN_SHARE",
     "CRTAccumulator",
     "CRTBaseline",
     "CRT_CONTROL_NAME",
@@ -71,8 +75,10 @@ __all__ = [
     "prepare_crt_baseline",
     "prepare_all_cells_propensity",
     "polish_baseline_to_null_mode",
+    "report_control_batch_confinement",
     "run_crt_for_chunk",
     "run_crt_all_cells",
+    "summarize_control_batch_confinement",
     "summarize_names",
     "CRT_POOLS",
     "validate_crt_config",
@@ -1425,6 +1431,265 @@ element is tested as a marginal association over all cells; it needs the
 guide-to-element structure and nothing else. Nothing branches on a measured
 MOI; see ``docs/research/12_one_crt_two_designs.md``.
 """
+
+
+# --- control-cell batch confinement ------------------------------------------------
+#
+# A batch covariate in the design is not the same thing as a batch covariate the
+# data can identify. On a 126,154-cell TAP-seq screen with 14 sequencing lanes in
+# ``obs["batch"]``, all 30 non-targeting guides had been prepared in one lane:
+# 2,033 of 2,049 control-only cells sat there, and the other 13 lanes held between
+# zero and four each. ``--batch-covariate batch`` was supplied and did not help,
+# because the control pool carries no information about the lanes it has no cells
+# in. Control-anchored, that turned every lane effect into an apparent knockdown -
+# 1,241 enhancer guides spread over 50 Mb "knocked down" MRPL13. All-cells, the
+# non-targeting guides themselves returned 21.9% of tests at p < 0.05 while the
+# targeting guides, spread over every lane, were calibrated. Restricted to the one
+# lane, both pools were exactly calibrated at 4.8%.
+#
+# Nothing in the run said so, because no output described how the control cells sat
+# across the batch levels. That is what this measures.
+
+CONTROL_BATCH_MIN_CELLS_PER_LEVEL = 20
+"""Control cells a batch level needs before it counts as represented in the pool.
+
+Below roughly this many cells a level contributes a coefficient fit on noise, so
+counting it as "the pool covers this level" would be generous to the point of
+being wrong. A judgement call, not a theorem.
+"""
+
+CONTROL_BATCH_CONFINED_CONTROL_SHARE = 0.90
+"""Share of control cells in one level above which the pool is one batch."""
+
+CONTROL_BATCH_CONFINED_SCREEN_SHARE = 0.50
+"""Screen share below which the busiest control level is a minority of the cells.
+
+It guards the share clause only. Controls sitting mostly in a level that is most
+of the screen is a lopsided pool rather than a confounded design, as long as the
+other levels have controls of their own; the coverage clause is what catches the
+case where they do not, and it carries no such guard, because a level with no
+control cells has no identified coefficient whatever its size.
+"""
+
+
+@dataclass(frozen=True)
+class ControlBatchConfinement:
+    """How the control cells sit across the batch levels of the analysed cells.
+
+    ``confined`` is the flag a run acts on. The rule, in full:
+
+    the batch covariate has at least two levels among the analysed cells, there is
+    at least one control cell, and *either* the busiest level holds more than
+    :data:`CONTROL_BATCH_CONFINED_CONTROL_SHARE` of the control cells while holding
+    less than :data:`CONTROL_BATCH_CONFINED_SCREEN_SHARE` of the analysed cells,
+    *or* exactly one level holds at least
+    :data:`CONTROL_BATCH_MIN_CELLS_PER_LEVEL` control cells.
+
+    The second clause catches a pool that is spread in name only - a busy level
+    plus a scatter of single-cell levels reads as 14 levels covered and is one.
+    Requiring *exactly* one level to clear the bar keeps a small dataset whose
+    every level is under it from warning, since there the batch coefficients are
+    noisy for a reason the pool's composition has nothing to do with.
+    """
+
+    batch_covariate: str | None
+    num_control_cells: int
+    num_cells: int
+    num_batch_levels: int
+    num_levels_with_controls: int
+    num_represented_levels: int
+    min_control_cells_per_level: int
+    top_level: str | None
+    top_level_control_cells: int
+    top_level_cells: int
+    control_share_in_top_level: float
+    top_level_screen_share: float
+    control_share_of_top_level: float
+    confined: bool
+
+    def as_metadata(self) -> dict[str, object]:
+        """The numbers as a run record writes them into JSON."""
+
+        return {
+            "control_batch_covariate": self.batch_covariate,
+            "control_batch_control_cells": int(self.num_control_cells),
+            "control_batch_analysed_cells": int(self.num_cells),
+            "control_batch_levels": int(self.num_batch_levels),
+            "control_batch_levels_with_controls": int(self.num_levels_with_controls),
+            # Levels carrying enough control cells to fit their own coefficient on.
+            "control_batch_represented_levels": int(self.num_represented_levels),
+            "control_batch_min_cells_per_level": int(self.min_control_cells_per_level),
+            "control_top_batch_level": self.top_level,
+            "control_top_batch_cells": int(self.top_level_control_cells),
+            "control_top_batch_share": float(self.control_share_in_top_level),
+            "control_top_batch_screen_share": float(self.top_level_screen_share),
+            "control_top_batch_control_fraction": float(self.control_share_of_top_level),
+            "control_batch_confined": bool(self.confined),
+        }
+
+    def describe(self) -> str:
+        """One line, printed whether or not the pool is confined."""
+
+        if self.num_control_cells == 0 or self.top_level is None:
+            return (
+                f"controls: no control-only cell among the {self.num_cells:,} analysed cells, "
+                f"so there is nothing to distribute over the {self.num_batch_levels:,} "
+                f"'{self.batch_covariate}' levels."
+            )
+        return (
+            f"controls: {self.num_control_cells:,} cells across {self.num_batch_levels:,} "
+            f"'{self.batch_covariate}' levels; {100 * self.control_share_in_top_level:.1f}% in "
+            f"level '{self.top_level}' (which holds {100 * self.top_level_screen_share:.1f}% of "
+            f"all {self.num_cells:,} cells and is {100 * self.control_share_of_top_level:.1f}% "
+            f"controls); at least {self.min_control_cells_per_level:,} control cells in "
+            f"{self.num_represented_levels:,} of {self.num_batch_levels:,} levels."
+        )
+
+    def warning(self, *, pool: str | None = None) -> str | None:
+        """The warning text when the controls are confined, else ``None``."""
+
+        if not self.confined:
+            return None
+        head = (
+            f"Control cells are confined to one batch level: "
+            f"{100 * self.control_share_in_top_level:.1f}% of the {self.num_control_cells:,} "
+            f"control-only cells are in '{self.batch_covariate}' level '{self.top_level}', which "
+            f"holds {100 * self.top_level_screen_share:.1f}% of the {self.num_cells:,} analysed "
+            f"cells, and there are at least {self.min_control_cells_per_level:,} control cells in "
+            f"only {self.num_represented_levels:,} of {self.num_batch_levels:,} levels."
+        )
+        if pool == "control-anchored":
+            tail = (
+                "The control-anchored null is fit on the control cells alone, so the control pool "
+                f"is effectively a single batch: the batch covariate cannot identify the other "
+                f"levels' effects from controls alone. A perturbation whose cells sit outside "
+                f"'{self.top_level}' will read as an effect on every gene that differs between "
+                "its level and that one, however wide the region it covers."
+            )
+        elif pool == "all-cells":
+            tail = (
+                "Non-targeting calibration checks are confounded with batch for this screen: the "
+                f"control elements are measured almost entirely inside '{self.top_level}', while "
+                "the targeting elements are spread over every level, so a control p-value "
+                "distribution is not a screen-wide calibration check and should be read within "
+                "that level."
+            )
+        else:
+            tail = (
+                "Any contrast between a perturbation outside "
+                f"'{self.top_level}' and the controls is also a contrast between batch levels, "
+                "and the batch covariate cannot separate the two from controls alone."
+            )
+        return (
+            f"{head} {tail} Check the control guides' batch assignment, and consider restricting "
+            f"the analysis to '{self.top_level}' or supplying controls in every level."
+        )
+
+
+def summarize_control_batch_confinement(
+    control_mask,
+    batch_labels,
+    *,
+    batch_covariate: str | None = None,
+    min_control_cells_per_level: int = CONTROL_BATCH_MIN_CELLS_PER_LEVEL,
+) -> ControlBatchConfinement:
+    """Measure the control cells' batch distribution against the analysed cells'.
+
+    ``control_mask`` and ``batch_labels`` are both per analysed cell, in the same
+    order. Levels are taken from the labels the analysed cells actually carry, so
+    an unused category of a pandas ``Categorical`` does not count as a level the
+    controls are missing from.
+    """
+
+    controls = np.asarray(control_mask, dtype=bool).reshape(-1)
+    # str, not the incoming dtype: a categorical column, an object column of
+    # strings and an integer lane number all have to compare and print the same.
+    labels = np.asarray(batch_labels).reshape(-1).astype(str)
+    if controls.shape != labels.shape:
+        raise ValueError(
+            "control_mask and batch_labels must have one entry per analysed cell; got "
+            f"{controls.shape[0]} and {labels.shape[0]}."
+        )
+    levels, level_counts = np.unique(labels, return_counts=True)
+    num_cells = int(labels.size)
+    num_controls = int(controls.sum())
+    control_counts = np.array(
+        [int(np.count_nonzero(controls & (labels == level))) for level in levels], dtype=np.int64
+    )
+    num_levels = int(levels.size)
+    num_levels_with_controls = int(np.count_nonzero(control_counts > 0))
+    num_represented = int(np.count_nonzero(control_counts >= int(min_control_cells_per_level)))
+
+    if num_controls == 0:
+        top_level = None
+        top_controls = 0
+        top_cells = 0
+        control_share = 0.0
+        screen_share = 0.0
+        control_fraction = 0.0
+    else:
+        top = int(np.argmax(control_counts))
+        top_level = str(levels[top])
+        top_controls = int(control_counts[top])
+        top_cells = int(level_counts[top])
+        control_share = top_controls / num_controls
+        screen_share = top_cells / max(num_cells, 1)
+        control_fraction = top_controls / max(top_cells, 1)
+
+    confined = bool(
+        num_controls > 0
+        and num_levels > 1
+        and (
+            (
+                control_share > CONTROL_BATCH_CONFINED_CONTROL_SHARE
+                and screen_share < CONTROL_BATCH_CONFINED_SCREEN_SHARE
+            )
+            or num_represented == 1
+        )
+    )
+    return ControlBatchConfinement(
+        batch_covariate=None if batch_covariate is None else str(batch_covariate),
+        num_control_cells=num_controls,
+        num_cells=num_cells,
+        num_batch_levels=num_levels,
+        num_levels_with_controls=num_levels_with_controls,
+        num_represented_levels=num_represented,
+        min_control_cells_per_level=int(min_control_cells_per_level),
+        top_level=top_level,
+        top_level_control_cells=top_controls,
+        top_level_cells=top_cells,
+        control_share_in_top_level=float(control_share),
+        top_level_screen_share=float(screen_share),
+        control_share_of_top_level=float(control_fraction),
+        confined=confined,
+    )
+
+
+def report_control_batch_confinement(
+    control_mask,
+    batch_labels,
+    *,
+    batch_covariate: str | None = None,
+    pool: str | None = None,
+    min_control_cells_per_level: int = CONTROL_BATCH_MIN_CELLS_PER_LEVEL,
+) -> ControlBatchConfinement:
+    """Measure the distribution, say it on stdout, and warn when it is confined."""
+
+    summary = summarize_control_batch_confinement(
+        control_mask,
+        batch_labels,
+        batch_covariate=batch_covariate,
+        min_control_cells_per_level=min_control_cells_per_level,
+    )
+    print(f"[perturbo] {summary.describe()}")
+    message = summary.warning(pool=pool)
+    if message is not None:
+        # Both channels on purpose: stdout is what a run log and a pipeline's
+        # captured output carry, and a Python warning is what an interactive or
+        # library caller sees.
+        print(f"[perturbo] WARNING: {message}")
+        warnings.warn(message, RuntimeWarning, stacklevel=2)
+    return summary
 
 
 def _element_membership(data: PerTurboData) -> tuple[np.ndarray, np.ndarray, int]:
