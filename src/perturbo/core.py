@@ -888,11 +888,18 @@ def fit_covariate_transform(
     disappearing. Whether they also earn a design column depends on
     ``design_refit_over_analysed_cells``: the all-cells CRT pool refits the
     nuisance coefficients over every analysed cell, which identifies them, so
-    there they are kept and the reference is the most frequent analysed level.
-    Every other path estimates the nuisance coefficients from ``obs`` alone, so
-    such a level is genuinely unidentifiable; it is dropped from the design and
-    warned about, and the reference stays the most frequent level among the
-    cells being fit, which is the well-conditioned choice for that fit.
+    there they are kept. Every other path estimates the nuisance coefficients
+    from ``obs`` alone, so such a level is genuinely unidentifiable; it is
+    dropped from the design and warned about.
+
+    The reference level is always the most frequent level among the cells being
+    fit, whichever path is taken. It is folded into the intercept, so choosing a
+    level ``obs`` never samples would leave every fit row carrying exactly one
+    indicator - aliased with the intercept, and rank-deficient - while the
+    unsampled level itself lost its column and could not be identified by the
+    refit either. The all-cells refit is unpenalized, so the reference is a
+    reparameterization its fitted means are invariant to; anchoring it on a
+    populated level costs nothing and keeps the fit design full rank.
     """
     continuous = _dedupe_preserve_order(continuous_covariates)
     batch_col = None if batch_covariate in (None, "", "None") else str(batch_covariate)
@@ -952,12 +959,16 @@ def fit_covariate_transform(
             if int(fit_counts.get(level, 0)) == 0
         ]
         # The reference level is folded into the intercept, so it has to be one
-        # the estimating cells actually populate. Only the all-cells refit
-        # estimates over the analysed cells; there the most frequent analysed
-        # level is both well-conditioned and the interpretable baseline, and
-        # because that refit is unpenalized the choice is a reparameterization
-        # the fitted means are invariant to.
-        reference_counts = level_counts if design_refit_over_analysed_cells else fit_counts
+        # the cells being fit actually populate - under the all-cells refit as
+        # well. Taking the most frequent *analysed* level there can pick a level
+        # with no fit cell: every fit row then carries exactly one indicator,
+        # which is aliased with the intercept and leaves the stage-one design
+        # rank-deficient, while the unsampled level - now the reference - has no
+        # column for the refit to identify. The refit is unpenalized, so the
+        # reference is a reparameterization its fitted means are invariant to;
+        # the column the analysed-only level needs is retained by the
+        # zero-variance exemption below, not by the choice of reference.
+        reference_counts = fit_counts
         if reference_counts.shape[0] > 0:
             batch_reference = str(reference_counts.index[0])
         elif level_counts.shape[0] > 0:
@@ -973,7 +984,9 @@ def fit_covariate_transform(
                     f"[perturbo] Warning: batch level(s) {named} of '{batch_col}' have no cell in the "
                     "cells this transform is fit on. They are kept in the design because the all-cells "
                     "pool refits the nuisance coefficients over every analysed cell, which identifies "
-                    "them; any stage-two coefficient conditioned on the fit cells stays at zero."
+                    "them; any stage-two coefficient conditioned on the fit cells stays at zero. The "
+                    f"reference level is '{batch_reference}', the most frequent level among the fit "
+                    "cells, so the fit design keeps full column rank."
                 )
             else:
                 print(

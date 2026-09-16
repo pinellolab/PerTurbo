@@ -130,9 +130,10 @@ def test_batch_levels_come_from_the_analysed_cells_not_the_controls() -> None:
     # Never leave a level that exists in the data unlisted.
     assert state.batch_all_levels == ["L0", "L1", "L2", "L3"]
     assert state.batch_level_counts == {"L0": 400, "L1": 300, "L2": 200, "L3": 250}
-    # The reference is the most frequent analysed level, not the most frequent
-    # control level, and the lane the controls missed keeps a design column.
-    assert state.batch_reference == "L0"
+    # The reference is the most frequent level among the cells being fit, so the
+    # fit design stays full rank; the lane the controls missed is never chosen
+    # as the reference and keeps a design column of its own.
+    assert state.batch_reference == "L2"
     assert "batch:batch=L3" in state.feature_names
     assert state.dropped_features == []
     assert state.unidentifiable_batch_levels == ["L3"]
@@ -145,7 +146,54 @@ def test_batch_levels_come_from_the_analysed_cells_not_the_controls() -> None:
     # No analysed cell is silently coded as the reference lane.
     batch_columns = [i for i, name in enumerate(names) if name.startswith("batch:")]
     coded_as_reference = matrix[:, batch_columns].sum(axis=1) == 0
-    assert set(analysed[coded_as_reference]) == {"L0"}
+    assert set(analysed[coded_as_reference]) == {"L2"}
+
+
+def test_the_refit_reference_is_never_a_level_the_fit_cells_never_occupy() -> None:
+    """The reference is folded into the intercept, so it must have fit cells.
+
+    Taking the most frequent *analysed* level under the all-cells refit could
+    pick a level the controls never sampled. Every control row then carries
+    exactly one indicator, which is the intercept written again - the stage-one
+    design drops a rank - and the unsampled level, now the reference, has no
+    column for the refit to identify either.
+    """
+    # ``L3`` is the most frequent analysed level and holds no control cell.
+    analysed = pd.Series(["L3"] * 500 + ["L0"] * 400 + ["L1"] * 300 + ["L2"] * 200)
+    control_obs = pd.DataFrame(
+        {
+            "batch": ["L2"] * 120 + ["L0"] * 4 + ["L1"] * 2,
+            "percent_mito": np.linspace(0.0, 0.2, 126),
+        }
+    )
+    state = fit_covariate_transform(
+        control_obs,
+        continuous_covariates=["percent_mito"],
+        batch_covariate="batch",
+        analysed_batch_values=analysed,
+        design_refit_over_analysed_cells=True,
+    )
+    assert state.unidentifiable_batch_levels == ["L3"]
+    assert state.batch_reference == "L2"
+
+    control_matrix, names = apply_covariate_transform(control_obs, state)
+    design = np.concatenate([np.ones((len(control_obs), 1)), control_matrix], axis=1)
+    columns = ["intercept", *names]
+    # The unsampled lane is the one and only column with no control cell in it;
+    # its coefficient stays where the prior puts it until the refit identifies it.
+    occupied = np.abs(design).sum(axis=0) > 0
+    assert [name for name, keep in zip(columns, occupied, strict=True) if not keep] == [
+        "batch:batch=L3"
+    ]
+    # Everything the control cells do populate is linearly independent, intercept
+    # included: no indicator block summing to one behind the intercept's back.
+    assert np.linalg.matrix_rank(design[:, occupied]) == int(occupied.sum())
+
+    # And the analysed cells still get a column for the lane the controls missed.
+    analysed_obs = pd.DataFrame({"batch": analysed, "percent_mito": 0.05})
+    analysed_matrix, analysed_names = apply_covariate_transform(analysed_obs, state)
+    assert analysed_names == names
+    assert analysed_matrix[:, names.index("batch:batch=L3")].sum() == 500
 
 
 def test_control_anchored_warns_and_records_an_unidentifiable_batch_level(capsys) -> None:
