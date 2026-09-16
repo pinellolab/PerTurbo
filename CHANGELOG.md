@@ -10,6 +10,8 @@ and this project adheres to [Semantic Versioning][].
 
 ## [Unreleased]
 
+## [2.0.0rc9] - 2026-09-16
+
 ### Fixed
 
 -   Batch covariate levels are enumerated over the analysed cells, not over the
