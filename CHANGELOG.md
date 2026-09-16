@@ -24,15 +24,16 @@ and this project adheres to [Semantic Versioning][].
     silently merged into the reference lane, which is also the lane every
     non-targeting element lives in. The all-cells CRT pool refits the nuisance
     coefficients over every analysed cell, so such a level is identified there
-    and now keeps its design column, with the reference set to the most frequent
-    analysed level. Every other path estimates the nuisance coefficients from the
-    control cells alone, where the level is genuinely unidentifiable: it is
-    dropped from the design, named in a loud warning, and the reference stays the
-    most frequent control level, which is the well-conditioned choice for that
-    fit. `covariate_metadata.json` gains `batch_all_levels`,
+    and now keeps its design column. Every other path estimates the nuisance
+    coefficients from the control cells alone, where the level is genuinely
+    unidentifiable: it is dropped from the design and named in a loud warning.
+    The reference level stays the most frequent level among the cells being fit
+    on either path, which is the well-conditioned choice for that fit.
+    `covariate_metadata.json` gains `batch_all_levels`,
     `batch_level_counts`, `batch_levels_source` and
     `unidentifiable_batch_levels`, so a level present in the data is never
     unlisted.
+
 -   The all-cells propensity CRT resamples each element only within the batch
     levels where it has cells. With a categorical batch in the design, an element
     confined to some of its levels is *separated* by the level indicators: no
@@ -66,9 +67,40 @@ and this project adheres to [Semantic Versioning][].
 
     `--no-crt-all-cells-batch-support` restores the previous behaviour.
 
--   A separated propensity fit no longer needs to be diagnosed from its output:
-    `AllCellsPropensityFit` carries `batch_codes` and `element_support`, and the
-    CLI reports how many elements miss a level.
+-   The all-cells refit no longer anchors the batch reference on a level the
+    stage-one cells never occupy. The reference is folded into the intercept, so
+    taking the most frequent *analysed* level could pick one with no control
+    cell: every control row then carried exactly one indicator, which is the
+    intercept written a second time, and the stage-one design lost a rank (3 of
+    4 on the toy that found it). The level itself, now the reference, had no
+    column for the refit to identify either, the zero-variance exemption had
+    nothing to exempt, and the warning claimed a column that did not exist.
+    Stage two reuses stage one's covariate coefficients, so the aliasing
+    propagated. The reference is now the most frequent level among the cells
+    being fit on every path; the all-cells refit is unpenalized, so its fitted
+    means are invariant to that choice, and an analysed-only level keeps its
+    column through the exemption rather than through the reference.
+
+-   `--crt-all-cells-batch-support` now protects a two-level batch covariate.
+    The support was read off the bordered factorization, which declines a design
+    with fewer than two indicator columns because a one-column diagonal block is
+    not worth splitting off. A two-level factor is coded by exactly one column,
+    so the support came back empty and the flag was a silent no-op - though an
+    element confined to one of two lanes is separated by that column just as it
+    is by thirteen. The level codes are now derived from the design's mutually
+    exclusive binary indicator block directly, with the dropped reference level
+    recovered as its own code. Designs with three or more levels get the same
+    codes as before and are unaffected.
+
+-   The new indicator-matrix contraction in `_segment_sum` asks for
+    `Precision.HIGHEST`. The scatter-add it replaces summed float32 terms
+    exactly, while a matrix product is free to run in TF32 on Ampere and later -
+    ten mantissa bits where the reduction feeding `weighted_information`,
+    `transpose_dot`, `fisher_nb_null` and the low-MOI score path had twenty-four.
+    No CPU result changes.
+
+### Changed
+
 -   The structured nuisance algebra reduced over batch levels with a scatter-add,
     whose accelerator cost grows as the segment count *falls* because colliding
     rows serialize on one output address. A batch covariate is the worst case:
@@ -87,7 +119,22 @@ and this project adheres to [Semantic Versioning][].
     spread the scatter itself produced: against a stored reference run, the
     median relative change is 6.0e-7 where an unmodified rerun gives 1.1e-6, and
     no call changes at p < 0.05, 1e-3 or 1e-5.
+
 ### Added
+
+-   A separated propensity fit no longer needs to be diagnosed from its output:
+    `AllCellsPropensityFit` carries `batch_codes` and `element_support`, and the
+    CLI reports how many elements miss a level.
+
+-   `crt_metadata.json` records `all_cells_batch_support`, together with
+    `all_cells_elements_missing_a_batch_level`, `all_cells_elements` and
+    `all_cells_batch_levels`, so a stored result says whether its all-cells null
+    was restricted to each element's own batch levels and how many elements that
+    could have applied to. `cli_args` in the model-parameter bundle records the
+    flag, and the bundle carries the measured counts beside it as
+    `crt_all_cells_batch_support_summary`. The element-support summary line is
+    also printed by an unchunked run, which used to compute the support and say
+    nothing about it.
 
 -   A run with `--batch-covariate` now reports how its control cells sit across the
     batch levels, and warns when they are confined to one. Measured on a
