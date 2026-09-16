@@ -63,6 +63,7 @@ from .crt import (
     CRT_ALL_TAIL_FAMILIES,
     CRT_MECHANISMS,
     CRT_SADDLEPOINT_FAMILY,
+    DEFAULT_CRT_MIN_INFORMATIVE_CELLS,
     DEFAULT_NEWTON_STEP_TOLERANCE,
     exclude_targets,
     fit_shared_propensity_coefficients,
@@ -626,6 +627,18 @@ def main(argv: list[str] | None = None) -> None:
         ),
     )
     parser.add_argument(
+        "--crt-min-informative-cells",
+        type=float,
+        default=DEFAULT_CRT_MIN_INFORMATIVE_CELLS,
+        help=(
+            "Flag a pair as low-information when neither the element's detected cells for the gene "
+            "(crt_observed_nonzero) nor the number the fitted null expected to detect "
+            "(crt_expected_nonzero) reaches this many. It is a flag and nothing else: p-values, "
+            "q-values and validity are identical with it set to any value. 0 keeps the two count "
+            "columns and flags nothing."
+        ),
+    )
+    parser.add_argument(
         "--crt-screen-p-value",
         type=float,
         default=0.05,
@@ -1113,6 +1126,8 @@ def main(argv: list[str] | None = None) -> None:
             raise ValueError("--crt-screen-p-value must lie in (0, 1].")
         if args.crt_gene_chunk_size < 1:
             raise ValueError("--crt-gene-chunk-size must be >= 1.")
+        if args.crt_min_informative_cells < 0:
+            raise ValueError("--crt-min-informative-cells must be >= 0 (0 flags nothing).")
         if args.control_substring is None and crt_pool == "control-anchored":
             raise ValueError(
                 "--crt requires --control-substring: the test resamples each perturbation's label "
@@ -1624,6 +1639,7 @@ def main(argv: list[str] | None = None) -> None:
                 gene_names=tuple(str(name) for name in full_data.gene_names),
                 tail_families=tuple(args.crt_tail_families),
                 saddlepoint_only=bool(args.crt_saddlepoint_only),
+                min_informative_cells=float(args.crt_min_informative_cells),
             )
         accumulator.absorb(
             run_crt_all_cells(
@@ -1733,6 +1749,7 @@ def main(argv: list[str] | None = None) -> None:
                         gene_names=tuple(analysis_gene_names),
                         tail_families=tuple(args.crt_tail_families),
                         saddlepoint_only=bool(args.crt_saddlepoint_only),
+                        min_informative_cells=float(args.crt_min_informative_cells),
                     )
                 if crt_pool == "all-cells":
                     _run_all_cells_crt(
@@ -1833,6 +1850,7 @@ def main(argv: list[str] | None = None) -> None:
                 gene_names=tuple(str(name) for name in analysis_gene_names),
                 tail_families=tuple(args.crt_tail_families),
                 saddlepoint_only=bool(args.crt_saddlepoint_only),
+                min_informative_cells=float(args.crt_min_informative_cells),
             )
             for chunk_i, chunk_info in enumerate(chunks):
                 chunk_data = load_analysis_cells(
@@ -1884,6 +1902,7 @@ def main(argv: list[str] | None = None) -> None:
                 gene_names=tuple(str(name) for name in analysis_gene_names),
                 tail_families=tuple(args.crt_tail_families),
                 saddlepoint_only=bool(args.crt_saddlepoint_only),
+                min_informative_cells=float(args.crt_min_informative_cells),
             )
         posterior_mean = np.zeros((n_perts, n_genes), dtype=np.float32)
         posterior_scale = np.zeros((n_perts, n_genes), dtype=np.float32)
@@ -2078,6 +2097,7 @@ def main(argv: list[str] | None = None) -> None:
                 gene_names=tuple(str(name) for name in analysis_gene_names),
                 tail_families=tuple(args.crt_tail_families),
                 saddlepoint_only=bool(args.crt_saddlepoint_only),
+                min_informative_cells=float(args.crt_min_informative_cells),
             )
             if crt_shares_selection_model:
                 # Nothing is chunked here, so "over the screen" and "inside the
@@ -2195,6 +2215,40 @@ def main(argv: list[str] | None = None) -> None:
                 None if all_cells_support_counts is None else all_cells_support_counts[2]
             ),
         }
+        # Per-pair informativeness. A flag, never a gate: every p-value and
+        # q-value above was computed without reference to it. What it records is
+        # how much of a pair's tail is extrapolation - a statistic summed over
+        # four detected cells has a far tail the saddlepoint can describe but the
+        # data cannot support, and that is where two runs of the same binary
+        # disagree.
+        crt_metadata["min_informative_cells"] = float(args.crt_min_informative_cells)
+        if "crt_low_information" in crt_columns:
+            flagged = np.asarray(crt_columns["crt_low_information"], dtype=bool)
+            primary_q = crt_columns[
+                f"crt_{CRT_SADDLEPOINT_FAMILY}_q_value"
+                if CRT_SADDLEPOINT_FAMILY in crt_accumulator.tail_families
+                else "crt_q_value"
+            ]
+            with np.errstate(invalid="ignore"):
+                significant = np.asarray(primary_q) < 0.05
+            # A gene every one of whose pairs is flagged is the shape that
+            # matters most: it is the panel's detection floor showing up as a
+            # gene, not one element being thin.
+            genes_all_flagged = int(np.count_nonzero(flagged.all(axis=0))) if flagged.size else 0
+            crt_metadata["low_information_pairs"] = int(np.count_nonzero(flagged))
+            crt_metadata["low_information_pairs_significant"] = int(
+                np.count_nonzero(flagged & significant)
+            )
+            crt_metadata["low_information_genes_entirely_flagged"] = genes_all_flagged
+            crt_metadata["low_information_total_pairs"] = int(flagged.size)
+            print(
+                f"[perturbo] CRT low information: {int(np.count_nonzero(flagged)):,} of "
+                f"{flagged.size:,} pairs have fewer than {args.crt_min_informative_cells:g} "
+                "informative cells (observed or expected detected), of which "
+                f"{int(np.count_nonzero(flagged & significant)):,} are otherwise significant at "
+                f"q<0.05; {genes_all_flagged:,} of {len(analysis_gene_names):,} genes are flagged "
+                "for every element. Flag only; no p-value or q-value changed."
+            )
         # How the control cells sit across the batch levels. Both pools are
         # interpreted differently when the controls are confined to one level, and
         # neither the p-values nor the effect sizes say so on their own.
