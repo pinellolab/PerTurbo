@@ -10,6 +10,28 @@ and this project adheres to [Semantic Versioning][].
 
 ## [Unreleased]
 
+### Fixed
+
+-   Batch covariate levels are enumerated over the analysed cells, not over the
+    stage-one control cells. A level the control set never sampled used to be
+    absent from the design entirely: its cells got an all-zero indicator row and
+    therefore the reference level's coefficient, with nothing in
+    `covariate_metadata.json` to say a level had gone missing. On a 126,154-cell
+    TAP-seq chr8 screen whose non-targeting guides sit almost entirely in one
+    lane, one of fourteen lanes had no control cell and its 10,570 cells were
+    silently merged into the reference lane, which is also the lane every
+    non-targeting element lives in. The all-cells CRT pool refits the nuisance
+    coefficients over every analysed cell, so such a level is identified there
+    and now keeps its design column, with the reference set to the most frequent
+    analysed level. Every other path estimates the nuisance coefficients from the
+    control cells alone, where the level is genuinely unidentifiable: it is
+    dropped from the design, named in a loud warning, and the reference stays the
+    most frequent control level, which is the well-conditioned choice for that
+    fit. `covariate_metadata.json` gains `batch_all_levels`,
+    `batch_level_counts`, `batch_levels_source` and
+    `unidentifiable_batch_levels`, so a level present in the data is never
+    unlisted.
+
 ## [2.0.0rc8] - 2026-09-15
 
 ### Fixed
