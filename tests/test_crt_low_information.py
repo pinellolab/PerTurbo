@@ -434,8 +434,16 @@ def test_the_cli_threshold_only_moves_the_flag(tmp_path) -> None:
         merged["crt_p_value_s"].to_numpy(dtype=float),
         equal_nan=True,
     )
-    assert strict_frame["crt_low_information"].all()
-    assert strict_metadata["low_information_pairs"] == len(strict_frame)
+    # A threshold nothing can clear flags every pair that was tested. The
+    # control element is not tested under this pool, so its rows stay unflagged:
+    # the flag describes measurements, and it has none.
+    tested_rows = strict_frame["element"] != "non-targeting"
+    assert strict_frame.loc[tested_rows, "crt_low_information"].all()
+    assert not strict_frame.loc[~tested_rows, "crt_low_information"].any()
+    assert strict_metadata["low_information_pairs"] == int(tested_rows.sum())
+    assert strict_metadata["low_information_pairs"] == int(
+        strict_frame["crt_low_information"].sum()
+    )
 
 
 def test_the_cli_rejects_a_negative_threshold(tmp_path) -> None:
@@ -517,3 +525,31 @@ def test_the_all_cells_pool_counts_over_each_elements_own_cells(tmp_path) -> Non
     assert (ordinary["crt_observed_nonzero"] > 100).all()
     assert metadata["low_information_genes_entirely_flagged"] == 1
     assert sparse_gene["crt_saddlepoint_p_value"].notna().any()
+
+
+def test_an_untested_element_is_not_flagged_by_its_placeholder(chunk_result) -> None:
+    """A row no chunk absorbed keeps zero counts, and zero is not evidence.
+
+    The count arrays are allocated over the whole screen and filled per chunk, so
+    an element that was never tested - dropped for having no assigned cells, or
+    simply outside this run - still reads ``observed = expected = 0``. That is the
+    most information-poor pair arithmetic can describe, but it describes a
+    placeholder rather than a measurement, and the element's CRT statistics are
+    already missing. Flagging it would invent a verdict about an untested row.
+    """
+
+    accumulator = CRTAccumulator(
+        element_names=tuple(chunk_result.target_names) + ("never_tested",),
+        gene_names=chunk_result.gene_names,
+        tail_families=(),
+    )
+    accumulator.absorb(chunk_result)
+    columns = accumulator.finalize()
+
+    untested = len(chunk_result.target_names)
+    assert not accumulator.tested[untested]
+    assert (columns["crt_observed_nonzero"][untested] == 0).all()
+    assert (columns["crt_expected_nonzero"][untested] == 0.0).all()
+    assert not columns["crt_low_information"][untested].any()
+    # The tested rows are untouched by the gate.
+    assert columns["crt_low_information"][TARGET_SMALL, GENE_SPARSE]

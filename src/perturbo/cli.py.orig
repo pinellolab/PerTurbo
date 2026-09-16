@@ -1435,11 +1435,6 @@ def main(argv: list[str] | None = None) -> None:
     save_array_bundle(control_fit_path, control_fit_arrays(control_fit))
     print(f"[perturbo] Wrote {control_fit_path}")
 
-    # Stage one is finished. Keep its raw controls on the host for downstream
-    # gene slices; retaining the full device panel wastes space needed by CRT.
-    # Mutate the existing object so controls_loaded sees the same host array.
-    controls.counts = np.array(controls.counts, copy=True)
-
     crt_shared_propensity: np.ndarray | None = None
 
     def _fit_crt_shared_selection_model(
@@ -2238,17 +2233,8 @@ def main(argv: list[str] | None = None) -> None:
                 significant = np.asarray(primary_q) < 0.05
             # A gene every one of whose pairs is flagged is the shape that
             # matters most: it is the panel's detection floor showing up as a
-            # gene, not one element being thin. Quantified over the tested rows
-            # only, because the flag itself is: a control-anchored screen leaves
-            # its control elements untested and therefore unflagged, and asking
-            # for every row would report zero such genes on every screen that
-            # has one.
-            tested_rows = np.asarray(crt_accumulator.tested, dtype=bool)
-            genes_all_flagged = (
-                int(np.count_nonzero(flagged[tested_rows].all(axis=0)))
-                if flagged.size and tested_rows.any()
-                else 0
-            )
+            # gene, not one element being thin.
+            genes_all_flagged = int(np.count_nonzero(flagged.all(axis=0))) if flagged.size else 0
             crt_metadata["low_information_pairs"] = int(np.count_nonzero(flagged))
             crt_metadata["low_information_pairs_significant"] = int(
                 np.count_nonzero(flagged & significant)

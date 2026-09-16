@@ -1620,9 +1620,26 @@ def fit_low_moi_propensity_saddlepoint(
     control_contribution = jnp.take(contribution, jnp.asarray(control_rows), axis=0)
     if compact_given:
         control_basis = jnp.take(basis_device, jnp.asarray(control_rows), axis=0)
-        own_basis = jnp.take(basis_device, jnp.asarray(own_rows), axis=0)
-        own_logits = jnp.sum(
-            own_basis * coefficients_device[jnp.asarray(own_codes)], axis=1
+        # Form own-cell logits in bounded row chunks.  The unchunked gather
+        # materializes two (own cells, basis) float64 operands and their product;
+        # at Xaira scale each operand alone is about 2.63 GiB.
+        rows_per_chunk = max(1, int(_PROJECTION_ROWS_PER_CHUNK // max(basis.shape[1], 1)))
+        own_logit_parts = [
+            jnp.einsum(
+                "nk,nk->n",
+                jnp.take(
+                    basis_device,
+                    jnp.asarray(own_rows[start:start + rows_per_chunk]),
+                    axis=0,
+                ),
+                coefficients_device[jnp.asarray(own_codes[start:start + rows_per_chunk])],
+            )
+            for start in range(0, own_rows.size, rows_per_chunk)
+        ]
+        own_logits = (
+            jnp.concatenate(own_logit_parts)
+            if own_logit_parts
+            else jnp.zeros((0,), dtype=jnp.float64)
         )
         control_logits = None
     else:

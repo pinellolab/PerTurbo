@@ -2519,6 +2519,13 @@ class CRTAccumulator:
         A flag, not a gate: it is reported beside the p-values and changes none
         of them. A threshold of zero flags nothing, which is how the column is
         kept present on a run that wants the counts without the verdict.
+
+        Only tested rows can be flagged. The count arrays keep zero as their
+        sentinel wherever no chunk absorbed a row, so an element that was never
+        tested - dropped for having no assigned cells, or excluded from this
+        run - would otherwise read as the most information-poor pair in the
+        screen on the strength of a placeholder. Its CRT statistics are already
+        missing; the flag says nothing about it either.
         """
 
         shape = (len(self.element_names), len(self.gene_names))
@@ -2527,4 +2534,5 @@ class CRTAccumulator:
         threshold = float(self.min_informative_cells)
         if threshold <= 0.0:
             return np.zeros(shape, dtype=bool)
-        return np.maximum(self.observed_nonzero, self.expected_nonzero) < threshold
+        flagged = np.maximum(self.observed_nonzero, self.expected_nonzero) < threshold
+        return flagged & self.tested[:, None]
