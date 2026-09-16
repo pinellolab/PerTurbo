@@ -14,6 +14,34 @@ and this project adheres to [Semantic Versioning][].
 
 ### Fixed
 
+-   The compact low-MOI propensity saddlepoint forms its own-cell logits in
+    bounded row chunks. Building the vector as
+    `sum(basis[own_rows] * coefficients[own_codes], axis=1)` asks XLA for two
+    `(own cells, basis width)` float64 operands and their product on the way to
+    a `(own cells,)` result; at X-Atlas/Orion scale that is 3,243,392 rows over
+    a 109-column basis, 2.63 GiB apiece to produce 26 MB, and it drove six runs
+    into GPU OOM. The chunked form accumulates the same float64 dot products on
+    the row budget the pool projection already uses, so the peak scales with the
+    chunk rather than the cell count. The arithmetic is untouched and the fit is
+    identical to the last bit: parity is pinned at three forced chunk budgets
+    and at one row per chunk, because the production budget leaves a test-sized
+    screen in a single chunk and left this path covered only in that form.
+
+-   Stage one returns its control counts to the host once the control fit is
+    written, instead of leaving the full device panel resident for the CRT to
+    work around.
+
+-   `crt_low_information` is reported only for element rows that were tested.
+    The count arrays keep zero as their sentinel wherever no chunk absorbed a
+    row, so an element dropped for having no assigned cells, or simply outside
+    this run, used to read as the most information-poor pair in the screen on
+    the strength of a placeholder; its CRT statistics were already missing.
+    `low_information_genes_entirely_flagged` is quantified over the tested rows
+    for the same reason: asking for every row reported zero such genes on every
+    control-anchored screen, whose control elements are never tested.
+
+### Fixed
+
 -   Batch covariate levels are enumerated over the analysed cells, not over the
     stage-one control cells. A level the control set never sampled used to be
     absent from the design entirely: its cells got an all-zero indicator row and
