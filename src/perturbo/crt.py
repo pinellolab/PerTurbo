@@ -186,19 +186,32 @@ def _informative_cell_counts(
     ``expm1``/``log1p`` because ``theta`` reaches the hundreds on well-detected
     genes, where the direct power underflows to zero and would report every cell
     as certainly detected.
+
+    float32 on the cell axis, and every step of the detection probability in
+    place. The score kernel already holds two float64 (cells, genes) arrays for
+    this same block, and a diagnostic has no business adding three more; the
+    quantity being reported is a cell count, where float32's seven digits are
+    six more than anyone reads.
     """
 
     member_counts = np.asarray(counts)
-    design = np.asarray(nuisance_design, dtype=np.float64)
-    offset_matrix = np.asarray(offsets, dtype=np.float64)
+    design = np.asarray(nuisance_design, dtype=np.float32)
+    offset_matrix = np.asarray(offsets, dtype=np.float32)
     if offset_matrix.ndim == 1:
         offset_matrix = offset_matrix[:, None]
-    eta = offset_matrix + design @ np.asarray(coefficients, dtype=np.float64)
-    mean = np.exp(np.clip(eta, -_INFORMATIVE_ETA_CLIP, _INFORMATIVE_ETA_CLIP))
-    theta_row = np.asarray(dispersion, dtype=np.float64).reshape(1, -1)
-    detection_probability = -np.expm1(-theta_row * np.log1p(mean / theta_row))
+    theta_row = np.asarray(dispersion, dtype=np.float32).reshape(1, -1)
+    detected = design @ np.asarray(coefficients, dtype=np.float32)
+    detected += offset_matrix
+    np.clip(detected, -_INFORMATIVE_ETA_CLIP, _INFORMATIVE_ETA_CLIP, out=detected)
+    np.exp(detected, out=detected)
+    detected /= theta_row
+    np.log1p(detected, out=detected)
+    detected *= -theta_row
+    np.expm1(detected, out=detected)
+    np.negative(detected, out=detected)
+    expected = membership @ detected
+    del detected
     observed = membership @ (member_counts > 0).astype(np.float32)
-    expected = membership @ detection_probability.astype(np.float32)
     return np.asarray(observed, dtype=np.float64), np.asarray(expected, dtype=np.float64)
 
 
