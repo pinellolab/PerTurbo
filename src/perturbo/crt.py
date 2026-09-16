@@ -156,6 +156,14 @@ DEFAULT_NEWTON_STEP_TOLERANCE = 0.05
 #
 # This is a flag, never a gate. P-values, q-values and the validity fields are
 # what they were; the column says how much of the pair's tail is real.
+#
+# A variance-based effective sample size - (sum v_i)^2 / sum v_i^2 over the
+# per-cell null-variance contributions - was considered and left out. It is not
+# free: both propensity kernels form sum v_i as one (elements, cells) x
+# (cells, genes) matmul per element batch, and sum v_i^2 needs a second one over
+# the fourth power of the contribution, on the path that already dominates the
+# cumulant loop. Counting detected cells costs one pass over the member cells
+# only, which on the control-anchored pool is a minority of the design.
 DEFAULT_CRT_MIN_INFORMATIVE_CELLS = 5.0
 
 _INFORMATIVE_ETA_CLIP = 30.0
