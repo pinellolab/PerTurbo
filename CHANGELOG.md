@@ -10,6 +10,27 @@ and this project adheres to [Semantic Versioning][].
 
 ## [Unreleased]
 
+### Fixed
+
+-   The structured nuisance algebra reduced over batch levels with a scatter-add,
+    whose accelerator cost grows as the segment count *falls* because colliding
+    rows serialize on one output address. A batch covariate is the worst case:
+    tens of levels over hundreds of thousands of cells. `_segment_sum` now
+    contracts against the indicator matrix instead - the same sum written as a
+    matrix product - for designs below 256 groups, keeping the scatter beyond
+    that, where it wins. The indicator is materialized as `(cells, groups)` and
+    never as the full nuisance design, so the arrow structure of `Z'WZ` is
+    untouched; only the reduction changes. On a 126,154-cell TAP-seq screen with
+    a 14-level batch covariate, the all-cells propensity CRT over 1,041 elements
+    and 68 genes went from 2,630 s to 76 s measured back to back on one V100;
+    its batched logistic IRLS from 10.3 s to 0.12 s per 64 elements, and
+    `fisher_nb_null` from 1.12 s to 0.05 s. Without a batch covariate the same
+    run took 15 s, so the structured route was costing 35x the design it was
+    meant to make cheap. Saddlepoint p-values move by less than the run-to-run
+    spread the scatter itself produced: against a stored reference run, the
+    median relative change is 6.0e-7 where an unmodified rerun gives 1.1e-6, and
+    no call changes at p < 0.05, 1e-3 or 1e-5.
+
 ## [2.0.0rc8] - 2026-09-15
 
 ### Fixed

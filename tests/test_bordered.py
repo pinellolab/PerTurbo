@@ -9,6 +9,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
+from perturbo._internal import bordered as bordered_module
 from perturbo._internal.bordered import (
     BorderedInfo,
     add_information,
@@ -273,3 +274,52 @@ def test_zero_border_design_and_batched_products():
     np.testing.assert_allclose(matmul_numpy(design, coefficients), np.einsum("nq,tqg->tng", dense, coefficients))
     values = np.stack([weights, 2 * weights])
     np.testing.assert_allclose(transpose_dot_numpy(design, values), np.einsum("nq,tng->tgq", dense, values))
+
+
+@pytest.mark.parametrize("groups", [4, 40])
+def test_indicator_contraction_and_scatter_reductions_agree(monkeypatch, groups):
+    """The two segment-sum routes are one reduction written two ways.
+
+    ``_segment_sum`` contracts against the indicator matrix for the few-group
+    designs a batch covariate produces and scatters beyond that. Both must
+    reproduce the dense original-coordinate algebra, including the reference
+    sentinel rows that belong to no indicator column.
+    """
+
+    dense, weights, rhs = _problem(n=410, groups=groups, genes=3)
+    design = detect_bordered_design(dense)
+    assert design.num_groups == groups
+    # The reference level must be present, or the sentinel path goes untested.
+    assert np.any(np.asarray(design.codes) == design.num_groups)
+    ridge = np.linspace(0.1, 1.0, dense.shape[1])
+    expected = _dense_solution(_dense_information(dense, weights, ridge), rhs)
+    expected_transpose = np.einsum("nq,ng->ngq", dense, np.ones_like(weights)).sum(axis=0)
+
+    results = {}
+    for name, limit in (("indicator", 256), ("scatter", 0)):
+        monkeypatch.setattr(bordered_module, "_DENSE_SEGMENT_GROUP_LIMIT", limit)
+        with _x64():
+            info = weighted_information(design, weights, ridge)
+            results[name] = (
+                np.asarray(jax.jit(solve)(design, info, rhs)),
+                np.asarray(transpose_dot(design, np.ones_like(weights))),
+            )
+        np.testing.assert_allclose(results[name][0], expected, rtol=2e-12, atol=2e-12)
+        np.testing.assert_allclose(results[name][1], expected_transpose, rtol=2e-12, atol=2e-12)
+    np.testing.assert_allclose(results["indicator"][0], results["scatter"][0], rtol=2e-12, atol=2e-12)
+    np.testing.assert_allclose(results["indicator"][1], results["scatter"][1], rtol=2e-12, atol=2e-12)
+
+
+def test_indicator_contraction_respects_the_materialization_budget(monkeypatch):
+    """A wide group axis must fall back rather than build a huge indicator."""
+
+    dense, weights, _ = _problem(n=410, groups=40, genes=2)
+    design = detect_bordered_design(dense)
+    monkeypatch.setattr(bordered_module, "_DENSE_SEGMENT_ELEMENT_LIMIT", 1)
+    with _x64():
+        budgeted = np.asarray(transpose_dot(design, weights))
+    monkeypatch.setattr(bordered_module, "_DENSE_SEGMENT_ELEMENT_LIMIT", 1 << 26)
+    with _x64():
+        contracted = np.asarray(transpose_dot(design, weights))
+    np.testing.assert_allclose(budgeted, contracted, rtol=2e-12, atol=2e-12)
+    np.testing.assert_allclose(contracted, np.einsum("nq,ng->gq", dense, weights), rtol=2e-12, atol=2e-12)
