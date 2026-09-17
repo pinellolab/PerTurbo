@@ -113,34 +113,6 @@ in `varm`) and `--perturbation-element-names-uns-key element_names`.
 | `control_fit.npz` | the stage-one control fit |
 | `guide_efficiency.parquet` | per-guide efficiency, when guide effects are estimated |
 
-### Python interface
-
-For embedding PerTurbo in a larger analysis, the same fit is available in
-Python. Prefer the CLI for whole screens: it handles chunking, records its
-configuration, and is reproducible from a command line.
-
-```python
-import perturbo
-
-perturbo.setup_mudata(
-    mdata,
-    modalities={"rna_layer": "rna", "perturbation_layer": "grna"},
-    guide_by_element_key="element_targeted",
-)
-
-model = perturbo.PERTURBO(mdata, likelihood="nb", guide_random_effects=True)
-model.train(steps=2500, batch_size=1024, accelerator="gpu")
-model.save("perturbo_bundle", overwrite=True)
-```
-
-
-## Development
-
-```bash
-uv sync --group test --group dev
-uv run pytest
-uv build
-```
 
 ## License
 
