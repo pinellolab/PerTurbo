@@ -70,16 +70,22 @@ def test_exact_support_and_near_mean_are_preserved():
     assert not np.asarray(diag.failure_reason_code).any()
 
 
-def test_frozen_xaira_policy_regressions():
-    # Golden outputs cross-checked against the frozen successful Xaira wrapper
-    # (full11194_newton_finite_bound_v4), finite-bound policy. Seeded mixed
-    # Bernoulli contributions exercise LR failure and root-residual failure.
+def _frozen_policy_case():
     rng = np.random.default_rng(20260917)
     values = rng.lognormal(0, 3, (32, 256)) * rng.choice([-1, 1], (32, 256))
     logits = rng.uniform(-10, 0, (32, 256))
     observed = (values * (rng.random((32, 256)) < .15)).sum(0)
-    log_p, valid, diag = sp.propensity_saddlepoint_log_two_sided_diagnostics(
-        jnp.asarray(observed), jnp.asarray(values), jnp.asarray(logits)
+    return jnp.asarray(observed), jnp.asarray(values), jnp.asarray(logits)
+
+
+def test_frozen_xaira_policy_regressions(monkeypatch):
+    # Golden outputs cross-checked against the frozen successful Xaira wrapper
+    # (full11194_newton_finite_bound_v4), finite-bound policy, at that wrapper's
+    # 1e-6 root-residual tolerance. Seeded mixed Bernoulli contributions
+    # exercise LR failure and root-residual failure.
+    monkeypatch.setattr(sp, "_PROPENSITY_ROOT_RESIDUAL_TOLERANCE", 1e-6)
+    log_p, valid, diag = sp.propensity_saddlepoint_log_two_sided_diagnostics.__wrapped__(
+        *_frozen_policy_case()
     )
     assert np.asarray(valid).all()
     assert int(diag.failure_reason_code[25]) == 32
@@ -90,9 +96,58 @@ def test_frozen_xaira_policy_regressions():
     assert bool(diag.fallback_used[67]) and bool(diag.chernoff_usable[67])
 
 
+def test_default_tolerance_keeps_nearly_converged_roots_on_the_frozen_case():
+    # Under the shipped 1e-3 tolerance, column 67 (root residual 7e-6 null sd)
+    # is evaluated rather than bounded: log p -2.73 instead of the Chernoff
+    # -0.49. A 2e7-draw Monte Carlo of that column's equal-tail p gives
+    # log p = -5.74 +- 0.01, so both are conservative and the saddlepoint is
+    # the closer of the two. The LR-ratio failure on column 25 is unchanged.
+    log_p, valid, diag = sp.propensity_saddlepoint_log_two_sided_diagnostics(
+        *_frozen_policy_case()
+    )
+    assert np.asarray(valid).all()
+    assert int(diag.failure_reason_code[25]) == 32 and float(log_p[25]) == 0.
+    assert int(diag.failure_reason_code[67]) == 0
+    assert not bool(diag.fallback_used[67])
+    assert 1e-6 < float(diag.root_residual_null_sd[67]) < 1e-3
+    np.testing.assert_allclose(log_p[67], -2.732778, atol=1e-5)
+    assert float(log_p[67]) < -0.4922154895294969
+
+
 def test_nonfinite_observation_is_not_made_valid_by_fallback():
     log_p, valid, _ = sp.propensity_saddlepoint_log_two_sided_diagnostics(
         jnp.array([jnp.nan, jnp.inf]), jnp.ones((4, 2)), jnp.zeros(4)
     )
     assert not np.asarray(valid).any()
     assert np.isnan(np.asarray(log_p)).all()
+
+
+def test_a_nearly_converged_root_keeps_the_saddlepoint_value(monkeypatch):
+    """A residual of ~6e-5 null sd is not a failure: log p moves about 0.27
+    nats per null sd of residual here, so the value is within 2e-5 nats. At
+    the earlier 1e-6 tolerance this pair went to the Chernoff bound instead."""
+    observed = jnp.array([35.])
+    contribution = jnp.ones((100, 1))
+    logits = jnp.full((100,), np.log(.2 / .8))
+    exact_log_p, _, exact_diag = sp.propensity_saddlepoint_log_two_sided_diagnostics(
+        observed, contribution, logits
+    )
+    assert int(exact_diag.failure_reason_code[0]) == 0
+    true_solver = sp._solve_propensity_saddlepoint
+
+    def nearly_converged(target, values, logits, *, iterations):
+        t_hat, bracketed = true_solver(target, values, logits, iterations=iterations)
+        # Binomial(100, .2): a shift of 1e-5 in t moves K'(t) by about 5.7e-5
+        # null sd (measured), squarely between the old and new tolerances.
+        return t_hat + 1e-5, bracketed
+
+    monkeypatch.setattr(sp, '_solve_propensity_saddlepoint', nearly_converged)
+    log_p, valid, diag = sp.propensity_saddlepoint_log_two_sided_diagnostics.__wrapped__(
+        observed, contribution, logits
+    )
+    residual = float(diag.root_residual_null_sd[0])
+    assert 1e-6 < residual < 1e-3, residual
+    assert bool(valid[0])
+    assert int(diag.failure_reason_code[0]) == 0
+    assert not bool(diag.fallback_used[0])
+    np.testing.assert_allclose(float(log_p[0]), float(exact_log_p[0]), atol=1e-4)

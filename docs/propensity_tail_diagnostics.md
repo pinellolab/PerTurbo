@@ -7,7 +7,12 @@ It does not change the fitted assignment law, efficient score, or screening
 threshold. It can change p-values and discoveries for failed approximations.
 
 The root residual is `abs(K'(t) - observed) / null_standard_deviation` and must
-be at most `1e-6`. The raw Lugannani–Rice correction must be finite and define a
+be at most `1e-3`. log p moves first order in the residual, through the
+`u = t sqrt(K'')` correction, with a coefficient well under one (about 0.27 nats per
+null standard deviation measured on Binomial(100, 0.2)), so the value is within
+3e-4 nats at the tolerance. The fixed-iteration solver commonly stops between 1e-6
+and 1e-5 on deep tails, and the earlier 1e-6 guard replaced such values with a
+Chernoff bound about 3 nats looser. The raw Lugannani–Rice correction must be finite and define a
 probability; linear underflow alone is not a failure when the log probability
 is valid. A failing approximation uses `min(1, 2 * exp(K(t) - t * observed))`
 when the bound guards pass. A finite, nonnegative, nonoptimal tilt still gives
@@ -38,7 +43,7 @@ not determine the tail policy or filter the multiple-testing family.
 | 2 | Nonfinite root or cumulant-generating-function quantity |
 | 4 | Nonpositive second derivative |
 | 8 | Negative LR radicand beyond rounding tolerance |
-| 16 | Root residual exceeds 1e-6 null standard deviations |
+| 16 | Root residual exceeds 1e-3 null standard deviations |
 | 32 | LR correction ratio at or below -1 |
 | 64 | Nonpositive LR tail in the log-domain check |
 | 128 | Raw LR tail exceeds 1 |
