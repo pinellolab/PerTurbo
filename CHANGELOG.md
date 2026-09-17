@@ -10,6 +10,19 @@ and this project adheres to [Semantic Versioning][].
 
 ## [Unreleased]
 
+### Added
+
+-   The CLI's first log line names the code that is running:
+    `[perturbo] perturbo <version> running from <import path>`, with a warning
+    when a source tree on `PYTHONPATH` shadows the installed package, because
+    `importlib.metadata` then still reports the installed version. The same
+    three fields (`perturbo_version`, `perturbo_source`,
+    `perturbo_source_shadows_installed`) are written to `crt_metadata.json`
+    and `covariate_metadata.json`. Motivated by a TAP-seq run that was believed
+    to be exercising rc10 while the container's rc8 was executing.
+
+## [Unreleased]
+
 ### Fixed
 
 -   Equal-tail Bernoulli-propensity CRT tails now check root residuals and the

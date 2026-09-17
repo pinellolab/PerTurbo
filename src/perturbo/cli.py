@@ -410,6 +410,35 @@ def _crt_tested_cell_mask(
     return keep
 
 
+def _source_provenance() -> tuple[str, str, str | None]:
+    """Version, import location, and a note when the code is not the installed package.
+
+    ``importlib.metadata`` reports the *installed* distribution's version even when
+    a source tree earlier on ``PYTHONPATH`` shadows it, so the version string alone
+    can name a release that is not the code running. The import location settles
+    it; the note is set when the two disagree.
+    """
+    import importlib.metadata as _md
+
+    import perturbo as _pkg
+
+    source = str(Path(_pkg.__file__).resolve().parent)
+    installed_version = getattr(_pkg, "__version__", "0+unknown")
+    note = None
+    try:
+        installed = Path(_md.distribution("perturbo").locate_file("perturbo")).resolve()
+    except _md.PackageNotFoundError:
+        installed = None
+    # An editable install locates to a path that does not exist; that is this
+    # checkout itself, not a shadow.
+    if installed is not None and installed.exists() and installed != Path(source):
+        note = (
+            f"source tree at {source} shadows the installed perturbo {installed_version} "
+            f"at {installed}; the version string describes the installed package, not this code"
+        )
+    return installed_version, source, note
+
+
 def main(argv: list[str] | None = None) -> None:
     import argparse
 
@@ -955,6 +984,10 @@ def main(argv: list[str] | None = None) -> None:
         size_factor_key_for_loading = args.size_factor_key
         library_size_key_for_loading = args.library_size_key
 
+    _version, _source, _shadow_note = _source_provenance()
+    print(f"[perturbo] perturbo {_version} running from {_source}")
+    if _shadow_note:
+        print(f"[perturbo] WARNING: {_shadow_note}")
     _backed_note = " (backed mode — data stays on disk)" if args.backed else " (loading fully into memory — may take several minutes for large files)"
     print(f"[perturbo] Reading input{_backed_note}: {args.input}")
     _t0 = time.monotonic()
@@ -2268,6 +2301,9 @@ def main(argv: list[str] | None = None) -> None:
         # neither the p-values nor the effect sizes say so on their own.
         if control_batch is not None:
             crt_metadata.update(control_batch.as_metadata())
+        crt_metadata["perturbo_version"] = _version
+        crt_metadata["perturbo_source"] = _source
+        crt_metadata["perturbo_source_shadows_installed"] = _shadow_note is not None
         (out_dir / "crt_metadata.json").write_text(json.dumps(crt_metadata, indent=2, default=str))
         tested = int(crt_accumulator.tested.sum())
         primary = (
@@ -2367,6 +2403,9 @@ def main(argv: list[str] | None = None) -> None:
         metadata["n_covariate_features"] = len(covariate_transform_state.feature_names)
         metadata["covariate_names"] = list(covariate_transform_state.feature_names)
         metadata["continuous_covariates_requested"] = continuous_covariates
+        metadata["perturbo_version"] = _version
+        metadata["perturbo_source"] = _source
+        metadata["perturbo_source_shadows_installed"] = _shadow_note is not None
         metadata["batch_covariate_requested"] = batch_covariate
         # Whether the control cells could identify that batch covariate at all.
         # Recorded here as well as in crt_metadata.json, because a run without the
