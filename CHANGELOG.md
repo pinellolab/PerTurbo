@@ -22,6 +22,29 @@ and this project adheres to [Semantic Versioning][].
     Exact support-boundary probabilities and the symmetric convention are
     unchanged.
 
+-   The root-residual guard on the equal-tail propensity saddlepoint accepts
+    residuals up to 1e-3 null standard deviations instead of 1e-6. log p is
+    first order in the residual through the `u = t sqrt(K'')` correction,
+    with a coefficient well under one (0.27 nats per null sd measured on
+    Binomial(100, 0.2)), so the value is within 3e-4 nats at the new
+    tolerance; the fixed 30-step safeguarded Newton solve commonly stops
+    between 1e-6 and 1e-5 on deep tails where the bracket has doubled far
+    out, while genuine non-convergence shows as 1e-2 and above. At 1e-6 the
+    guard swapped saddlepoint values that were accurate to 1e-4 nats for a
+    Chernoff bound about 3 nats looser, and did so on a knife edge: in
+    `tests/test_bordered_propensity.py` the dense and structured propensity
+    solvers, agreeing to 8e-7 in every probability, landed at residuals of
+    2e-15 and 1.8e-6 on the same pair and reported log p of -29.7 and -26.6.
+    With 60 solver iterations both reach the same root and the same -29.7;
+    with the 1e-3 tolerance the 30-step values are -29.716 on both routes,
+    identical to rc10. On the TAP-seq chr8 panel the residual-only code fired
+    on 765 of 277,644 guide pairs and 147 of 70,788 element pairs. The
+    frozen-policy golden test keeps its cross-check against the Xaira wrapper
+    by pinning the old tolerance; on its column 67 the new default returns
+    the saddlepoint value (log p -2.73) where the bound gave -0.49, against a
+    Monte Carlo equal-tail log p of -5.74 for that heavy-tailed synthetic
+    column - both conservative, the saddlepoint less so.
+
 ### Added
 
 -   CRT tail failure codes, Chernoff/conservative-one flags, and root residuals

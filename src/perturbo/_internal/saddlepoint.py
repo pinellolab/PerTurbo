@@ -1206,14 +1206,25 @@ PROPENSITY_TAIL_FAILURE_REASONS = {
     2: "nonfinite_root_or_cgf_quantity",
     4: "nonpositive_second_derivative",
     8: "negative_lr_radicand",
-    16: "root_residual_above_1e-6_null_sd",
+    16: "root_residual_above_1e-3_null_sd",
     32: "lr_ratio_at_or_below_minus_one",
     64: "raw_lr_tail_at_or_below_zero",
     128: "raw_lr_tail_above_one",
     256: "saddlepoint_wrong_sign",
     512: "nonfinite_lr_correction_quantity",
 }
-_PROPENSITY_ROOT_RESIDUAL_TOLERANCE = 1e-6
+# Root residual |K'(t) - observed| in null standard deviations above which the
+# saddlepoint is not trusted. The Lugannani-Rice exponent is stationary at the
+# root, but the u = t*sqrt(K'') correction is not, so log p moves first order
+# in the residual with a coefficient well under one (measured 0.27 nats per
+# null-sd on Binomial(100, 0.2)): below 3e-4 nats at this tolerance. The fixed
+# 30-step safeguarded Newton solve routinely stops between 1e-6 and 1e-5 when
+# bisection dominates (a deep tail whose bracket doubled far out), and at 1e-6
+# the guard replaced values accurate to 1e-4 nats with a Chernoff bound about
+# 3 nats looser, on a knife edge that two propensity routes agreeing to 1e-6 in
+# every probability fell on opposite sides of. 1e-3 keeps the guard for genuine
+# non-convergence, which shows up as residuals of 1e-2 and above.
+_PROPENSITY_ROOT_RESIDUAL_TOLERANCE = 1e-3
 
 
 class PropensityTailDiagnostics(NamedTuple):
@@ -1257,7 +1268,7 @@ def propensity_saddlepoint_log_two_sided_diagnostics(
 ) -> tuple[jnp.ndarray, jnp.ndarray, PropensityTailDiagnostics]:
     """Bernoulli SPA with guarded equal-tail probabilities and Chernoff fallback.
 
-    Interior roots must satisfy |K'(t)-observed| / null_sd <= 1e-6 and
+    Interior roots must satisfy |K'(t)-observed| / null_sd <= 1e-3 and
     the un-clipped LR correction must define a probability. Linear underflow
     alone is not failure: validity is evaluated in the log domain.
 
