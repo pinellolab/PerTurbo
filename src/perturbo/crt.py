@@ -19,6 +19,9 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+import functools
+
+import jax
 import jax.numpy as jnp
 import numpy as np
 import scipy.sparse as sp
@@ -170,6 +173,41 @@ _INFORMATIVE_ETA_CLIP = 30.0
 """Linear-predictor clip, matching the score kernel's own ``_ETA_CLIP``."""
 
 
+_DETECTION_ROWS_PER_CHUNK = 1 << 26  # (memberships x genes) float32 per chunk, 256 MB
+
+
+@functools.partial(jax.jit, static_argnames=("num_elements",))
+def _detection_counts_on_device(counts, design, offsets, coefficients, theta, elements, local, *, num_elements):
+    """Observed and expected detected cells per (element, gene), by segment sum over memberships."""
+
+    eta = design @ coefficients + offsets
+    eta = jnp.clip(eta, -_INFORMATIVE_ETA_CLIP, _INFORMATIVE_ETA_CLIP)
+    # 1 - (theta / (theta + mu))^theta, through expm1/log1p so large theta does not underflow
+    detected = -jnp.expm1(-theta * jnp.log1p(jnp.exp(eta) / theta))
+    nonzero = (counts > 0).astype(detected.dtype)
+    genes = detected.shape[1]
+    rows = max(1, int(_DETECTION_ROWS_PER_CHUNK // max(genes, 1)))
+    num_memberships = elements.shape[0]
+    steps = -(-num_memberships // rows)
+    pad = steps * rows - num_memberships
+    # pad memberships with a sentinel element that is dropped afterwards
+    elements_p = jnp.concatenate([elements, jnp.full((pad,), num_elements, dtype=elements.dtype)])
+    local_p = jnp.concatenate([local, jnp.zeros((pad,), dtype=local.dtype)])
+
+    def body(step, acc):
+        observed, expected = acc
+        start = step * rows
+        seg = jax.lax.dynamic_slice_in_dim(elements_p, start, rows)
+        cells = jax.lax.dynamic_slice_in_dim(local_p, start, rows)
+        observed = observed + jax.ops.segment_sum(nonzero[cells], seg, num_segments=num_elements + 1)
+        expected = expected + jax.ops.segment_sum(detected[cells], seg, num_segments=num_elements + 1)
+        return observed, expected
+
+    zeros = jnp.zeros((num_elements + 1, genes), dtype=detected.dtype)
+    observed, expected = jax.lax.fori_loop(0, steps, body, (zeros, zeros))
+    return observed[:num_elements], expected[:num_elements]
+
+
 def _informative_cell_counts(
     *,
     counts: np.ndarray,
@@ -195,31 +233,31 @@ def _informative_cell_counts(
     genes, where the direct power underflows to zero and would report every cell
     as certainly detected.
 
-    float32 on the cell axis, and every step of the detection probability in
-    place. The score kernel already holds two float64 (cells, genes) arrays for
-    this same block, and a diagnostic has no business adding three more; the
-    quantity being reported is a cell count, where float32's seven digits are
-    six more than anyone reads.
+    Computed on device, in float32 on the cell axis: the quantity is a cell
+    count, where float32's seven digits are six more than anyone reads. It
+    used to run in NumPy on the host, interleaved with the GPU kernel for the
+    same gene block and blocking it; the (member cells, genes) temporary is
+    formed in row chunks so a high-MOI screen's many memberships do not turn
+    it into gigabytes.
     """
 
-    member_counts = np.asarray(counts)
-    design = np.asarray(nuisance_design, dtype=np.float32)
+    coo = membership.tocoo()
+    elements = jnp.asarray(coo.row.astype(np.int32))
+    local = jnp.asarray(coo.col.astype(np.int32))
+    num_elements = int(membership.shape[0])
     offset_matrix = np.asarray(offsets, dtype=np.float32)
     if offset_matrix.ndim == 1:
         offset_matrix = offset_matrix[:, None]
-    theta_row = np.asarray(dispersion, dtype=np.float32).reshape(1, -1)
-    detected = design @ np.asarray(coefficients, dtype=np.float32)
-    detected += offset_matrix
-    np.clip(detected, -_INFORMATIVE_ETA_CLIP, _INFORMATIVE_ETA_CLIP, out=detected)
-    np.exp(detected, out=detected)
-    detected /= theta_row
-    np.log1p(detected, out=detected)
-    detected *= -theta_row
-    np.expm1(detected, out=detected)
-    np.negative(detected, out=detected)
-    expected = membership @ detected
-    del detected
-    observed = membership @ (member_counts > 0).astype(np.float32)
+    observed, expected = _detection_counts_on_device(
+        jnp.asarray(np.asarray(counts), dtype=jnp.float32),
+        jnp.asarray(nuisance_design, dtype=jnp.float32),
+        jnp.asarray(offset_matrix, dtype=jnp.float32),
+        jnp.asarray(coefficients, dtype=jnp.float32),
+        jnp.asarray(dispersion, dtype=jnp.float32).reshape(1, -1),
+        elements,
+        local,
+        num_elements=num_elements,
+    )
     return np.asarray(observed, dtype=np.float64), np.asarray(expected, dtype=np.float64)
 
 
