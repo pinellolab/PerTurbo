@@ -13,8 +13,11 @@ import hashlib
 from collections.abc import Sequence
 from dataclasses import dataclass
 
+import functools
+
 import jax
 import jax.numpy as jnp
+
 import numpy as np
 from scipy import sparse
 
@@ -429,6 +432,64 @@ def _solve_propensity_intercept(
     return 0.5 * (low + high)
 
 
+@functools.partial(jax.jit, static_argnames=("iterations",))
+def _bisect_propensity_intercepts(
+    eta_controls: jnp.ndarray,
+    eta_own: jnp.ndarray,
+    own_mask: jnp.ndarray,
+    selected: jnp.ndarray,
+    *,
+    iterations: int = 60,
+) -> jnp.ndarray:
+    """:func:`_solve_propensity_intercept` for a batch of targets at once, on device.
+
+    Every target's pool is the controls plus its own cells, so the pool sum
+    splits into a control term shared by the batch and an own-cell term over
+    each target's padded row of ``eta_own`` (``own_mask`` marks the real
+    slots). The bracket, the midpoint rule and the iteration count are the
+    scalar reference's exactly; the only difference is summation order, so the
+    two agree to float64 rounding.
+
+    Doing this per target in NumPy cost ``targets x 60`` host-side passes over
+    the pool - on a genome-wide chunk, 300 x 60 exponentials over 75,000 cells
+    - interleaved with the GPU kernel that follows. Here it is one compiled
+    loop per target batch.
+    """
+
+    num_targets = selected.shape[0]
+    low = jnp.full((num_targets,), -60.0, dtype=jnp.float64)
+    high = jnp.full((num_targets,), 60.0, dtype=jnp.float64)
+    own_mask = own_mask.astype(eta_own.dtype)
+
+    def body(_, carry):
+        low, high = carry
+        middle = 0.5 * (low + high)
+        total = jax.nn.sigmoid(eta_controls[:, None] + middle[None, :]).sum(axis=0)
+        total = total + (jax.nn.sigmoid(eta_own + middle[:, None]) * own_mask).sum(axis=1)
+        go_up = total < selected
+        return jnp.where(go_up, middle, low), jnp.where(go_up, high, middle)
+
+    low, high = jax.lax.fori_loop(0, iterations, body, (low, high))
+    return 0.5 * (low + high)
+
+
+def _padded_own_rows(own_rows: np.ndarray, own_codes: np.ndarray, num_targets: int) -> tuple[np.ndarray, np.ndarray]:
+    """Each target's own-cell rows as one padded (targets, width) table plus its mask."""
+
+    counts = np.bincount(own_codes, minlength=num_targets)
+    width = int(counts.max(initial=0))
+    table = np.zeros((num_targets, max(width, 1)), dtype=np.int64)
+    mask = np.zeros((num_targets, max(width, 1)), dtype=bool)
+    order = np.argsort(own_codes, kind="stable")
+    starts = np.searchsorted(own_codes[order], np.arange(num_targets), side="left")
+    for target in range(num_targets):
+        count = counts[target]
+        if count:
+            table[target, :count] = own_rows[order[starts[target] : starts[target] + count]]
+            mask[target, :count] = True
+    return table, mask
+
+
 _BASIS_SOLVE_TOLERANCE = 1e-4
 """Relative slack allowed when re-expressing a vector in the propensity basis.
 
@@ -603,25 +664,45 @@ def precompute_low_moi_permutations(
         pool_intercepts_out = np.full(design.num_targets, np.nan, dtype=np.float64)
         # Filled for every target here, before the drawing loop: the
         # saddlepoint-only path skips that loop entirely and still reads these.
-        for target_index in range(design.num_targets):
-            if target_codes is not None:
-                own = target_codes == target_index
-            else:
-                own = target_design[:, target_index] > 0
-            pool = control_mask | own
-            selected = int(np.count_nonzero(own & pool))
-            pool_size = int(np.count_nonzero(pool))
-            if selected == 0 or selected == pool_size:
-                # Not testable; the drawing loop drops it and the saddlepoint
-                # has nothing to evaluate. Leave the row at zero rather than
-                # letting the bisection run to its clip.
+        # Each target's pool is the controls plus its own cells; its intercept
+        # is the one that makes the fitted probabilities over that pool sum to
+        # its observed cell count - the intercept score equation of the
+        # unpenalized logistic, kept per target. Solved for a batch of targets
+        # at once on device; see _bisect_propensity_intercepts.
+        if target_codes is not None:
+            own_all = target_codes >= 0
+            own_codes_all = target_codes
+        else:
+            own_all = target_design.sum(axis=1) > 0
+            own_codes_all = np.where(own_all, np.argmax(target_design > 0, axis=1), -1)
+        own_noncontrol = own_all & ~control_mask
+        own_rows = np.flatnonzero(own_noncontrol)
+        own_codes = own_codes_all[own_rows].astype(np.int64)
+        selected_all = np.bincount(own_codes_all[own_all], minlength=design.num_targets).astype(np.float64)
+        pool_size_all = float(np.count_nonzero(control_mask)) + np.bincount(
+            own_codes, minlength=design.num_targets
+        )
+        testable = (selected_all > 0) & (selected_all < pool_size_all)
+        own_table, own_mask = _padded_own_rows(own_rows, own_codes, design.num_targets)
+        eta_controls = jnp.asarray(eta_shared[control_mask], dtype=jnp.float64)
+        eta_own_table = eta_shared[own_table]
+        batch = int(propensity_target_batch_size)
+        for start in range(0, design.num_targets, batch):
+            stop = min(start + batch, design.num_targets)
+            block = np.flatnonzero(testable[start:stop]) + start
+            if block.size == 0:
                 continue
-            # The intercept that makes the fitted probabilities over this
-            # target's pool sum to its observed cell count - the intercept
-            # score equation of the unpenalized logistic, kept per target.
-            delta = _solve_propensity_intercept(eta_shared[pool], selected)
-            pool_intercepts_out[target_index] = delta
-            propensity_coef[target_index] = (b_shared + delta * c_one).astype(np.float32)
+            deltas = np.asarray(
+                _bisect_propensity_intercepts(
+                    eta_controls,
+                    jnp.asarray(eta_own_table[block], dtype=jnp.float64),
+                    jnp.asarray(own_mask[block]),
+                    jnp.asarray(selected_all[block], dtype=jnp.float64),
+                ),
+                dtype=np.float64,
+            )
+            pool_intercepts_out[block] = deltas
+            propensity_coef[block] = (b_shared[None, :] + deltas[:, None] * c_one[None, :]).astype(np.float32)
     elif propensity_coef is not None:
         # One model per target, each fitted on exactly the population used by
         # its CRT: controls plus that target's own cells. This makes the fitted
