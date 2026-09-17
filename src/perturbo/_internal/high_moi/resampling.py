@@ -311,6 +311,9 @@ def _masked_bordered_design_is_full_rank(context: BorderedPropensityContext, inc
     return valid
 
 
+_BASIS_ROWS_PER_BLOCK = 1 << 18  # rows per device block: 262,144 x 269 float64 is 0.56 GB
+
+
 def _rank_revealing_basis(design: np.ndarray | jnp.ndarray) -> jnp.ndarray:
     """An orthonormal basis for exactly the numerical column space of ``design``.
 
@@ -323,44 +326,71 @@ def _rank_revealing_basis(design: np.ndarray | jnp.ndarray) -> jnp.ndarray:
     Normalize nonzero columns before the SVD so changing a covariate's units
     cannot change the numerical rank decision.  The tolerance is the standard
     LAPACK-style relative threshold, stated explicitly here because the fitted
-    assignment law must not depend on a library default.  The host-side SVD is
-    intentional: this small ``cells x covariates`` decomposition is performed
-    once per propensity design, while the large batched IRLS remains on JAX.
+    assignment law must not depend on a library default.  The decomposition runs
+    on the device alongside the IRLS that consumes it.
     """
 
     raw = np.asarray(design)
     source_epsilon = (
         np.finfo(raw.dtype).eps if np.issubdtype(raw.dtype, np.floating) else np.finfo(np.float64).eps
     )
-    matrix = np.asarray(raw, dtype=np.float64)
-    if matrix.ndim != 2:
+    if raw.ndim != 2:
         raise ValueError("design must be a two-dimensional matrix.")
-    if not np.isfinite(matrix).all():
-        raise ValueError("design must contain only finite values.")
-    if matrix.shape[0] == 0:
+    if raw.shape[0] == 0:
         raise ValueError("design must contain at least one row.")
+    rows, cols = raw.shape
+    block = int(_BASIS_ROWS_PER_BLOCK)
+    blocks = [slice(start, min(start + block, rows)) for start in range(0, rows, block)]
 
-    norms = np.linalg.norm(matrix, axis=0)
-    nonzero = norms > 0.0
-    if not np.any(nonzero):
-        return jnp.zeros((matrix.shape[0], 0), dtype=jnp.float32)
-    scaled = matrix[:, nonzero] / norms[nonzero]
-    left, singular_values, _ = np.linalg.svd(scaled, full_matrices=False)
+    # Tall-skinny QR in row blocks, then one QR of the stacked triangles and
+    # one SVD of the single (cols x cols) R. R shares A's singular values to
+    # rounding, so the rank decision below is the one the whole-matrix SVD
+    # made; the basis is Q U_R restricted to the retained directions,
+    # assembled block by block. Device memory is bounded by one row block plus
+    # the float32 result: the whole-matrix SVD this replaces needed about four
+    # times the float64 input on the device, or twenty minutes of one host
+    # core, and a genome-wide screen is a (2,000,000 x 269) design.
+    squares = np.zeros(cols, dtype=np.float64)
+    for rows_ in blocks:
+        chunk = jnp.asarray(raw[rows_], dtype=jnp.float64)
+        if not bool(jnp.isfinite(chunk).all()):
+            raise ValueError("design must contain only finite values.")
+        squares += np.asarray(jnp.sum(chunk * chunk, axis=0))
+    norms = np.sqrt(squares)
+    kept = np.flatnonzero(norms > 0.0)
+    if kept.size == 0:
+        return jnp.zeros((rows, 0), dtype=jnp.float32)
+    scale = jnp.asarray(1.0 / norms[kept], dtype=jnp.float64)
+
+    def scaled_block(rows_):
+        return jnp.asarray(raw[rows_][:, kept], dtype=jnp.float64) * scale
+
+    triangles = [jnp.linalg.qr(scaled_block(rows_), mode="reduced")[1] for rows_ in blocks]
+    stacked_q, triangle = jnp.linalg.qr(jnp.concatenate(triangles, axis=0), mode="reduced")
+    left_r, singular_values, _ = jnp.linalg.svd(triangle, full_matrices=False)
+    singular_values = np.asarray(singular_values)
     if singular_values.size == 0:
-        rank = 0
-    else:
-        # The decomposition itself runs in float64, so its usual LAPACK bound
-        # scales with the row count. Source quantization is different: after
-        # column normalization its perturbation grows with the number of
-        # columns, not with the number of observations. Multiplying float32
-        # epsilon by ``n_rows`` would make the rank tolerance approach one on
-        # million-cell screens and discard ordinary correlated covariates.
-        tolerance = max(
-            max(scaled.shape) * np.finfo(np.float64).eps,
-            8.0 * np.sqrt(scaled.shape[1]) * source_epsilon,
-        ) * float(singular_values[0])
-        rank = int(np.count_nonzero(singular_values > tolerance))
-    return jnp.asarray(left[:, :rank], dtype=jnp.float32)
+        return jnp.zeros((rows, 0), dtype=jnp.float32)
+    # The decomposition itself runs in float64, so its usual LAPACK bound
+    # scales with the row count. Source quantization is different: after
+    # column normalization its perturbation grows with the number of
+    # columns, not with the number of observations. Multiplying float32
+    # epsilon by ``n_rows`` would make the rank tolerance approach one on
+    # million-cell screens and discard ordinary correlated covariates.
+    tolerance = max(
+        max(rows, kept.size) * np.finfo(np.float64).eps,
+        8.0 * np.sqrt(kept.size) * source_epsilon,
+    ) * float(singular_values[0])
+    rank = int(np.count_nonzero(singular_values > tolerance))
+    if rank == 0:
+        return jnp.zeros((rows, 0), dtype=jnp.float32)
+    mixing = stacked_q @ left_r[:, :rank]                      # (sum of triangle rows, rank)
+    offsets = np.cumsum([0] + [t.shape[0] for t in triangles])
+    pieces = []
+    for index, rows_ in enumerate(blocks):
+        q_block, _ = jnp.linalg.qr(scaled_block(rows_), mode="reduced")
+        pieces.append((q_block @ mixing[offsets[index] : offsets[index + 1]]).astype(jnp.float32))
+    return jnp.concatenate(pieces, axis=0)
 
 
 def propensity_basis(design: np.ndarray | jnp.ndarray) -> jnp.ndarray:
