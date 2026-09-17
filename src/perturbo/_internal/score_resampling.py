@@ -616,13 +616,17 @@ def precompute_low_moi_permutations(
     propensity_coef = None
     propensity_Q = None
     propensity_context = None
-    if resampling_mechanism == "propensity":
-        if propensity_target_batch_size < 1:
-            raise ValueError("propensity_target_batch_size must be positive.")
-        # Coefficients share a compact rank-revealing basis, so the saddlepoint
-        # can screen targets in batches without retaining an all-target x
-        # all-cell logit matrix: it reads a target's logits as
-        # ``propensity_coef[t] @ propensity_Q[rows].T``.
+    shared_slopes = resampling_mechanism == "propensity" and shared_propensity_coefficients is not None
+    if resampling_mechanism == "propensity" and propensity_target_batch_size < 1:
+        raise ValueError("propensity_target_batch_size must be positive.")
+    if resampling_mechanism == "propensity" and not shared_slopes:
+        # Target-specific fits share a compact rank-revealing basis, so the
+        # saddlepoint can screen targets in batches without retaining an
+        # all-target x all-cell logit matrix: it reads a target's logits as
+        # ``propensity_coef[t] @ propensity_Q[rows].T``. Under shared slopes
+        # nothing downstream reads that form - the kernel takes the shared
+        # logits plus intercepts - so the basis, a rank-revealing SVD over
+        # this chunk's cells, is not built.
         propensity_Q = np.asarray(propensity_basis(nuisance), dtype=np.float32)
         propensity_design = detect_bordered_design(nuisance)
         if propensity_design is not None:
@@ -639,7 +643,8 @@ def precompute_low_moi_permutations(
     # as one broadcast add, so both are returned and the caller prefers it.
     shared_logits_out = None
     pool_intercepts_out = None
-    if propensity_coef is not None and shared_propensity_coefficients is not None:
+    eta_shared = None
+    if shared_slopes:
         # Shared covariate slopes, per-target intercept. Depth, guide load and
         # batch act on the *cell*, not on which guide it happened to receive,
         # so only abundance is target-specific and abundance is the intercept.
@@ -652,14 +657,6 @@ def precompute_low_moi_permutations(
                 f"(got {beta.shape[0]} for {nuisance.shape[1]} columns)."
             )
         eta_shared = nuisance.astype(np.float64) @ beta
-        # ``eta_shared`` is a linear combination of nuisance columns and the
-        # all-ones vector is the nuisance design's intercept column, so both
-        # have exact coordinates in the basis; ``_basis_coordinates`` refuses
-        # to proceed on anything less than exact.
-        b_shared = _basis_coordinates(propensity_Q, eta_shared, what="linear predictor")
-        c_one = _basis_coordinates(
-            propensity_Q, np.ones(nuisance.shape[0]), what="intercept direction"
-        )
         shared_logits_out = eta_shared
         pool_intercepts_out = np.full(design.num_targets, np.nan, dtype=np.float64)
         # Filled for every target here, before the drawing loop: the
@@ -702,7 +699,6 @@ def precompute_low_moi_permutations(
                 dtype=np.float64,
             )
             pool_intercepts_out[block] = deltas
-            propensity_coef[block] = (b_shared[None, :] + deltas[:, None] * c_one[None, :]).astype(np.float32)
     elif propensity_coef is not None:
         # One model per target, each fitted on exactly the population used by
         # its CRT: controls plus that target's own cells. This makes the fitted
@@ -769,12 +765,15 @@ def precompute_low_moi_permutations(
             drawn.append(None)
             continue
         rows = np.flatnonzero(pair_mask)
-        logits = np.asarray(
-            propensity_logits_from_coefficients(
-                propensity_coef[target_index : target_index + 1],
-                propensity_Q[rows],
-            )
-        ).reshape(-1).astype(np.float32, copy=False)
+        if shared_slopes:
+            logits = (eta_shared[rows] + pool_intercepts_out[target_index]).astype(np.float32)
+        else:
+            logits = np.asarray(
+                propensity_logits_from_coefficients(
+                    propensity_coef[target_index : target_index + 1],
+                    propensity_Q[rows],
+                )
+            ).reshape(-1).astype(np.float32, copy=False)
         pair_rows.append(rows.astype(np.int64, copy=False))
         pool_logits.append(logits)
         # Pad the pool to a common length before drawing. The sampler's index
