@@ -14,8 +14,10 @@ and this project adheres to [Semantic Versioning][].
 
 -   The CLI's first log line names the code that is running:
     `[perturbo] perturbo <version> running from <import path>`, with a warning
-    when a source tree on `PYTHONPATH` shadows the installed package, because
-    `importlib.metadata` then still reports the installed version. The same
+    when a source tree on `PYTHONPATH` shadows the installed package. The
+    version comes from the tree actually imported (its `pyproject.toml`, or
+    "unknown" for a bare tree), never from `importlib.metadata`, which would
+    name the installed release that is not running. The same
     three fields (`perturbo_version`, `perturbo_source`,
     `perturbo_source_shadows_installed`) are written to `crt_metadata.json`
     and `covariate_metadata.json`. Motivated by a TAP-seq run that was believed

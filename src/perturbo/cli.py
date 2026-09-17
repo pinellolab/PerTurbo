@@ -411,32 +411,48 @@ def _crt_tested_cell_mask(
 
 
 def _source_provenance() -> tuple[str, str, str | None]:
-    """Version, import location, and a note when the code is not the installed package.
+    """Version to report, import location, and a note when the code is a shadow tree.
 
-    ``importlib.metadata`` reports the *installed* distribution's version even when
-    a source tree earlier on ``PYTHONPATH`` shadows it, so the version string alone
-    can name a release that is not the code running. The import location settles
-    it; the note is set when the two disagree.
+    ``importlib.metadata`` describes the *installed* distribution, which is the
+    wrong answer whenever a source tree earlier on ``PYTHONPATH`` shadows it: the
+    installed version then names a release that is not the code running. So the
+    version is taken from the tree that is actually imported - its
+    ``pyproject.toml`` when the tree is a checkout, otherwise reported as
+    unknown - and the installed version is only mentioned in the note.
     """
     import importlib.metadata as _md
+    import re as _re
 
     import perturbo as _pkg
 
-    source = str(Path(_pkg.__file__).resolve().parent)
-    installed_version = getattr(_pkg, "__version__", "0+unknown")
-    note = None
+    source_dir = Path(_pkg.__file__).resolve().parent
+    source = str(source_dir)
     try:
         installed = Path(_md.distribution("perturbo").locate_file("perturbo")).resolve()
+        installed_version = _md.version("perturbo")
     except _md.PackageNotFoundError:
-        installed = None
+        installed, installed_version = None, None
     # An editable install locates to a path that does not exist; that is this
     # checkout itself, not a shadow.
-    if installed is not None and installed.exists() and installed != Path(source):
+    shadowing = installed is not None and installed.exists() and installed != source_dir
+    if not shadowing and installed_version is not None:
+        return installed_version, source, None
+    version = None
+    for candidate in (source_dir.parent.parent / "pyproject.toml", source_dir.parent / "pyproject.toml"):
+        if candidate.is_file():
+            match = _re.search(r'^version\s*=\s*"([^"]+)"', candidate.read_text(), _re.M)
+            if match:
+                version = match.group(1)
+                break
+    if version is None:
+        version = "unknown (source tree without package metadata)"
+    note = None
+    if shadowing:
         note = (
-            f"source tree at {source} shadows the installed perturbo {installed_version} "
-            f"at {installed}; the version string describes the installed package, not this code"
+            f"this is a source tree, not the installed package; the image's installed "
+            f"perturbo {installed_version} at {installed} is shadowed and NOT running"
         )
-    return installed_version, source, note
+    return version, source, note
 
 
 def main(argv: list[str] | None = None) -> None:
