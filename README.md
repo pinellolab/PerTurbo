@@ -1,6 +1,6 @@
 # 🏎️ PerTurbo
 
-## Fast robust analysis tools for large-scale single-cell CRISPR screens
+## Scalable and robust analysis tools for large-scale Perturb-seq data
 
 **PerTurbo** is designed to implement robust effect size estimation and statistical
 significance testing for large-scale Perturb-seq experiments of up to millions of cells.
