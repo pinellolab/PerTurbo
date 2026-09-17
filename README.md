@@ -3,10 +3,16 @@
 ## Robust analysis for low- and high-MOI genome-scale single-cell CRISPR screens
 
 **PerTurbo** is designed to implement robust effect size estimation and statistical
-significance testing for large-scale Perturb-seq experiments (10k-10M+ cells).
+significance testing for large-scale Perturb-seq experiments of up to millions of cells.
 PerTurbo uses GPU accelerated routines for both Bayesian effect size estimation and 
-frequentist statistical testing to dramatically speed-up inference on genome-scale
-datasets.
+frequentist statistical testing to obtain fast and accurate inferences based on
+count-based regression models.
+
+Specifically, we use GPU-accelerated stochastic variational inference from NumPyro to obtain
+posterior estimates of perturbation effect sizes based on a Bayesian generalized linear model,
+we obtain calibrated frequentist p-values using a custom GPU-accelerated implementation of the score-based 
+conditional randomization test, using a saddlepoint approximation to obtain calibrated tail probabilities
+based on the statistical approaches proposed in (Barry et al. 2024) and (Niu et al. 2024).
 
 ## Installation
 
