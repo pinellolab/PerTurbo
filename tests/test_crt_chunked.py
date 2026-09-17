@@ -601,6 +601,32 @@ def test_the_saddlepoint_only_production_path_matches_the_research_path() -> Non
         atol=1e-8,
     )
     np.testing.assert_array_equal(fitted["used_screen"], np.asarray(research.parametric_used_fallback))
+    for key in (
+        "tail_failure_reason", "used_chernoff", "used_conservative_one",
+        "root_residual_null_sd",
+    ):
+        expected = research.tail_fits["saddlepoint"][key]
+        if key == "root_residual_null_sd":
+            np.testing.assert_allclose(fitted[key], expected, equal_nan=True)
+        else:
+            np.testing.assert_array_equal(fitted[key], expected)
+
+    accumulator = crt_module.CRTAccumulator(
+        production.target_names + ("never-tested",),
+        production.gene_names,
+        tail_families=("saddlepoint",),
+        saddlepoint_only=True,
+    )
+    accumulator.absorb(production)
+    columns = accumulator.finalize()
+    assert columns["crt_tail_failure_reason"].dtype == np.int32
+    assert columns["crt_used_chernoff"].dtype == bool
+    assert columns["crt_used_conservative_one"].dtype == bool
+    assert (columns["crt_tail_failure_reason"][-1] == -1).all()
+    assert not columns["crt_saddlepoint_used_screen"][-1].any()
+    np.testing.assert_allclose(
+        columns["crt_root_residual_null_sd"][:-1], fitted["root_residual_null_sd"], equal_nan=True
+    )
     # The planted effects are found without a single resample.
     assert fitted["p_value"][0, 2] < 1e-4 and fitted["p_value"][3, 5] < 1e-4
 

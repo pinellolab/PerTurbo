@@ -21,10 +21,10 @@ it from GitHub, from a container image, or from a checkout.
 
 ```bash
 # from GitHub, pinned to a release tag
-pip install "perturbo @ git+https://github.com/pinellolab/PerTurbo.git@v2.0.0rc9"
+pip install "perturbo @ git+https://github.com/pinellolab/PerTurbo.git@v2.0.0rc10"
 
 # same, with JAX's CUDA 12 wheels for an NVIDIA GPU
-pip install "perturbo[cuda] @ git+https://github.com/pinellolab/PerTurbo.git@v2.0.0rc9"
+pip install "perturbo[cuda] @ git+https://github.com/pinellolab/PerTurbo.git@v2.0.0rc10"
 
 # from a checkout
 git clone https://github.com/pinellolab/PerTurbo.git
@@ -40,14 +40,14 @@ Released images are published to GHCR, which is usually easier than installing
 CUDA wheels yourself:
 
 ```bash
-docker pull ghcr.io/pinellolab/perturbo:v2.0.0rc9
-docker run --rm --gpus all ghcr.io/pinellolab/perturbo:v2.0.0rc9 --help
+docker pull ghcr.io/pinellolab/perturbo:v2.0.0rc10
+docker run --rm --gpus all ghcr.io/pinellolab/perturbo:v2.0.0rc10 --help
 ```
 
 On a cluster without Docker:
 
 ```bash
-apptainer pull perturbo.sif docker://ghcr.io/pinellolab/perturbo:v2.0.0rc9
+apptainer pull perturbo.sif docker://ghcr.io/pinellolab/perturbo:v2.0.0rc10
 apptainer exec --nv perturbo.sif perturbo --help
 ```
 
@@ -107,6 +107,16 @@ elements rather than individual guides, add
 `--perturbation-element-varm-key element_targeted` (a guide-by-element indicator
 in `varm`) and `--perturbation-element-names-uns-key element_names`.
 
+
+### Useful defaults, and what to override
+
+`--crt` is on, `--size-factor-mode` is `observed`, and `--crt-pool` is `auto`,
+which reads the assignments and picks `control-anchored` for a low-MOI screen
+and `all-cells` for a high-MOI one. Set `--crt-pool` explicitly when the
+declared design and the assignments disagree, or when the control cells are
+concentrated in one batch. Add `--pairs-to-test pairs.parquet` (columns
+`element,gene`) to have a second table q-corrected over just those pairs; the
+fit and the test still cover every pair. `--no-crt` fits effects alone.
 
 ### Outputs
 

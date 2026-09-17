@@ -19,6 +19,9 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+import functools
+
+import jax
 import jax.numpy as jnp
 import numpy as np
 import scipy.sparse as sp
@@ -170,6 +173,41 @@ _INFORMATIVE_ETA_CLIP = 30.0
 """Linear-predictor clip, matching the score kernel's own ``_ETA_CLIP``."""
 
 
+_DETECTION_ROWS_PER_CHUNK = 1 << 26  # (memberships x genes) float32 per chunk, 256 MB
+
+
+@functools.partial(jax.jit, static_argnames=("num_elements",))
+def _detection_counts_on_device(counts, design, offsets, coefficients, theta, elements, local, *, num_elements):
+    """Observed and expected detected cells per (element, gene), by segment sum over memberships."""
+
+    eta = design @ coefficients + offsets
+    eta = jnp.clip(eta, -_INFORMATIVE_ETA_CLIP, _INFORMATIVE_ETA_CLIP)
+    # 1 - (theta / (theta + mu))^theta, through expm1/log1p so large theta does not underflow
+    detected = -jnp.expm1(-theta * jnp.log1p(jnp.exp(eta) / theta))
+    nonzero = (counts > 0).astype(detected.dtype)
+    genes = detected.shape[1]
+    rows = max(1, int(_DETECTION_ROWS_PER_CHUNK // max(genes, 1)))
+    num_memberships = elements.shape[0]
+    steps = -(-num_memberships // rows)
+    pad = steps * rows - num_memberships
+    # pad memberships with a sentinel element that is dropped afterwards
+    elements_p = jnp.concatenate([elements, jnp.full((pad,), num_elements, dtype=elements.dtype)])
+    local_p = jnp.concatenate([local, jnp.zeros((pad,), dtype=local.dtype)])
+
+    def body(step, acc):
+        observed, expected = acc
+        start = step * rows
+        seg = jax.lax.dynamic_slice_in_dim(elements_p, start, rows)
+        cells = jax.lax.dynamic_slice_in_dim(local_p, start, rows)
+        observed = observed + jax.ops.segment_sum(nonzero[cells], seg, num_segments=num_elements + 1)
+        expected = expected + jax.ops.segment_sum(detected[cells], seg, num_segments=num_elements + 1)
+        return observed, expected
+
+    zeros = jnp.zeros((num_elements + 1, genes), dtype=detected.dtype)
+    observed, expected = jax.lax.fori_loop(0, steps, body, (zeros, zeros))
+    return observed[:num_elements], expected[:num_elements]
+
+
 def _informative_cell_counts(
     *,
     counts: np.ndarray,
@@ -195,31 +233,31 @@ def _informative_cell_counts(
     genes, where the direct power underflows to zero and would report every cell
     as certainly detected.
 
-    float32 on the cell axis, and every step of the detection probability in
-    place. The score kernel already holds two float64 (cells, genes) arrays for
-    this same block, and a diagnostic has no business adding three more; the
-    quantity being reported is a cell count, where float32's seven digits are
-    six more than anyone reads.
+    Computed on device, in float32 on the cell axis: the quantity is a cell
+    count, where float32's seven digits are six more than anyone reads. It
+    used to run in NumPy on the host, interleaved with the GPU kernel for the
+    same gene block and blocking it; the (member cells, genes) temporary is
+    formed in row chunks so a high-MOI screen's many memberships do not turn
+    it into gigabytes.
     """
 
-    member_counts = np.asarray(counts)
-    design = np.asarray(nuisance_design, dtype=np.float32)
+    coo = membership.tocoo()
+    elements = jnp.asarray(coo.row.astype(np.int32))
+    local = jnp.asarray(coo.col.astype(np.int32))
+    num_elements = int(membership.shape[0])
     offset_matrix = np.asarray(offsets, dtype=np.float32)
     if offset_matrix.ndim == 1:
         offset_matrix = offset_matrix[:, None]
-    theta_row = np.asarray(dispersion, dtype=np.float32).reshape(1, -1)
-    detected = design @ np.asarray(coefficients, dtype=np.float32)
-    detected += offset_matrix
-    np.clip(detected, -_INFORMATIVE_ETA_CLIP, _INFORMATIVE_ETA_CLIP, out=detected)
-    np.exp(detected, out=detected)
-    detected /= theta_row
-    np.log1p(detected, out=detected)
-    detected *= -theta_row
-    np.expm1(detected, out=detected)
-    np.negative(detected, out=detected)
-    expected = membership @ detected
-    del detected
-    observed = membership @ (member_counts > 0).astype(np.float32)
+    observed, expected = _detection_counts_on_device(
+        jnp.asarray(np.asarray(counts), dtype=jnp.float32),
+        jnp.asarray(nuisance_design, dtype=jnp.float32),
+        jnp.asarray(offset_matrix, dtype=jnp.float32),
+        jnp.asarray(coefficients, dtype=jnp.float32),
+        jnp.asarray(dispersion, dtype=jnp.float32).reshape(1, -1),
+        elements,
+        local,
+        num_elements=num_elements,
+    )
     return np.asarray(observed, dtype=np.float64), np.asarray(expected, dtype=np.float64)
 
 
@@ -1429,7 +1467,12 @@ def run_crt_for_chunk(
         for family in families
     }
     if want_saddlepoint:
-        parametric[CRT_SADDLEPOINT_FAMILY]["used_screen"] = np.zeros(shape, dtype=bool)
+        saddlepoint_columns = parametric[CRT_SADDLEPOINT_FAMILY]
+        saddlepoint_columns["used_screen"] = np.zeros(shape, dtype=bool)
+        saddlepoint_columns["tail_failure_reason"] = np.full(shape, -1, dtype=np.int32)
+        saddlepoint_columns["used_chernoff"] = np.zeros(shape, dtype=bool)
+        saddlepoint_columns["used_conservative_one"] = np.zeros(shape, dtype=bool)
+        saddlepoint_columns["root_residual_null_sd"] = np.full(shape, np.nan, dtype=np.float64)
     null_summaries = {
         name: np.full(shape, np.nan, dtype=np.float64)
         for name in ("crt_null_mean", "crt_null_variance", "crt_null_skewness", "crt_null_excess_kurtosis")
@@ -1542,6 +1585,14 @@ def run_crt_for_chunk(
             block["p_value"][:, gene_slice] = np.asarray(fitted_saddlepoint["p_value"], dtype=np.float64)
             block["log_p_value"][:, gene_slice] = np.asarray(fitted_saddlepoint["log_p_value"], dtype=np.float64)
             block["valid"][:, gene_slice] = np.asarray(fitted_saddlepoint["valid"], dtype=bool)
+            for key, dtype in (
+                ("tail_failure_reason", np.int32),
+                ("used_chernoff", bool),
+                ("used_conservative_one", bool),
+                ("root_residual_null_sd", np.float64),
+            ):
+                if key in fitted_saddlepoint:
+                    block[key][:, gene_slice] = np.asarray(fitted_saddlepoint[key], dtype=dtype)
             if result.parametric_used_fallback is not None:
                 block["used_screen"][:, gene_slice] = np.asarray(result.parametric_used_fallback, dtype=bool)
         if informative_state is not None:
@@ -2187,6 +2238,10 @@ def run_crt_all_cells(
     log_p = np.full(shape, np.nan)
     valid = np.zeros(shape, dtype=bool)
     used_screen = np.zeros(shape, dtype=bool)
+    tail_failure_reason = np.full(shape, -1, dtype=np.int32)
+    used_chernoff = np.zeros(shape, dtype=bool)
+    used_conservative_one = np.zeros(shape, dtype=bool)
+    root_residual_null_sd = np.full(shape, np.nan, dtype=np.float64)
     observed = np.full(shape, np.nan)
     null_mean = np.full(shape, np.nan)
     null_variance = np.full(shape, np.nan)
@@ -2236,6 +2291,11 @@ def run_crt_all_cells(
         log_p[:, gene_slice] = fit.log_p_value
         valid[:, gene_slice] = fit.valid
         used_screen[:, gene_slice] = fit.used_fallback
+        if fit.tail_failure_reason is not None:
+            tail_failure_reason[:, gene_slice] = fit.tail_failure_reason
+            used_chernoff[:, gene_slice] = fit.used_chernoff
+            used_conservative_one[:, gene_slice] = fit.used_conservative_one
+            root_residual_null_sd[:, gene_slice] = fit.root_residual_null_sd
         observed[:, gene_slice] = fit.observed_sum
         null_mean[:, gene_slice] = fit.null_mean
         null_variance[:, gene_slice] = fit.null_variance
@@ -2260,6 +2320,10 @@ def run_crt_all_cells(
         array[untested] = np.nan
     valid[untested] = False
     used_screen[untested] = False
+    tail_failure_reason[untested] = -1
+    used_chernoff[untested] = False
+    used_conservative_one[untested] = False
+    root_residual_null_sd[untested] = np.nan
     # The reported score is standardized by the null's spread, as the chunked
     # path and the research driver report it (the CRT z-value column).
     with np.errstate(divide="ignore", invalid="ignore"):
@@ -2277,6 +2341,10 @@ def run_crt_all_cells(
                 "log_p_value": log_p,
                 "valid": valid,
                 "used_screen": used_screen,
+                "tail_failure_reason": tail_failure_reason,
+                "used_chernoff": used_chernoff,
+                "used_conservative_one": used_conservative_one,
+                "root_residual_null_sd": root_residual_null_sd,
             }
         },
         null_summaries={
@@ -2418,7 +2486,12 @@ class CRTAccumulator:
             for family in self.tail_families
         }
         if CRT_SADDLEPOINT_FAMILY in self.parametric:
-            self.parametric[CRT_SADDLEPOINT_FAMILY]["used_screen"] = np.zeros(shape, dtype=bool)
+            saddlepoint_columns = self.parametric[CRT_SADDLEPOINT_FAMILY]
+            saddlepoint_columns["used_screen"] = np.zeros(shape, dtype=bool)
+            saddlepoint_columns["tail_failure_reason"] = np.full(shape, -1, dtype=np.int32)
+            saddlepoint_columns["used_chernoff"] = np.zeros(shape, dtype=bool)
+            saddlepoint_columns["used_conservative_one"] = np.zeros(shape, dtype=bool)
+            saddlepoint_columns["root_residual_null_sd"] = np.full(shape, np.nan, dtype=np.float64)
         summary_names = ["crt_null_mean", "crt_null_variance", "crt_null_skewness"]
         if not self.saddlepoint_only:
             summary_names.append("crt_null_excess_kurtosis")
@@ -2502,9 +2575,22 @@ class CRTAccumulator:
             )
             for key, values in fitted.items():
                 if key not in ("p_value", "log_p_value", "valid"):
-                    columns[f"crt_{family}_{key}"] = (
-                        values if streaming else np.asarray(values, dtype=np.float64)
+                    output_name = (
+                        f"crt_{key}"
+                        if family == CRT_SADDLEPOINT_FAMILY and key in {
+                            "tail_failure_reason", "used_chernoff",
+                            "used_conservative_one", "root_residual_null_sd",
+                        }
+                        else f"crt_{family}_{key}"
                     )
+                    if output_name == "crt_tail_failure_reason":
+                        columns[output_name] = np.asarray(values, dtype=np.int32)
+                    elif output_name in {"crt_used_chernoff", "crt_used_conservative_one"}:
+                        columns[output_name] = np.asarray(values, dtype=bool)
+                    else:
+                        columns[output_name] = (
+                            values if streaming else np.asarray(values, dtype=np.float64)
+                        )
         columns.update(self.null_summaries)
         columns.setdefault("crt_null_excess_kurtosis", missing)
         if self.observed_nonzero is not None:

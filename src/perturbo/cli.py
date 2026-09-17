@@ -410,6 +410,51 @@ def _crt_tested_cell_mask(
     return keep
 
 
+def _source_provenance() -> tuple[str, str, str | None]:
+    """Version to report, import location, and a note when the code is a shadow tree.
+
+    ``importlib.metadata`` describes the *installed* distribution, which is the
+    wrong answer whenever a source tree earlier on ``PYTHONPATH`` shadows it: the
+    installed version then names a release that is not the code running. So the
+    version is taken from the tree that is actually imported - its
+    ``pyproject.toml`` when the tree is a checkout, otherwise reported as
+    unknown - and the installed version is only mentioned in the note.
+    """
+    import importlib.metadata as _md
+    import re as _re
+
+    import perturbo as _pkg
+
+    source_dir = Path(_pkg.__file__).resolve().parent
+    source = str(source_dir)
+    try:
+        installed = Path(_md.distribution("perturbo").locate_file("perturbo")).resolve()
+        installed_version = _md.version("perturbo")
+    except _md.PackageNotFoundError:
+        installed, installed_version = None, None
+    # An editable install locates to a path that does not exist; that is this
+    # checkout itself, not a shadow.
+    shadowing = installed is not None and installed.exists() and installed != source_dir
+    if not shadowing and installed_version is not None:
+        return installed_version, source, None
+    version = None
+    for candidate in (source_dir.parent.parent / "pyproject.toml", source_dir.parent / "pyproject.toml"):
+        if candidate.is_file():
+            match = _re.search(r'^version\s*=\s*"([^"]+)"', candidate.read_text(), _re.M)
+            if match:
+                version = match.group(1)
+                break
+    if version is None:
+        version = "unknown (source tree without package metadata)"
+    note = None
+    if shadowing:
+        note = (
+            f"this is a source tree, not the installed package; the image's installed "
+            f"perturbo {installed_version} at {installed} is shadowed and NOT running"
+        )
+    return version, source, note
+
+
 def main(argv: list[str] | None = None) -> None:
     import argparse
 
@@ -955,6 +1000,10 @@ def main(argv: list[str] | None = None) -> None:
         size_factor_key_for_loading = args.size_factor_key
         library_size_key_for_loading = args.library_size_key
 
+    _version, _source, _shadow_note = _source_provenance()
+    print(f"[perturbo] perturbo {_version} running from {_source}")
+    if _shadow_note:
+        print(f"[perturbo] WARNING: {_shadow_note}")
     _backed_note = " (backed mode — data stays on disk)" if args.backed else " (loading fully into memory — may take several minutes for large files)"
     print(f"[perturbo] Reading input{_backed_note}: {args.input}")
     _t0 = time.monotonic()
@@ -2268,6 +2317,9 @@ def main(argv: list[str] | None = None) -> None:
         # neither the p-values nor the effect sizes say so on their own.
         if control_batch is not None:
             crt_metadata.update(control_batch.as_metadata())
+        crt_metadata["perturbo_version"] = _version
+        crt_metadata["perturbo_source"] = _source
+        crt_metadata["perturbo_source_shadows_installed"] = _shadow_note is not None
         (out_dir / "crt_metadata.json").write_text(json.dumps(crt_metadata, indent=2, default=str))
         tested = int(crt_accumulator.tested.sum())
         primary = (
@@ -2367,6 +2419,9 @@ def main(argv: list[str] | None = None) -> None:
         metadata["n_covariate_features"] = len(covariate_transform_state.feature_names)
         metadata["covariate_names"] = list(covariate_transform_state.feature_names)
         metadata["continuous_covariates_requested"] = continuous_covariates
+        metadata["perturbo_version"] = _version
+        metadata["perturbo_source"] = _source
+        metadata["perturbo_source_shadows_installed"] = _shadow_note is not None
         metadata["batch_covariate_requested"] = batch_covariate
         # Whether the control cells could identify that batch covariate at all.
         # Recorded here as well as in crt_metadata.json, because a run without the

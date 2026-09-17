@@ -1326,12 +1326,13 @@ def test_the_shared_intercept_matches_each_targets_observed_count() -> None:
         shared_propensity_coefficients=beta,
     )
 
-    basis = np.asarray(drawn.propensity_basis, dtype=np.float64)
+    shared = np.asarray(drawn.shared_logits, dtype=np.float64)
+    intercepts = np.asarray(drawn.pool_intercepts, dtype=np.float64)
     control_mask = np.asarray(design.control_mask, dtype=bool)
     for target_index in range(design.num_targets):
         own = _own_cells(design, target_index)
         pool = control_mask | own
-        logits = basis[pool] @ np.asarray(drawn.propensity_coefficients[target_index], dtype=np.float64)
+        logits = shared[pool] + intercepts[target_index]
         expected = float(np.sum(1.0 / (1.0 + np.exp(-logits))))
         np.testing.assert_allclose(expected, float(np.count_nonzero(own)), rtol=2e-3)
 
@@ -1387,13 +1388,9 @@ def test_slopes_fitted_inside_the_chunk_are_not_chunk_invariant() -> None:
 
     control_mask = np.asarray(full.control_mask, dtype=bool)
     pool = control_mask | _own_cells(full, 2)
-    full_logits = np.asarray(full_propensity.propensity_basis)[pool] @ np.asarray(
-        full_propensity.propensity_coefficients[2]
-    )
+    full_logits = np.asarray(full_propensity.shared_logits)[pool] + full_propensity.pool_intercepts[2]
     chunk_mask = np.asarray(chunk.control_mask, dtype=bool) | _own_cells(chunk, 0)
-    chunk_logits = np.asarray(chunk_propensity.propensity_basis)[chunk_mask] @ np.asarray(
-        chunk_propensity.propensity_coefficients[0]
-    )
+    chunk_logits = np.asarray(chunk_propensity.shared_logits)[chunk_mask] + chunk_propensity.pool_intercepts[0]
 
     assert full_logits.shape == chunk_logits.shape
     assert np.max(np.abs(full_logits - chunk_logits)) > 0.05
