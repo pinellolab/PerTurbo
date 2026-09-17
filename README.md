@@ -101,17 +101,8 @@ elements rather than individual guides, add
 `--perturbation-element-varm-key element_targeted` (a guide-by-element indicator
 in `varm`) and `--perturbation-element-names-uns-key element_names`.
 
-### Useful defaults, and what to override
 
-`--crt` is on, `--size-factor-mode` is `observed`, and `--crt-pool` is `auto`,
-which reads the assignments and picks `control-anchored` for a low-MOI screen
-and `all-cells` for a high-MOI one. Set `--crt-pool` explicitly when the
-declared design and the assignments disagree, or when the control cells are
-concentrated in one batch. Add `--pairs-to-test pairs.parquet` (columns
-`element,gene`) to have a second table q-corrected over just those pairs; the
-fit and the test still cover every pair. `--no-crt` fits effects alone.
-
-### What a run writes
+### Outputs
 
 | file | contents |
 | --- | --- |
@@ -142,55 +133,6 @@ model.train(steps=2500, batch_size=1024, accelerator="gpu")
 model.save("perturbo_bundle", overwrite=True)
 ```
 
-### Memory and chunking
-
-Use `--backed` for files larger than memory. For mutually exclusive assignments,
-perturbation chunks reduce both the number of cells and the number of fitted
-effects. Splitting co-occurring perturbations would omit predictors and can bias
-effects; when these assignments trigger automatic chunking, the CLI instead
-loads 256 genes at a time and retains every cell and predictor. Set
-`--gene-chunk-size 128` to choose a smaller block explicitly.
-
-Gene blocks currently support the plain NB model with observed or fixed-zero
-size factors, shared guide effects, no latent factors, no guide random effects,
-and no perturbation dispersion or baseline uncertainty propagation. Full-panel
-library sizes and the control centering are preserved across blocks.
-Stage-two SVI defaults to 1,024 cells per step
-on this path; use `--minibatch-size-betas` and `--num-epochs-betas` to control
-training coverage. Stochastic fits at different block widths need not be
-numerically identical after a finite number of steps.
-
-For either chunking strategy, compare effect estimates with a longer training
-budget. The default 500 steps can underestimate strong knockdowns.
-
-Gene blocks bound the count and likelihood buffers, but control fitting still
-loads up to `--max-control-cells` across all genes, and the final effect
-tables scale as perturbations × genes. A full atlas is therefore a cluster job.
-For a laptop smoke test, load a raw-count AnnData with `backed="r"`, select
-controls and a few perturbations, save full-panel cell totals in an observation
-column, then select a few hundred genes and pass that column with
-`--library-size-key`. A small debug run checks execution, not full-scale speed,
-convergence, or statistical calibration.
-
-The main Python entry points are `PERTURBO` / `PerTurboModel`, `fit_from_path`,
-`setup_mudata`, `fit_control`, `fit_perturbation_effects`, and the posterior
-table and trained-model simulation helpers.
-
-## Migrating from PyTorch PerTurbo and Cortado
-
-The deprecated PyTorch/Pyro implementation is available only through the
-optional `perturbo[legacy]` extra and `perturbo.legacy` namespace. It is not
-loaded by a normal PerTurbo import.
-
-| Previous surface | PerTurbo 2 surface |
-| --- | --- |
-| `cortado.PERTURBO` | `perturbo.PERTURBO` |
-| `cortado.CortadoModel` | `perturbo.PerTurboModel` |
-| `cortado` CLI | `perturbo` CLI |
-| PyTorch `perturbo.PERTURBO` | `perturbo.legacy.PERTURBO` |
-
-PerTurbo reads Cortado MuData registrations and fit bundles, warns once during
-the upgrade, and writes the v2 `_perturbo_setup` and bundle format thereafter.
 
 ## Development
 
