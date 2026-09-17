@@ -10,6 +10,82 @@ and this project adheres to [Semantic Versioning][].
 
 ## [Unreleased]
 
+## [2.0.0rc10] - 2026-09-17
+
+### Changed
+
+-   The low-MOI control-anchored CRT runs the Replogle genome-wide screen at
+    its pre-port speed again. Per 300-target chunk over 8,248 genes and a
+    267-level `gem_group` covariate: rc9 took 1,013-1,274 s, this release
+    247-311 s, against roughly 257 s for the 8 September cortado CLI run of the
+    same design (confirmed from that run's own `covariate_metadata.json`:
+    `gem_group`, 266 levels plus reference, no continuous covariates, saddlepoint
+    CRT over 92,270,376 rows). rc8 and rc9 were equally slow, so the version-to-
+    version regression suite could not see it; the cost arrived with the port.
+    Correctness is unchanged: against the rc9 run on Replogle essential
+    (19,463,699 pairs) no pair is lost or gained, log10 p agrees to Pearson
+    1.000000000 with a maximum absolute difference of 2.0e-5, q<0.05 calls move
+    901,737 -> 901,736 (Jaccard 0.999999), q<0.1 calls are identical, all 1,783
+    of 1,970 on-target pairs are recovered on both sides, and both make zero
+    null false discoveries. The dominant cost was not arithmetic but the
+    device->host synchronisations and host-side stages sitting between GPU
+    kernels inside each chunk, which left the GPU at 0-56% utilisation:
+
+    -   The screen-wide shared-slope selection model reaches the saddlepoint
+        kernel as one cell-level logit vector plus a per-target intercept - the
+        *shared-logit* form - instead of as coefficients in a compact basis that
+        the kernel rebuilt into logits with a `(controls, basis) @ (basis, 64)`
+        float64 product and a `(64, width, basis)` gather for every promoted
+        64-pair block. With a batch covariate the basis is one column per level,
+        and those logits do not depend on the gene. `precompute_low_moi_
+        permutations` returns both forms and the CRT prefers the shared-logit
+        one; the screen-wide fitting policy is untouched. Given the same logits
+        the two forms agree in the null moments to 1e-14 and in log p to about
+        2e-7 relative on a minority of pairs, which is the fixed-iteration
+        saddlepoint root solve amplifying summation-order noise - perturbing the
+        compact form's own inputs by 1e-15 moves it further - and production
+        stored the compact form in float32, so the switch is a precision gain.
+    -   Under shared slopes the per-chunk compact basis - a rank-revealing SVD
+        of the chunk's own nuisance design - is no longer built; nothing read
+        it. Target-specific fits still build theirs.
+    -   Each target's selection intercept is solved for a whole target batch at
+        once on the device, by the same 60-step bisection on the same bracket,
+        instead of one target at a time in NumPy with a host exponential over
+        the pool per step.
+    -   The per-pair detected-cell counts behind `crt_low_information` are
+        computed on the device as segment sums over the membership COO, which
+        serves a low-MOI partition and a high-MOI cell-in-many-elements design
+        alike, in 256 MB row chunks; observed counts agree exactly with the
+        host form and expected counts to the float32 elementwise chain.
+    -   Every promoted block's saddlepoint result stays on the device until the
+        chunk's loop is over and is pulled once, instead of once per block:
+        on a genome-wide gene slice that was thousands of device syncs with the
+        host idle between them.
+
+-   The rank-revealing propensity basis behind the screen-wide selection fit is
+    built on the device, in row blocks. It was a host `np.linalg.svd` of the
+    whole column-normalised design; on the genome-wide screen that is a
+    (1,989,578 x 269) float64 matrix, and it held one CPU core for about twenty
+    minutes once per run while the GPU sat idle (Xaira HEK293T: 1,599 s). A
+    single device SVD is not the replacement - XLA wanted ~16 GB for the 4.3 GB
+    input and ran out of memory on a 16 GB card - so the basis is a tall-skinny
+    QR in 262,144-row blocks streamed from the host, one QR of the stacked
+    triangles, and one SVD of the single (cols x cols) R, whose singular values
+    are the design's to rounding; the rank tolerance is unchanged and still
+    stated in the original dimensions and source dtype. Measured in the
+    production container on a V100-PCIE-16GB at the genome-wide shape: 38.7 s
+    cold, 30.9 s compiled, peak device 5.1 GB, rank 268 of 269, column space
+    agreeing with the host SVD to 5e-10. The decomposition runs under
+    `jax.enable_x64()` regardless of the caller's precision mode, restoring the
+    mode on exit, and the float32 result is assembled on the host block by
+    block so device memory is bounded by one block.
+
+-   The two selection-model representations are named for what they hold:
+    `shared_logits_given` in the kernel and `shared_logit_propensity` in the
+    caller replace the former "legacy" labels, and the `TargetPermutations`
+    docstring says what `shared_logits` and `pool_intercepts` are rather than
+    who used to read them.
+
 ## [2.0.0rc9] - 2026-09-16
 
 ### Fixed
