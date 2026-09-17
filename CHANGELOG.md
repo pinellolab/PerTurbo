@@ -10,6 +10,24 @@ and this project adheres to [Semantic Versioning][].
 
 ## [Unreleased]
 
+### Fixed
+
+-   Equal-tail Bernoulli-propensity CRT tails now check root residuals and the
+    raw Lugannani–Rice correction before accepting a saddlepoint approximation.
+    Valid log probabilities are retained even when their linear probabilities
+    underflow. Failed approximations use a guarded Chernoff bound; a finite,
+    nonnegative tilt may supply that bound when root residual is the only
+    failed check. If the bound cannot be used, the result is conservatively
+    p=1. This is a numerical/statistical correction and can change discoveries.
+    Exact support-boundary probabilities and the symmetric convention are
+    unchanged.
+
+### Added
+
+-   CRT tail failure codes, Chernoff/conservative-one flags, and root residuals
+    are exported separately from the existing screening and low-information
+    annotations. See `docs/propensity_tail_diagnostics.md`.
+
 ## [2.0.0rc10] - 2026-09-17
 
 ### Changed

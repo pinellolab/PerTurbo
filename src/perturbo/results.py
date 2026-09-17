@@ -201,7 +201,13 @@ def build_standard_element_effects_df(
 
 
 NON_FLOAT_EXTRA_COLUMNS = frozenset(
-    {"crt_observed_nonzero", "crt_low_information"}
+    {
+        "crt_observed_nonzero",
+        "crt_low_information",
+        "crt_tail_failure_reason",
+        "crt_used_chernoff",
+        "crt_used_conservative_one",
+    }
 )
 """Extra columns written in their own dtype rather than cast to float64.
 

@@ -21,6 +21,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
+import perturbo._internal.saddlepoint as saddlepoint_module
 from perturbo._internal.saddlepoint import (
     fit_high_moi_propensity_saddlepoint,
     fit_low_moi_propensity_saddlepoint,
@@ -114,6 +115,9 @@ def test_low_moi_fit_is_invariant_to_the_block_size():
     many = fit_low_moi_propensity_saddlepoint(gene_block_size=64, **common)
     np.testing.assert_array_equal(one.valid, many.valid)
     np.testing.assert_array_equal(one.used_fallback, many.used_fallback)
+    np.testing.assert_array_equal(one.tail_failure_reason, many.tail_failure_reason)
+    np.testing.assert_array_equal(one.used_chernoff, many.used_chernoff)
+    np.testing.assert_array_equal(one.used_conservative_one, many.used_conservative_one)
     np.testing.assert_allclose(one.log_p_value, many.log_p_value, rtol=1e-6, atol=1e-7, equal_nan=True)
 
 
@@ -131,6 +135,9 @@ def test_low_moi_targets_without_a_pool_are_left_missing():
     )
     assert not fit.valid[2].any()
     assert np.isnan(fit.p_value[2]).all() and np.isnan(fit.null_mean[2]).all()
+    assert (fit.tail_failure_reason[2] == -1).all()
+    assert not fit.used_chernoff[2].any() and not fit.used_conservative_one[2].any()
+    assert np.isnan(fit.root_residual_null_sd[2]).all()
     assert fit.valid[[0, 1, 3, 4, 5]].all()
 
 
@@ -167,6 +174,9 @@ def test_high_moi_packed_fit_is_invariant_to_the_block_size():
     many = fit_high_moi_propensity_saddlepoint(gene_block_size=64, **problem)
     assert (one.valid & ~one.used_fallback).all(), "screen_p_value=1 evaluates every pair"
     np.testing.assert_array_equal(one.valid, many.valid)
+    np.testing.assert_array_equal(one.tail_failure_reason, many.tail_failure_reason)
+    np.testing.assert_array_equal(one.used_chernoff, many.used_chernoff)
+    np.testing.assert_array_equal(one.used_conservative_one, many.used_conservative_one)
     np.testing.assert_allclose(one.log_p_value, many.log_p_value, rtol=1e-6, atol=1e-7)
 
 
@@ -188,3 +198,29 @@ def test_high_moi_packed_fit_matches_the_per_element_kernel():
         )
         np.testing.assert_array_equal(np.asarray(valid), fit.valid[element])
         np.testing.assert_allclose(fit.log_p_value[element], np.asarray(log_p), rtol=1e-6, atol=1e-7)
+
+
+def test_high_moi_fit_propagates_guarded_tail_diagnostics_without_changing_screen_flag(monkeypatch):
+    def forced_diagnostic(observed, contribution, logits, **_kwargs):
+        shape = observed.shape
+        diagnostics = saddlepoint_module.PropensityTailDiagnostics(
+            fallback_used=jnp.ones(shape, dtype=bool),
+            failure_reason_code=jnp.full(shape, 16, dtype=jnp.int32),
+            chernoff_usable=jnp.ones(shape, dtype=bool),
+            fallback_conservative_one=jnp.zeros(shape, dtype=bool),
+            root_residual_null_sd=jnp.full(shape, 0.25, dtype=jnp.float64),
+        )
+        return jnp.full(shape, -3.0), jnp.ones(shape, dtype=bool), diagnostics
+
+    monkeypatch.setattr(
+        saddlepoint_module,
+        "propensity_saddlepoint_log_two_sided_diagnostics",
+        forced_diagnostic,
+    )
+    fit = fit_high_moi_propensity_saddlepoint(gene_block_size=4, **_high_moi_problem(seed=13))
+
+    assert not fit.used_fallback.any()  # every pair was promoted; this remains the screen flag
+    assert (fit.tail_failure_reason == 16).all()
+    assert fit.used_chernoff.all()
+    assert not fit.used_conservative_one.any()
+    np.testing.assert_allclose(fit.root_residual_null_sd, 0.25)

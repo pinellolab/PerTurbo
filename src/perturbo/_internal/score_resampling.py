@@ -113,6 +113,10 @@ class ScorePermutationResult:
     null_moments: ResampledNullMoments | None = None
     saddlepoint_observed_sum: np.ndarray | None = None
     saddlepoint_max_sampling_fraction: np.ndarray | None = None
+    saddlepoint_tail_failure_reason: np.ndarray | None = None
+    saddlepoint_used_chernoff: np.ndarray | None = None
+    saddlepoint_used_conservative_one: np.ndarray | None = None
+    saddlepoint_root_residual_null_sd: np.ndarray | None = None
     tail_fits: dict[str, dict[str, np.ndarray]] | None = None
     """Every requested tail family, keyed by name.
 
@@ -2588,6 +2592,13 @@ def run_low_moi_score_permutations(
                 "log_p_value": np.asarray(fit.log_p_value, dtype=np.float64),
                 "valid": np.asarray(fit.valid, dtype=bool),
             }
+            if name == "saddlepoint" and fit.tail_failure_reason is not None:
+                tail_fits[name].update(
+                    tail_failure_reason=np.asarray(fit.tail_failure_reason, dtype=np.int32),
+                    used_chernoff=np.asarray(fit.used_chernoff, dtype=bool),
+                    used_conservative_one=np.asarray(fit.used_conservative_one, dtype=bool),
+                    root_residual_null_sd=np.asarray(fit.root_residual_null_sd, dtype=np.float64),
+                )
             if name == primary_tail:
                 parametric = fit
         return ScorePermutationResult(
@@ -2612,6 +2623,22 @@ def run_low_moi_score_permutations(
                 None
                 if saddlepoint is None
                 else np.asarray(saddlepoint.max_sampling_fraction, dtype=np.float64)
+            ),
+            saddlepoint_tail_failure_reason=(
+                None if saddlepoint is None or saddlepoint.tail_failure_reason is None
+                else np.asarray(saddlepoint.tail_failure_reason, dtype=np.int32)
+            ),
+            saddlepoint_used_chernoff=(
+                None if saddlepoint is None or saddlepoint.used_chernoff is None
+                else np.asarray(saddlepoint.used_chernoff, dtype=bool)
+            ),
+            saddlepoint_used_conservative_one=(
+                None if saddlepoint is None or saddlepoint.used_conservative_one is None
+                else np.asarray(saddlepoint.used_conservative_one, dtype=bool)
+            ),
+            saddlepoint_root_residual_null_sd=(
+                None if saddlepoint is None or saddlepoint.root_residual_null_sd is None
+                else np.asarray(saddlepoint.root_residual_null_sd, dtype=np.float64)
             ),
             null_moments=(
                 ResampledNullMoments(

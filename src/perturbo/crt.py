@@ -1467,7 +1467,12 @@ def run_crt_for_chunk(
         for family in families
     }
     if want_saddlepoint:
-        parametric[CRT_SADDLEPOINT_FAMILY]["used_screen"] = np.zeros(shape, dtype=bool)
+        saddlepoint_columns = parametric[CRT_SADDLEPOINT_FAMILY]
+        saddlepoint_columns["used_screen"] = np.zeros(shape, dtype=bool)
+        saddlepoint_columns["tail_failure_reason"] = np.full(shape, -1, dtype=np.int32)
+        saddlepoint_columns["used_chernoff"] = np.zeros(shape, dtype=bool)
+        saddlepoint_columns["used_conservative_one"] = np.zeros(shape, dtype=bool)
+        saddlepoint_columns["root_residual_null_sd"] = np.full(shape, np.nan, dtype=np.float64)
     null_summaries = {
         name: np.full(shape, np.nan, dtype=np.float64)
         for name in ("crt_null_mean", "crt_null_variance", "crt_null_skewness", "crt_null_excess_kurtosis")
@@ -1580,6 +1585,14 @@ def run_crt_for_chunk(
             block["p_value"][:, gene_slice] = np.asarray(fitted_saddlepoint["p_value"], dtype=np.float64)
             block["log_p_value"][:, gene_slice] = np.asarray(fitted_saddlepoint["log_p_value"], dtype=np.float64)
             block["valid"][:, gene_slice] = np.asarray(fitted_saddlepoint["valid"], dtype=bool)
+            for key, dtype in (
+                ("tail_failure_reason", np.int32),
+                ("used_chernoff", bool),
+                ("used_conservative_one", bool),
+                ("root_residual_null_sd", np.float64),
+            ):
+                if key in fitted_saddlepoint:
+                    block[key][:, gene_slice] = np.asarray(fitted_saddlepoint[key], dtype=dtype)
             if result.parametric_used_fallback is not None:
                 block["used_screen"][:, gene_slice] = np.asarray(result.parametric_used_fallback, dtype=bool)
         if informative_state is not None:
@@ -2225,6 +2238,10 @@ def run_crt_all_cells(
     log_p = np.full(shape, np.nan)
     valid = np.zeros(shape, dtype=bool)
     used_screen = np.zeros(shape, dtype=bool)
+    tail_failure_reason = np.full(shape, -1, dtype=np.int32)
+    used_chernoff = np.zeros(shape, dtype=bool)
+    used_conservative_one = np.zeros(shape, dtype=bool)
+    root_residual_null_sd = np.full(shape, np.nan, dtype=np.float64)
     observed = np.full(shape, np.nan)
     null_mean = np.full(shape, np.nan)
     null_variance = np.full(shape, np.nan)
@@ -2274,6 +2291,11 @@ def run_crt_all_cells(
         log_p[:, gene_slice] = fit.log_p_value
         valid[:, gene_slice] = fit.valid
         used_screen[:, gene_slice] = fit.used_fallback
+        if fit.tail_failure_reason is not None:
+            tail_failure_reason[:, gene_slice] = fit.tail_failure_reason
+            used_chernoff[:, gene_slice] = fit.used_chernoff
+            used_conservative_one[:, gene_slice] = fit.used_conservative_one
+            root_residual_null_sd[:, gene_slice] = fit.root_residual_null_sd
         observed[:, gene_slice] = fit.observed_sum
         null_mean[:, gene_slice] = fit.null_mean
         null_variance[:, gene_slice] = fit.null_variance
@@ -2298,6 +2320,10 @@ def run_crt_all_cells(
         array[untested] = np.nan
     valid[untested] = False
     used_screen[untested] = False
+    tail_failure_reason[untested] = -1
+    used_chernoff[untested] = False
+    used_conservative_one[untested] = False
+    root_residual_null_sd[untested] = np.nan
     # The reported score is standardized by the null's spread, as the chunked
     # path and the research driver report it (the CRT z-value column).
     with np.errstate(divide="ignore", invalid="ignore"):
@@ -2315,6 +2341,10 @@ def run_crt_all_cells(
                 "log_p_value": log_p,
                 "valid": valid,
                 "used_screen": used_screen,
+                "tail_failure_reason": tail_failure_reason,
+                "used_chernoff": used_chernoff,
+                "used_conservative_one": used_conservative_one,
+                "root_residual_null_sd": root_residual_null_sd,
             }
         },
         null_summaries={
@@ -2456,7 +2486,12 @@ class CRTAccumulator:
             for family in self.tail_families
         }
         if CRT_SADDLEPOINT_FAMILY in self.parametric:
-            self.parametric[CRT_SADDLEPOINT_FAMILY]["used_screen"] = np.zeros(shape, dtype=bool)
+            saddlepoint_columns = self.parametric[CRT_SADDLEPOINT_FAMILY]
+            saddlepoint_columns["used_screen"] = np.zeros(shape, dtype=bool)
+            saddlepoint_columns["tail_failure_reason"] = np.full(shape, -1, dtype=np.int32)
+            saddlepoint_columns["used_chernoff"] = np.zeros(shape, dtype=bool)
+            saddlepoint_columns["used_conservative_one"] = np.zeros(shape, dtype=bool)
+            saddlepoint_columns["root_residual_null_sd"] = np.full(shape, np.nan, dtype=np.float64)
         summary_names = ["crt_null_mean", "crt_null_variance", "crt_null_skewness"]
         if not self.saddlepoint_only:
             summary_names.append("crt_null_excess_kurtosis")
@@ -2540,9 +2575,22 @@ class CRTAccumulator:
             )
             for key, values in fitted.items():
                 if key not in ("p_value", "log_p_value", "valid"):
-                    columns[f"crt_{family}_{key}"] = (
-                        values if streaming else np.asarray(values, dtype=np.float64)
+                    output_name = (
+                        f"crt_{key}"
+                        if family == CRT_SADDLEPOINT_FAMILY and key in {
+                            "tail_failure_reason", "used_chernoff",
+                            "used_conservative_one", "root_residual_null_sd",
+                        }
+                        else f"crt_{family}_{key}"
                     )
+                    if output_name == "crt_tail_failure_reason":
+                        columns[output_name] = np.asarray(values, dtype=np.int32)
+                    elif output_name in {"crt_used_chernoff", "crt_used_conservative_one"}:
+                        columns[output_name] = np.asarray(values, dtype=bool)
+                    else:
+                        columns[output_name] = (
+                            values if streaming else np.asarray(values, dtype=np.float64)
+                        )
         columns.update(self.null_summaries)
         columns.setdefault("crt_null_excess_kurtosis", missing)
         if self.observed_nonzero is not None:

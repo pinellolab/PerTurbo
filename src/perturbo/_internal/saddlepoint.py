@@ -14,6 +14,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from functools import partial
+from typing import NamedTuple
 
 import jax
 import jax.numpy as jnp
@@ -45,6 +46,10 @@ class SaddlepointTailFit:
     max_sampling_fraction: np.ndarray
     valid: np.ndarray
     used_fallback: np.ndarray
+    tail_failure_reason: np.ndarray | None = None
+    used_chernoff: np.ndarray | None = None
+    used_conservative_one: np.ndarray | None = None
+    root_residual_null_sd: np.ndarray | None = None
 
 
 def _cgf_terms(t: jnp.ndarray, pool: jnp.ndarray, m: jnp.ndarray):
@@ -1131,7 +1136,7 @@ def _solve_propensity_saddlepoint(
 
 
 @partial(jax.jit, static_argnames=("iterations", "two_sided"))
-def propensity_saddlepoint_log_two_sided(
+def _propensity_saddlepoint_log_two_sided_unchecked(
     observed: jnp.ndarray,
     contribution: jnp.ndarray,
     logits: jnp.ndarray,
@@ -1139,31 +1144,13 @@ def propensity_saddlepoint_log_two_sided(
     iterations: int = 30,
     two_sided: str = "equal-tail",
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
-    """Two-sided log p-value per column under the Bernoulli null.
+    """Retain the existing symmetric-event Bernoulli SPA implementation.
 
-    ``two_sided="symmetric"`` is ``log P(|S| >= |observed|)``; ``"equal-tail"``
-    is twice the tail on the observed side of the null mean,
-    ``2 min(P(S >= observed), P(S <= observed))``, each tail at its own
-    saddlepoint. The null is skewed, so the two conventions differ: measured on
-    Replogle essential's non-targeting pseudo-targets, the symmetric p-value
-    rejected the right (up-regulation) tail 4.4 times as often as the left at
-    p<0.001 while the total stayed nominal; the equal-tail p-value rejects
-    each tail equally by construction.
-
-    ``contribution`` is ``(pool, columns)``; ``logits`` is either ``(pool,)``,
-    one selection model for every column, or ``(pool, columns)``, one per
-    column. The second layout is how candidates from many elements are packed
-    into one block: the per-column arithmetic is identical either way, since
-    every reduction runs over the pool axis.
-
-    Both tails are solved at their own saddlepoints rather than one being
-    doubled. The null is skewed - that is the entire reason this exists - so
-    the two are not mirror images, and the lower tail is obtained by flipping
-    the sign of every contribution, which maps ``P(S <= -x)`` to ``P(-S >= x)``
-    without touching the selection probabilities.
+    The reviewed Xaira fallback policy applies only to the equal-tail branch.
     """
 
-    _check_two_sided(two_sided)
+    if two_sided != "symmetric":
+        raise ValueError("Unchecked tail is retained only for the symmetric convention.")
     threshold = jnp.abs(observed)
     logits = _per_pair_logits(logits)
     log_selected = jax.nn.log_sigmoid(logits)
@@ -1212,17 +1199,247 @@ def propensity_saddlepoint_log_two_sided(
         log_p = jnp.minimum(jnp.logaddexp(upper, lower), 0.0)
         valid = upper_valid & lower_valid & jnp.isfinite(observed)
         return jnp.where(valid, log_p, jnp.nan), valid
-    # Equal-tail: the tail on the observed side of the null mean, doubled. The
-    # upper tail is solved at the observed value itself and the lower tail at
-    # its negative on the sign-flipped contributions, so each threshold lies on
-    # the far side of its own mean and the saddlepoint exists.
-    null_mean = jnp.sum(contribution * jax.nn.sigmoid(logits), axis=0)
-    upper_side = observed >= null_mean
-    upper, upper_valid = one_tail(contribution, observed)
-    lower, lower_valid = one_tail(-contribution, -observed)
-    log_p = jnp.minimum(jnp.log(2.0) + jnp.where(upper_side, upper, lower), 0.0)
-    valid = jnp.where(upper_side, upper_valid, lower_valid) & jnp.isfinite(observed)
-    return jnp.where(valid, log_p, jnp.nan), valid
+
+
+PROPENSITY_TAIL_FAILURE_REASONS = {
+    1: "root_not_bracketed",
+    2: "nonfinite_root_or_cgf_quantity",
+    4: "nonpositive_second_derivative",
+    8: "negative_lr_radicand",
+    16: "root_residual_above_1e-6_null_sd",
+    32: "lr_ratio_at_or_below_minus_one",
+    64: "raw_lr_tail_at_or_below_zero",
+    128: "raw_lr_tail_above_one",
+    256: "saddlepoint_wrong_sign",
+    512: "nonfinite_lr_correction_quantity",
+}
+_PROPENSITY_ROOT_RESIDUAL_TOLERANCE = 1e-6
+
+
+class PropensityTailDiagnostics(NamedTuple):
+    """Per-pair diagnostics, distinct from the cheaper screening approximation."""
+
+    fallback_used: jax.Array
+    failure_reason_code: jax.Array
+    chernoff_usable: jax.Array
+    fallback_conservative_one: jax.Array
+    root_residual_null_sd: jax.Array
+
+
+def _add_reason(code, condition, bit):
+    return jnp.bitwise_or(code, jnp.where(condition, jnp.int32(bit), jnp.int32(0)))
+
+
+def _apply_root_residual_policy(
+    chernoff, usable, reason, support_status, tilt, exponent, *, root_policy: str
+):
+    """Apply the reviewed finite-bound exception to the selected tail only."""
+    if root_policy not in ("strict", "finite-bound"):
+        raise ValueError("root_policy must be 'strict' or 'finite-bound'")
+    if root_policy == "strict":
+        return chernoff, usable
+    finite_bound_usable = (
+        (reason == 16) & (support_status == 1) & jnp.isfinite(tilt)
+        & (tilt >= 0.0) & jnp.isfinite(exponent)
+    )
+    bounded = jnp.minimum(jnp.log(2.0) + exponent, 0.0)
+    return jnp.where(finite_bound_usable, bounded, chernoff), usable | finite_bound_usable
+
+
+@partial(jax.jit, static_argnames=("iterations", "two_sided"))
+def propensity_saddlepoint_log_two_sided_diagnostics(
+    observed: jnp.ndarray,
+    contribution: jnp.ndarray,
+    logits: jnp.ndarray,
+    *,
+    iterations: int = 30,
+    two_sided: str = "equal-tail",
+) -> tuple[jnp.ndarray, jnp.ndarray, PropensityTailDiagnostics]:
+    """Bernoulli SPA with guarded equal-tail probabilities and Chernoff fallback.
+
+    Interior roots must satisfy |K'(t)-observed| / null_sd <= 1e-6 and
+    the un-clipped LR correction must define a probability. Linear underflow
+    alone is not failure: validity is evaluated in the log domain.
+
+    On failure use min(1, 2 exp(K(t)-t*observed)) when its guards pass.
+    A correctly signed finite tilt remains a bound without root convergence;
+    relax the residual guard only when it is the sole diagnosed failure.
+    Otherwise return p=1. Exact support boundaries are not approximated.
+    The legacy symmetric convention is unchanged and has no such diagnostics.
+    """
+    _check_two_sided(two_sided)
+    if two_sided == "symmetric":
+        log_p, valid = _propensity_saddlepoint_log_two_sided_unchecked(
+            observed, contribution, logits, iterations=iterations, two_sided=two_sided
+        )
+        return log_p, valid, PropensityTailDiagnostics(
+            jnp.zeros_like(observed, dtype=bool),
+            jnp.zeros_like(observed, dtype=jnp.int32),
+            jnp.zeros_like(observed, dtype=bool),
+            jnp.zeros_like(observed, dtype=bool),
+            jnp.full_like(observed, jnp.nan, dtype=jnp.float64),
+        )
+    observed = jnp.asarray(observed, dtype=jnp.float64)
+    contribution = jnp.asarray(contribution, dtype=jnp.float64)
+    logits = _per_pair_logits(jnp.asarray(logits, dtype=jnp.float64))
+    log_selected = jax.nn.log_sigmoid(logits)
+    log_rejected = jax.nn.log_sigmoid(-logits)
+
+    def one_tail(values, threshold):
+        supremum = jnp.sum(jnp.maximum(values, 0.0), axis=0)
+        infimum = jnp.sum(jnp.minimum(values, 0.0), axis=0)
+        extreme = jnp.sum(
+            jnp.where(values > 0.0, log_selected, 0.0)
+            + jnp.where(values < 0.0, log_rejected, 0.0),
+            axis=0,
+        )
+        t_hat, bracketed = _solve_propensity_saddlepoint(
+            threshold, values, logits, iterations=iterations
+        )
+        cgf, first, second = _propensity_cgf_terms(
+            t_hat, values, logits
+        )
+        radicand = 2.0 * (t_hat * threshold - cgf)
+        w = jnp.sign(t_hat) * jnp.sqrt(jnp.maximum(radicand, 0.0))
+        u = t_hat * jnp.sqrt(jnp.maximum(second, jnp.finfo(jnp.float64).tiny))
+        log_sf = jstats.norm.logsf(w)
+        log_pdf = jstats.norm.logpdf(w)
+        safe_w = jnp.where(jnp.abs(w) < 1e-12, 1e-12, w)
+        safe_u = jnp.where(jnp.abs(u) < 1e-12, 1e-12, u)
+        ratio = jnp.exp(log_pdf - log_sf) * (1.0 / safe_u - 1.0 / safe_w)
+        raw_linear = jnp.exp(log_sf) * (1.0 + ratio)
+        # Use the log-domain correction for validity.  The diagnostic linear
+        # product can underflow to zero for a valid, finite interior tail.
+        raw_log_safe = log_sf + jnp.log1p(jnp.where(ratio > -1.0, ratio, 0.0))
+        raw_log_tail = jnp.where(ratio > -1.0, raw_log_safe, jnp.nan)
+        clipped = log_sf + jnp.log1p(jnp.maximum(ratio, -1.0 + 1e-12))
+        beyond = threshold > supremum
+        at_supremum = threshold >= supremum
+        below = threshold <= infimum
+        interior = ~(beyond | at_supremum | below)
+        root_residual = jnp.abs(first - threshold) / jnp.maximum(
+            jnp.sqrt(jnp.maximum(variance, 0.0)), jnp.finfo(jnp.float64).tiny
+        )
+        radicand_scale = jnp.maximum(
+            1.0, jnp.maximum(jnp.abs(2.0 * t_hat * threshold), jnp.abs(2.0 * cgf))
+        )
+        root_finite = (
+            jnp.isfinite(t_hat) & jnp.isfinite(cgf) & jnp.isfinite(first)
+            & jnp.isfinite(second) & jnp.isfinite(root_residual)
+        )
+        lr_finite = (
+            root_finite & jnp.isfinite(w) & jnp.isfinite(u)
+            & jnp.isfinite(ratio) & jnp.isfinite(log_sf)
+        )
+        near_mean = (
+            (jnp.abs(t_hat) < _NEAR_MEAN) & bracketed
+            & root_finite & (second > 0.0)
+            & (root_residual <= _PROPENSITY_ROOT_RESIDUAL_TOLERANCE)
+        )
+        solved = jnp.where(near_mean, jnp.log(0.5), clipped)
+        log_tail = jnp.where(
+            beyond,
+            -jnp.inf,
+            jnp.where(at_supremum, extreme, jnp.where(below, 0.0, solved)),
+        )
+        valid = (bracketed | at_supremum | below) & ~jnp.isnan(log_tail)
+        guarded = interior & ~near_mean
+        reason = jnp.zeros_like(observed, dtype=jnp.int32)
+        reason = _add_reason(reason, guarded & ~bracketed, 1)
+        reason = _add_reason(reason, guarded & ~root_finite, 2)
+        reason = _add_reason(reason, guarded & (second <= 0.0), 4)
+        reason = _add_reason(reason, guarded & (radicand < -1e-12 * radicand_scale), 8)
+        reason = _add_reason(
+            reason, guarded & (root_residual > _PROPENSITY_ROOT_RESIDUAL_TOLERANCE), 16
+        )
+        reason = _add_reason(reason, guarded & (ratio <= -1.0), 32)
+        reason = _add_reason(
+            reason, guarded & (ratio > -1.0) & jnp.isneginf(raw_log_tail), 64
+        )
+        reason = _add_reason(reason, guarded & (raw_log_tail > 0.0), 128)
+        reason = _add_reason(reason, guarded & (t_hat < 0.0), 256)
+        reason = _add_reason(reason, guarded & root_finite & ~lr_finite, 512)
+        chernoff_one = cgf - t_hat * threshold
+        chernoff_usable = (
+            interior & bracketed & root_finite & jnp.isfinite(chernoff_one)
+            & (second > 0.0) & (t_hat >= 0.0)
+            & (root_residual <= _PROPENSITY_ROOT_RESIDUAL_TOLERANCE)
+        )
+        chernoff_two = jnp.where(
+            chernoff_usable,
+            jnp.minimum(jnp.log(2.0) + chernoff_one, 0.0),
+            0.0,
+        )
+        status = jnp.where(beyond, 2, jnp.where(at_supremum, 3, jnp.where(below, 4, 1)))
+        return (
+            log_tail, valid, reason, t_hat, root_residual, ratio, raw_log_tail,
+            raw_linear,
+            (raw_linear == 0.0) & jnp.isfinite(raw_log_tail) & (ratio > -1.0),
+            chernoff_two, chernoff_usable, chernoff_one, status,
+        )
+
+    null_probability = jax.nn.sigmoid(logits)
+    null_mean = jnp.sum(contribution * null_probability, axis=0)
+    variance = jnp.sum(
+        jnp.square(contribution) * null_probability * (1.0 - null_probability), axis=0
+    )
+    upper = one_tail(contribution, observed)
+    lower = one_tail(-contribution, -observed)
+    selected_upper = observed >= null_mean
+    def choose(up, lo):
+        return jnp.where(selected_upper, up, lo)
+
+    selected_tail = choose(upper[0], lower[0])
+    selected_valid = choose(upper[1], lower[1])
+    legacy_log_p = jnp.minimum(jnp.log(2.0) + selected_tail, 0.0)
+    legacy_valid = selected_valid & jnp.isfinite(observed)
+    legacy_log_p = jnp.where(legacy_valid, legacy_log_p, jnp.nan)
+    reason = choose(upper[2], lower[2])
+    fallback_used = reason != 0
+    chernoff = choose(upper[9], lower[9])
+    chernoff_usable = choose(upper[10], lower[10])
+    # A finite, correctly signed, nonoptimal tilt still supplies a valid
+    # Chernoff bound.  Relax only the exact residual-only reason; every other
+    # numerical, support, sign, and finiteness guard remains fail closed.
+    chernoff, chernoff_usable = _apply_root_residual_policy(
+        chernoff, chernoff_usable, reason, choose(upper[12], lower[12]),
+        choose(upper[3], lower[3]), choose(upper[11], lower[11]),
+        root_policy="finite-bound",
+    )
+    chosen_log_p = jnp.where(fallback_used, chernoff, legacy_log_p)
+    chosen_valid = jnp.where(fallback_used, True, legacy_valid) & jnp.isfinite(observed)
+    chosen_log_p = jnp.where(chosen_valid, chosen_log_p, jnp.nan)
+    diagnostics = PropensityTailDiagnostics(
+        fallback_used=fallback_used,
+        failure_reason_code=reason,
+        chernoff_usable=chernoff_usable,
+        fallback_conservative_one=fallback_used & ~chernoff_usable,
+        root_residual_null_sd=jnp.where(
+            choose(upper[12], lower[12]) == 1, choose(upper[4], lower[4]), jnp.nan
+        ),
+    )
+    return chosen_log_p, chosen_valid, diagnostics
+
+
+@partial(jax.jit, static_argnames=("iterations", "two_sided"))
+def propensity_saddlepoint_log_two_sided(
+    observed: jnp.ndarray,
+    contribution: jnp.ndarray,
+    logits: jnp.ndarray,
+    *,
+    iterations: int = 30,
+    two_sided: str = "equal-tail",
+) -> tuple[jnp.ndarray, jnp.ndarray]:
+    """Two-sided Bernoulli SPA log p-values; preserve the two-result interface.
+
+    Equal-tail uses the guarded LR/Chernoff policy documented in
+    :func:`propensity_saddlepoint_log_two_sided_diagnostics`. Contributions
+    are (pool, pairs); logits may be (pool,) or (pool, pairs).
+    """
+    log_p, valid, _ = propensity_saddlepoint_log_two_sided_diagnostics(
+        observed, contribution, logits, iterations=iterations, two_sided=two_sided
+    )
+    return log_p, valid
 
 
 def fit_high_moi_propensity_saddlepoint(
@@ -1405,6 +1622,10 @@ def fit_high_moi_propensity_saddlepoint(
     log_p = np.asarray(normal_log_p).copy()
     valid = np.asarray(normal_valid).copy()
     evaluate = np.asarray(evaluate_device)
+    tail_failure_reason = np.full(valid.shape, -1, dtype=np.int32)
+    used_chernoff = np.zeros(valid.shape, dtype=bool)
+    used_conservative_one = np.zeros(valid.shape, dtype=bool)
+    root_residual_null_sd = np.full(valid.shape, np.nan, dtype=np.float64)
     # Candidates are packed across elements: a block holds ``gene_block_size``
     # (element, gene) pairs from wherever the screen promoted them, each column
     # carrying its own element's logits. Blocking per element instead put a
@@ -1429,7 +1650,7 @@ def fit_high_moi_propensity_saddlepoint(
                 jnp.take(support_device, padded_elements, axis=0)[:, codes_device].T, block, 0.0
             )
         logits = jnp.clip(basis @ jnp.take(coefficients, padded_elements, axis=0).T, -eta_clip, eta_clip)
-        fitted_log_p, fitted_valid = propensity_saddlepoint_log_two_sided(
+        fitted_log_p, fitted_valid, fitted_diagnostics = propensity_saddlepoint_log_two_sided_diagnostics(
             observed[padded_elements, padded_genes],
             block,
             logits,
@@ -1438,6 +1659,23 @@ def fit_high_moi_propensity_saddlepoint(
         )
         log_p[elements, genes] = np.asarray(fitted_log_p[:count])
         valid[elements, genes] = np.asarray(fitted_valid[:count])
+        if two_sided == "equal-tail":
+            fitted_valid_host = np.asarray(fitted_valid[:count], dtype=bool)
+            tail_failure_reason[elements, genes] = np.asarray(
+                fitted_diagnostics.failure_reason_code[:count], dtype=np.int32
+            )
+            used_chernoff[elements, genes] = fitted_valid_host & np.asarray(
+                fitted_diagnostics.fallback_used[:count]
+                & fitted_diagnostics.chernoff_usable[:count], dtype=bool
+            )
+            used_conservative_one[elements, genes] = fitted_valid_host & np.asarray(
+                fitted_diagnostics.fallback_conservative_one[:count], dtype=bool
+            )
+            root_residual_null_sd[elements, genes] = np.where(
+                fitted_valid_host,
+                np.asarray(fitted_diagnostics.root_residual_null_sd[:count], dtype=np.float64),
+                np.nan,
+            )
 
     used_fallback = valid & ~evaluate
     linear = np.exp(np.maximum(log_p, np.log(np.finfo(float).tiny)))
@@ -1456,6 +1694,10 @@ def fit_high_moi_propensity_saddlepoint(
         max_sampling_fraction=np.zeros_like(null_mean),
         valid=valid,
         used_fallback=used_fallback,
+        tail_failure_reason=tail_failure_reason,
+        used_chernoff=used_chernoff,
+        used_conservative_one=used_conservative_one,
+        root_residual_null_sd=root_residual_null_sd,
     )
 
 
@@ -1741,6 +1983,13 @@ def fit_low_moi_propensity_saddlepoint(
     null_variance = np.where(target_valid[:, None], np.asarray(variance), np.nan)
     null_skewness = np.where(target_valid[:, None], skew_host, np.nan)
 
+    # -1 means the guarded tail was not executed. ``used_fallback`` separates
+    # valid screen-retained pairs from invalid/unexecuted pairs.
+    tail_failure_reason = np.full(shape, -1, dtype=np.int32)
+    used_chernoff = np.zeros(shape, dtype=bool)
+    used_conservative_one = np.zeros(shape, dtype=bool)
+    root_residual_null_sd = np.full(shape, np.nan, dtype=np.float64)
+
     pair_targets, pair_genes = np.nonzero(promote)
     if pair_targets.size:
         # Each target's own cells, padded to a common width with a sentinel row
@@ -1782,6 +2031,7 @@ def fit_low_moi_propensity_saddlepoint(
         )
         block_log_p: list[jnp.ndarray] = []
         block_valid: list[jnp.ndarray] = []
+        block_diagnostics = []
         for block_index in range(num_blocks):
             t_dev = t_blocks[block_index]
             g_dev = g_blocks[block_index]
@@ -1800,7 +2050,7 @@ def fit_low_moi_propensity_saddlepoint(
                 logits_own = (shared_ext[rows] + alpha_device[t_dev][:, None]).T
             if projection is not None:
                 block_controls, block_own = projection.correct_blocks(t_dev, g_dev, rows, block_controls, block_own)
-            fitted_log_p, fitted_valid = propensity_saddlepoint_log_two_sided(
+            fitted_log_p, fitted_valid, fitted_diagnostic = propensity_saddlepoint_log_two_sided_diagnostics(
                 observed[t_dev, g_dev],
                 jnp.concatenate([block_controls, block_own], axis=0),
                 jnp.concatenate([logits_controls, logits_own], axis=0),
@@ -1809,10 +2059,24 @@ def fit_low_moi_propensity_saddlepoint(
             )
             block_log_p.append(fitted_log_p)
             block_valid.append(fitted_valid)
+            block_diagnostics.append(fitted_diagnostic)
         fitted_log_p_all = np.asarray(jnp.concatenate(block_log_p))[: pair_targets.size]
         fitted_valid_all = np.asarray(jnp.concatenate(block_valid))[: pair_targets.size]
+        failure_all = np.asarray(jnp.concatenate([value.failure_reason_code for value in block_diagnostics]))[: pair_targets.size]
+        chernoff_all = np.asarray(jnp.concatenate([
+            value.fallback_used & value.chernoff_usable for value in block_diagnostics
+        ]))[: pair_targets.size]
+        conservative_all = np.asarray(jnp.concatenate([value.fallback_conservative_one for value in block_diagnostics]))[: pair_targets.size]
+        residual_all = np.asarray(jnp.concatenate([value.root_residual_null_sd for value in block_diagnostics]))[: pair_targets.size]
         log_p[pair_targets, pair_genes] = fitted_log_p_all
         valid[pair_targets, pair_genes] = fitted_valid_all
+        if two_sided == "equal-tail":
+            tail_failure_reason[pair_targets, pair_genes] = failure_all.astype(np.int32)
+            used_chernoff[pair_targets, pair_genes] = fitted_valid_all & chernoff_all.astype(bool)
+            used_conservative_one[pair_targets, pair_genes] = fitted_valid_all & conservative_all.astype(bool)
+            root_residual_null_sd[pair_targets, pair_genes] = np.where(
+                fitted_valid_all, residual_all.astype(np.float64), np.nan
+            )
         evaluated[pair_targets, pair_genes] = True
 
     linear = np.exp(np.maximum(log_p, np.log(np.finfo(float).tiny)))
@@ -1830,6 +2094,10 @@ def fit_low_moi_propensity_saddlepoint(
         max_sampling_fraction=np.zeros(shape, dtype=np.float64),
         valid=valid,
         used_fallback=valid & ~evaluated,
+        tail_failure_reason=tail_failure_reason,
+        used_chernoff=used_chernoff,
+        used_conservative_one=used_conservative_one,
+        root_residual_null_sd=root_residual_null_sd,
     )
 
 
