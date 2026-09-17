@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import jax
 import numpy as np
+import pytest
 
 from perturbo._internal.high_moi.resampling import propensity_basis
 
@@ -69,3 +71,26 @@ def test_many_small_blocks_give_the_same_basis_as_one_block(monkeypatch):
     blocked = np.asarray(propensity_basis(d))
     _same_space(blocked, whole)
     _same_space(blocked, _host_reference(d))
+
+
+@pytest.mark.parametrize("source_dtype", [np.float32, np.float64])
+@pytest.mark.parametrize("caller_x64", [False, True])
+def test_basis_precision_is_independent_of_caller_mode(source_dtype, caller_x64, monkeypatch):
+    from perturbo._internal.high_moi import resampling as module
+
+    x = np.linspace(-1, 1, 100, dtype=source_dtype)
+    design = np.column_stack([np.ones_like(x), x, 2 * x])
+    monkeypatch.setattr(module, "_BASIS_ROWS_PER_BLOCK", 23)
+    with jax.enable_x64(caller_x64):
+        basis = propensity_basis(design)
+        assert jax.config.x64_enabled == caller_x64
+        assert basis.dtype == np.dtype(np.float32)
+        assert basis.shape == (100, 2)
+        _same_space(basis, _host_reference(design))
+
+
+def test_invalid_design_restores_caller_precision():
+    with jax.enable_x64(False):
+        with pytest.raises(ValueError, match="finite"):
+            propensity_basis(np.array([[1.0, np.nan]]))
+        assert not jax.config.x64_enabled

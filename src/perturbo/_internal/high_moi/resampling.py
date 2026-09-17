@@ -330,67 +330,76 @@ def _rank_revealing_basis(design: np.ndarray | jnp.ndarray) -> jnp.ndarray:
     on the device alongside the IRLS that consumes it.
     """
 
-    raw = np.asarray(design)
-    source_epsilon = (
-        np.finfo(raw.dtype).eps if np.issubdtype(raw.dtype, np.floating) else np.finfo(np.float64).eps
-    )
-    if raw.ndim != 2:
-        raise ValueError("design must be a two-dimensional matrix.")
-    if raw.shape[0] == 0:
-        raise ValueError("design must contain at least one row.")
-    rows, cols = raw.shape
-    block = int(_BASIS_ROWS_PER_BLOCK)
-    blocks = [slice(start, min(start + block, rows)) for start in range(0, rows, block)]
+    # The rank tolerance assumes float64 decomposition, independently of the
+    # caller's precision mode. The context restores that mode even on errors.
+    with jax.enable_x64():
+        raw = np.asarray(design)
+        source_epsilon = (
+            np.finfo(raw.dtype).eps if np.issubdtype(raw.dtype, np.floating) else np.finfo(np.float64).eps
+        )
+        if raw.ndim != 2:
+            raise ValueError("design must be a two-dimensional matrix.")
+        if raw.shape[0] == 0:
+            raise ValueError("design must contain at least one row.")
+        rows, cols = raw.shape
+        block = int(_BASIS_ROWS_PER_BLOCK)
+        blocks = [slice(start, min(start + block, rows)) for start in range(0, rows, block)]
 
-    # Tall-skinny QR in row blocks, then one QR of the stacked triangles and
-    # one SVD of the single (cols x cols) R. R shares A's singular values to
-    # rounding, so the rank decision below is the one the whole-matrix SVD
-    # made; the basis is Q U_R restricted to the retained directions,
-    # assembled block by block. Device memory is bounded by one row block plus
-    # the float32 result: the whole-matrix SVD this replaces needed about four
-    # times the float64 input on the device, or twenty minutes of one host
-    # core, and a genome-wide screen is a (2,000,000 x 269) design.
-    squares = np.zeros(cols, dtype=np.float64)
-    for rows_ in blocks:
-        chunk = jnp.asarray(raw[rows_], dtype=jnp.float64)
-        if not bool(jnp.isfinite(chunk).all()):
-            raise ValueError("design must contain only finite values.")
-        squares += np.asarray(jnp.sum(chunk * chunk, axis=0))
-    norms = np.sqrt(squares)
-    kept = np.flatnonzero(norms > 0.0)
-    if kept.size == 0:
-        return jnp.zeros((rows, 0), dtype=jnp.float32)
-    scale = jnp.asarray(1.0 / norms[kept], dtype=jnp.float64)
+        # Tall-skinny QR in row blocks, then one QR of the stacked triangles and
+        # one SVD of the single (cols x cols) R. R shares A's singular values to
+        # rounding, so the rank decision below is the one the whole-matrix SVD
+        # made; the basis is Q U_R restricted to the retained directions,
+        # assembled block by block. Device memory holds row-block factorization
+        # workspace plus the final float32 result. The whole-matrix SVD needed about four
+        # times the float64 input on the device, or twenty minutes of one host
+        # core, and a genome-wide screen is a (2,000,000 x 269) design.
+        squares = np.zeros(cols, dtype=np.float64)
+        for rows_ in blocks:
+            chunk = jnp.asarray(raw[rows_], dtype=jnp.float64)
+            if not bool(jnp.isfinite(chunk).all()):
+                raise ValueError("design must contain only finite values.")
+            squares += np.asarray(jnp.sum(chunk * chunk, axis=0))
+        del chunk
+        norms = np.sqrt(squares)
+        kept = np.flatnonzero(norms > 0.0)
+        if kept.size == 0:
+            return jnp.zeros((rows, 0), dtype=jnp.float32)
+        scale = jnp.asarray(1.0 / norms[kept], dtype=jnp.float64)
 
-    def scaled_block(rows_):
-        return jnp.asarray(raw[rows_][:, kept], dtype=jnp.float64) * scale
+        def scaled_block(rows_):
+            return jnp.asarray(raw[rows_][:, kept], dtype=jnp.float64) * scale
 
-    triangles = [jnp.linalg.qr(scaled_block(rows_), mode="reduced")[1] for rows_ in blocks]
-    stacked_q, triangle = jnp.linalg.qr(jnp.concatenate(triangles, axis=0), mode="reduced")
-    left_r, singular_values, _ = jnp.linalg.svd(triangle, full_matrices=False)
-    singular_values = np.asarray(singular_values)
-    if singular_values.size == 0:
-        return jnp.zeros((rows, 0), dtype=jnp.float32)
-    # The decomposition itself runs in float64, so its usual LAPACK bound
-    # scales with the row count. Source quantization is different: after
-    # column normalization its perturbation grows with the number of
-    # columns, not with the number of observations. Multiplying float32
-    # epsilon by ``n_rows`` would make the rank tolerance approach one on
-    # million-cell screens and discard ordinary correlated covariates.
-    tolerance = max(
-        max(rows, kept.size) * np.finfo(np.float64).eps,
-        8.0 * np.sqrt(kept.size) * source_epsilon,
-    ) * float(singular_values[0])
-    rank = int(np.count_nonzero(singular_values > tolerance))
-    if rank == 0:
-        return jnp.zeros((rows, 0), dtype=jnp.float32)
-    mixing = stacked_q @ left_r[:, :rank]                      # (sum of triangle rows, rank)
-    offsets = np.cumsum([0] + [t.shape[0] for t in triangles])
-    pieces = []
-    for index, rows_ in enumerate(blocks):
-        q_block, _ = jnp.linalg.qr(scaled_block(rows_), mode="reduced")
-        pieces.append((q_block @ mixing[offsets[index] : offsets[index + 1]]).astype(jnp.float32))
-    return jnp.concatenate(pieces, axis=0)
+        triangles = [jnp.linalg.qr(scaled_block(rows_), mode="reduced")[1] for rows_ in blocks]
+        stacked_q, triangle = jnp.linalg.qr(jnp.concatenate(triangles, axis=0), mode="reduced")
+        left_r, singular_values, _ = jnp.linalg.svd(triangle, full_matrices=False)
+        singular_values = np.asarray(singular_values)
+        if singular_values.size == 0:
+            return jnp.zeros((rows, 0), dtype=jnp.float32)
+        # The decomposition itself runs in float64, so its usual LAPACK bound
+        # scales with the row count. Source quantization is different: after
+        # column normalization its perturbation grows with the number of
+        # columns, not with the number of observations. Multiplying float32
+        # epsilon by ``n_rows`` would make the rank tolerance approach one on
+        # million-cell screens and discard ordinary correlated covariates.
+        tolerance = max(
+            max(rows, kept.size) * np.finfo(np.float64).eps,
+            8.0 * np.sqrt(kept.size) * source_epsilon,
+        ) * float(singular_values[0])
+        rank = int(np.count_nonzero(singular_values > tolerance))
+        if rank == 0:
+            return jnp.zeros((rows, 0), dtype=jnp.float32)
+        mixing = stacked_q @ left_r[:, :rank]                      # (sum of triangle rows, rank)
+        offsets = np.cumsum([0] + [t.shape[0] for t in triangles])
+        # Assemble on the host so concatenation never duplicates a full basis on
+        # the device. Each transfer completes the block before starting the next.
+        result = np.empty((rows, rank), dtype=np.float32)
+        for index, rows_ in enumerate(blocks):
+            q_block, _ = jnp.linalg.qr(scaled_block(rows_), mode="reduced")
+            result[rows_] = np.asarray(
+                (q_block @ mixing[offsets[index] : offsets[index + 1]]).astype(jnp.float32)
+            )
+            del q_block
+        return jnp.asarray(result, dtype=jnp.float32)
 
 
 def propensity_basis(design: np.ndarray | jnp.ndarray) -> jnp.ndarray:
