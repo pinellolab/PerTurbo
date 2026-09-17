@@ -569,6 +569,15 @@ def precompute_low_moi_permutations(
         propensity_coef = np.zeros(
             (design.num_targets, propensity_Q.shape[1]), dtype=np.float32
         )
+    # The shared-slope fit is carried through in both forms. The compact
+    # coefficients below reconstruct every target's logits as ``Q @ coef``,
+    # a (cells, basis) product the saddlepoint repeats per promoted block; a
+    # batch covariate makes the basis hundreds of columns wide, so on a
+    # genome-wide screen that reconstruction dominated the CRT. The logits are
+    # ``eta_shared + delta`` exactly, and the kernel's legacy path reads that
+    # as one broadcast add, so both are returned and the caller prefers it.
+    shared_logits_out = None
+    pool_intercepts_out = None
     if propensity_coef is not None and shared_propensity_coefficients is not None:
         # Shared covariate slopes, per-target intercept. Depth, guide load and
         # batch act on the *cell*, not on which guide it happened to receive,
@@ -590,6 +599,8 @@ def precompute_low_moi_permutations(
         c_one = _basis_coordinates(
             propensity_Q, np.ones(nuisance.shape[0]), what="intercept direction"
         )
+        shared_logits_out = eta_shared
+        pool_intercepts_out = np.full(design.num_targets, np.nan, dtype=np.float64)
         # Filled for every target here, before the drawing loop: the
         # saddlepoint-only path skips that loop entirely and still reads these.
         for target_index in range(design.num_targets):
@@ -609,6 +620,7 @@ def precompute_low_moi_permutations(
             # target's pool sum to its observed cell count - the intercept
             # score equation of the unpenalized logistic, kept per target.
             delta = _solve_propensity_intercept(eta_shared[pool], selected)
+            pool_intercepts_out[target_index] = delta
             propensity_coef[target_index] = (b_shared + delta * c_one).astype(np.float32)
     elif propensity_coef is not None:
         # One model per target, each fitted on exactly the population used by
@@ -710,8 +722,8 @@ def precompute_low_moi_permutations(
         resampling_mechanism=resampling_mechanism,
         pair_rows=tuple(pair_rows) if resampling_mechanism == "propensity" else None,
         pool_logits=tuple(pool_logits) if resampling_mechanism == "propensity" else None,
-        shared_logits=None,
-        pool_intercepts=None,
+        shared_logits=shared_logits_out,
+        pool_intercepts=pool_intercepts_out,
         propensity_coefficients=propensity_coef if resampling_mechanism == "propensity" else None,
         propensity_basis=propensity_Q if resampling_mechanism == "propensity" else None,
         _validation_target_names=target_names if _cache_validation else None,
@@ -2420,9 +2432,15 @@ def run_low_moi_score_permutations(
                     shared_logits=(permutations.shared_logits if legacy_propensity else None),
                     intercepts=(permutations.pool_intercepts if legacy_propensity else None),
                     propensity_coefficients=(
-                        permutations.propensity_coefficients if compact_propensity else None
+                        permutations.propensity_coefficients
+                        if compact_propensity and not legacy_propensity
+                        else None
                     ),
-                    propensity_basis=(permutations.propensity_basis if compact_propensity else None),
+                    propensity_basis=(
+                        permutations.propensity_basis
+                        if compact_propensity and not legacy_propensity
+                        else None
+                    ),
                     num_targets=design.num_targets,
                     screen_p_value=saddlepoint_screen_p_value,
                     two_sided=saddlepoint_two_sided or "equal-tail",
