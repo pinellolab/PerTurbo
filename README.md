@@ -1,6 +1,6 @@
 # 🏎️ PerTurbo
 
-## Scalable and robust analysis tools for large-scale Perturb-seq data
+## Scalable and robust analysis for large-scale Perturb-seq
 
 **PerTurbo** is designed to implement robust effect size estimation and statistical
 significance testing for large-scale Perturb-seq experiments of up to millions of cells.
