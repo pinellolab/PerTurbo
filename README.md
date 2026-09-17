@@ -1,16 +1,16 @@
-# PerTurbo
+# 🏎️ PerTurbo
 
-PerTurbo is a NumPyro/JAX implementation of Bayesian Perturb-seq analysis for
-low- and high-MOI single-cell CRISPR screens. Version 2 is the production
-successor to the experimental Cortado implementation.
+## Robust analysis for low- and high-MOI genome-scale single-cell CRISPR screens
 
-Statistical testing builds on [SCEPTRE](https://doi.org/10.1186/s13059-024-03254-2)
-and [spaCRT](https://arxiv.org/abs/2407.08911). These statistical methods are prior
-work; PerTurbo provides an implementation integrated with its analysis workflow.
+**PerTurbo** is designed to implement robust effect size estimation and statistical
+significance testing for large-scale Perturb-seq experiments (10k-10M+ cells).
+PerTurbo uses GPU accelerated routines for both Bayesian effect size estimation and 
+frequentist statistical testing to dramatically speed-up inference on genome-scale
+datasets.
 
 ## Installation
 
-PerTurbo requires Python 3.11 or newer. It is **not published on PyPI**; install
+PerTurbo requires Python 3.11 or newer. It is **not yet published on PyPI**; install
 it from GitHub, from a container image, or from a checkout.
 
 ```bash
@@ -67,7 +67,7 @@ The command line is the supported way to run a screen. It takes an `.h5ad` or
 
 ### A low-MOI screen in an AnnData
 
-One perturbation per cell, named by a column of `obs`:
+One perturbation per cell, named by a column of `adata.obs`:
 
 ```bash
 perturbo --input screen.h5ad --out-dir results/ \
@@ -200,16 +200,11 @@ uv run pytest
 uv build
 ```
 
-The v2 production source is ported from the Cortado repository, which remains the
-home for experiments, benchmarks, notebooks, apps and paper analyses. What ships
-here is the analysis package: the models, the two-stage fit,
-the result tables, preprocessing and the simulation entry
-points. The benchmark harness, the evaluation scorers, the Streamlit applications
-and the research diagnostics stay in Cortado, which is why a default install needs
-neither statsmodels nor scikit-learn.
-
 ## License
 
 PerTurbo is distributed under the GNU General Public License, version 3 or
 any later version (GPL-3.0-or-later). See [LICENSE](LICENSE) for the full terms
 and [NOTICE](NOTICE) for retained copyright and third-party license notices.
+
+## Manuscript
+Coming soon!
