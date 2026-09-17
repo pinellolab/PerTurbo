@@ -1524,7 +1524,7 @@ def fit_low_moi_propensity_saddlepoint(
     ``propensity_coefficients`` in one rank-revealing ``propensity_basis``.
     Each target's coefficients were fitted on controls plus only its own cells,
     making its assignment law independent of unrelated targets sharing a CLI
-    chunk. The legacy ``shared_logits`` plus ``intercepts`` representation is
+    chunk. The shared-logit ``shared_logits`` plus ``intercepts`` representation is
     still accepted for direct callers and old cached objects.
 
     Both representations let every target be screened in bounded batches. The
@@ -1556,8 +1556,8 @@ def fit_low_moi_propensity_saddlepoint(
     codes = np.asarray(target_codes, dtype=np.int64).reshape(-1)
     control = np.asarray(control_mask, dtype=bool).reshape(-1)
     compact_given = propensity_coefficients is not None or propensity_basis is not None
-    legacy_given = shared_logits is not None or intercepts is not None
-    if compact_given and legacy_given:
+    shared_logits_given = shared_logits is not None or intercepts is not None
+    if compact_given and shared_logits_given:
         raise ValueError(
             "Pass either propensity_coefficients with propensity_basis or "
             "shared_logits with intercepts, not both."

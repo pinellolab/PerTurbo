@@ -6,7 +6,7 @@ per-target intercept, then stores the result as coefficients in a compact basis
 logit vector plus the intercepts (``eta_shared + delta``). The kernel rebuilds
 logits from the compact form with a (cells, basis) product for every promoted
 block; a batch covariate makes that basis hundreds of columns wide and on a
-genome-wide screen the rebuild dominated the CRT. The legacy form is one
+genome-wide screen the rebuild dominated the CRT. The shared-logit form is one
 broadcast add.
 
 These tests pin what the switch is allowed to change: nothing that a caller
@@ -71,7 +71,7 @@ def _rel_gap(a, b):
     return np.abs(a.log_p_value[finite] - b.log_p_value[finite]) / np.maximum(np.abs(b.log_p_value[finite]), 1e-300)
 
 
-def test_legacy_and_compact_forms_agree_within_the_solvers_own_noise_in_float64():
+def test_shared_logit_and_compact_forms_agree_within_the_solvers_own_noise_in_float64():
     """Given the same logits, switching representation is inside the kernel's noise.
 
     The two forms hand the kernel logits that agree to ~1e-15, and the null
@@ -80,20 +80,20 @@ def test_legacy_and_compact_forms_agree_within_the_solvers_own_noise_in_float64(
     pairs it amplifies summation-order noise in its inputs to a few 1e-7
     relative. Measured here on this fixture: perturbing the *compact* form's own
     coefficients by 1e-15 moves its log p by up to ~4e-7, more than the
-    compact-versus-legacy gap (~2e-7), on a different set of pairs. So the
+    compact-versus-shared-logit gap (~2e-7), on a different set of pairs. So the
     invariant is not bit-equality but that the representation switch never
     exceeds what the solver already does to itself.
     """
 
     common, basis, coef, eta_shared, delta = _wide_basis_problem()
     compact = fit_low_moi_propensity_saddlepoint(propensity_coefficients=coef, propensity_basis=basis, **common)
-    legacy = fit_low_moi_propensity_saddlepoint(shared_logits=eta_shared, intercepts=delta, **common)
+    shared_logit = fit_low_moi_propensity_saddlepoint(shared_logits=eta_shared, intercepts=delta, **common)
 
     assert compact.valid.any()
-    np.testing.assert_array_equal(compact.valid, legacy.valid)
-    np.testing.assert_array_equal(compact.used_fallback, legacy.used_fallback)
+    np.testing.assert_array_equal(compact.valid, shared_logit.valid)
+    np.testing.assert_array_equal(compact.used_fallback, shared_logit.used_fallback)
     for field in ("null_mean", "null_variance", "observed_sum"):
-        left, right = np.asarray(getattr(compact, field)), np.asarray(getattr(legacy, field))
+        left, right = np.asarray(getattr(compact, field)), np.asarray(getattr(shared_logit, field))
         mask = np.isfinite(left) & np.isfinite(right)
         np.testing.assert_allclose(left[mask], right[mask], rtol=1e-12, atol=1e-12)
 
@@ -105,16 +105,16 @@ def test_legacy_and_compact_forms_agree_within_the_solvers_own_noise_in_float64(
         **common,
     )
     self_noise = float(_rel_gap(jittered, compact).max())
-    switch = float(_rel_gap(legacy, compact).max())
+    switch = float(_rel_gap(shared_logit, compact).max())
     assert self_noise > 1e-9, "the fixture must exercise the solver's sensitive pairs"
     assert switch < 1e-6, switch
     assert switch <= 2.0 * self_noise, (switch, self_noise)
 
 
-def test_float32_compact_storage_is_the_only_difference_from_the_legacy_form():
+def test_float32_compact_storage_is_the_only_difference_from_the_shared_logit_form():
     """Production stores the compact form in float32; this measures what that costs.
 
-    The legacy form keeps ``eta_shared`` and ``delta`` in float64, so switching
+    The shared-logit form keeps ``eta_shared`` and ``delta`` in float64, so switching
     to it is a precision *gain*. The tolerance here is the float32 rounding of a
     logit of order one propagated through the tail, and is the bound a caller
     comparing old and new tables should expect.
@@ -129,18 +129,18 @@ def test_float32_compact_storage_is_the_only_difference_from_the_legacy_form():
     assert 0.0 < logit_gap < 2e-5, logit_gap  # float32 rounding, not a bug
 
     compact = fit_low_moi_propensity_saddlepoint(propensity_coefficients=coef32, propensity_basis=basis32, **common)
-    legacy = fit_low_moi_propensity_saddlepoint(shared_logits=eta_shared, intercepts=delta, **common)
+    shared_logit = fit_low_moi_propensity_saddlepoint(shared_logits=eta_shared, intercepts=delta, **common)
 
-    np.testing.assert_array_equal(compact.valid, legacy.valid)
-    np.testing.assert_array_equal(compact.used_fallback, legacy.used_fallback)
-    finite = _finite_pairs(compact.log_p_value, legacy.log_p_value)
-    gap = np.max(np.abs(compact.log_p_value[finite] - legacy.log_p_value[finite]))
+    np.testing.assert_array_equal(compact.valid, shared_logit.valid)
+    np.testing.assert_array_equal(compact.used_fallback, shared_logit.used_fallback)
+    finite = _finite_pairs(compact.log_p_value, shared_logit.log_p_value)
+    gap = np.max(np.abs(compact.log_p_value[finite] - shared_logit.log_p_value[finite]))
     assert gap < 1e-4, gap
     # ...and materially below any decision anyone makes on a p-value.
-    assert gap < 1e-3 * max(1.0, np.max(np.abs(legacy.log_p_value[finite])))
+    assert gap < 1e-3 * max(1.0, np.max(np.abs(shared_logit.log_p_value[finite])))
 
 
-def test_targets_without_a_pool_stay_missing_under_the_legacy_form():
+def test_targets_without_a_pool_stay_missing_under_the_shared_logit_form():
     common, basis, coef, eta_shared, delta = _wide_basis_problem(seed=3)
     delta = delta.copy()
     delta[2] = np.nan  # how precompute marks an untestable target

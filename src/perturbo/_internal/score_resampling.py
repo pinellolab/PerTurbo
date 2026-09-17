@@ -364,7 +364,9 @@ class TargetPermutations:
     is written in the logit, and a float32 probability cannot carry one near
     the clip - sigmoid(30) rounds to exactly 1.0."""
     shared_logits: np.ndarray | None = None
-    """Legacy shared-slope representation retained for old cached callers."""
+    """Shared-slope selection model as one cell-level logit vector; a target's pool
+    logits are ``shared_logits[rows] + pool_intercepts[t]``. The form the kernel
+    prefers when present."""
     pool_intercepts: np.ndarray | None = None
     """Per-target intercept of the selection model, NaN where the target has
     no pool."""
@@ -639,7 +641,7 @@ def precompute_low_moi_permutations(
     # a (cells, basis) product the saddlepoint repeats per promoted block; a
     # batch covariate makes the basis hundreds of columns wide, so on a
     # genome-wide screen that reconstruction dominated the CRT. The logits are
-    # ``eta_shared + delta`` exactly, and the kernel's legacy path reads that
+    # ``eta_shared + delta`` exactly, and the kernel's shared-logit path reads that
     # as one broadcast add, so both are returned and the caller prefers it.
     shared_logits_out = None
     pool_intercepts_out = None
@@ -2490,11 +2492,11 @@ def run_low_moi_score_permutations(
                     permutations.propensity_coefficients is not None
                     and permutations.propensity_basis is not None
                 )
-                legacy_propensity = (
+                shared_logit_propensity = (
                     permutations.shared_logits is not None
                     and permutations.pool_intercepts is not None
                 )
-                if not compact_propensity and not legacy_propensity:
+                if not compact_propensity and not shared_logit_propensity:
                     raise ValueError(
                         "permutations do not carry a compact selection model; recompute them "
                         "with precompute_low_moi_permutations."
@@ -2509,16 +2511,16 @@ def run_low_moi_score_permutations(
                     contribution=_low_moi_contribution(),
                     target_codes=target_codes,
                     control_mask=control_mask,
-                    shared_logits=(permutations.shared_logits if legacy_propensity else None),
-                    intercepts=(permutations.pool_intercepts if legacy_propensity else None),
+                    shared_logits=(permutations.shared_logits if shared_logit_propensity else None),
+                    intercepts=(permutations.pool_intercepts if shared_logit_propensity else None),
                     propensity_coefficients=(
                         permutations.propensity_coefficients
-                        if compact_propensity and not legacy_propensity
+                        if compact_propensity and not shared_logit_propensity
                         else None
                     ),
                     propensity_basis=(
                         permutations.propensity_basis
-                        if compact_propensity and not legacy_propensity
+                        if compact_propensity and not shared_logit_propensity
                         else None
                     ),
                     num_targets=design.num_targets,
