@@ -1765,13 +1765,26 @@ def fit_low_moi_propensity_saddlepoint(
         else:
             shared_ext = jnp.concatenate([jnp.asarray(shared), jnp.zeros((1,), dtype=jnp.float64)])
 
-        for start in range(0, pair_targets.size, gene_block_size):
-            targets = pair_targets[start : start + gene_block_size]
-            genes = pair_genes[start : start + gene_block_size]
-            count = genes.size
-            pad = gene_block_size - count
-            t_dev = jnp.asarray(np.concatenate([targets, np.repeat(targets[-1], pad)]).astype(np.int32))
-            g_dev = jnp.asarray(np.concatenate([genes, np.repeat(genes[-1], pad)]).astype(np.int32))
+        # Every block's (target, gene) indices go to the device once, and every
+        # block's result stays there until the loop is over: pulling each
+        # block's p-values back as it finished forced a device sync per block,
+        # thousands of times per gene slice on a genome-wide screen, with the
+        # host idle between them. The pair list is padded to whole blocks by
+        # repeating its last pair; those slots are dropped after the pull.
+        num_blocks = -(-pair_targets.size // gene_block_size)
+        padded = num_blocks * gene_block_size
+        pad = padded - pair_targets.size
+        t_blocks = jnp.asarray(
+            np.concatenate([pair_targets, np.repeat(pair_targets[-1], pad)]).astype(np.int32).reshape(num_blocks, gene_block_size)
+        )
+        g_blocks = jnp.asarray(
+            np.concatenate([pair_genes, np.repeat(pair_genes[-1], pad)]).astype(np.int32).reshape(num_blocks, gene_block_size)
+        )
+        block_log_p: list[jnp.ndarray] = []
+        block_valid: list[jnp.ndarray] = []
+        for block_index in range(num_blocks):
+            t_dev = t_blocks[block_index]
+            g_dev = g_blocks[block_index]
             block_controls = jnp.take(control_contribution, g_dev, axis=1)
             if compact_given:
                 logits_controls = control_basis @ coefficients_device[t_dev].T
@@ -1794,9 +1807,13 @@ def fit_low_moi_propensity_saddlepoint(
                 iterations=iterations,
                 two_sided=two_sided,
             )
-            log_p[targets, genes] = np.asarray(fitted_log_p[:count])
-            valid[targets, genes] = np.asarray(fitted_valid[:count])
-            evaluated[targets, genes] = True
+            block_log_p.append(fitted_log_p)
+            block_valid.append(fitted_valid)
+        fitted_log_p_all = np.asarray(jnp.concatenate(block_log_p))[: pair_targets.size]
+        fitted_valid_all = np.asarray(jnp.concatenate(block_valid))[: pair_targets.size]
+        log_p[pair_targets, pair_genes] = fitted_log_p_all
+        valid[pair_targets, pair_genes] = fitted_valid_all
+        evaluated[pair_targets, pair_genes] = True
 
     linear = np.exp(np.maximum(log_p, np.log(np.finfo(float).tiny)))
     linear[~valid] = np.nan
