@@ -15,10 +15,10 @@ it from GitHub, from a container image, or from a checkout.
 
 ```bash
 # from GitHub, pinned to a release tag
-pip install "perturbo @ git+https://github.com/pinellolab/PerTurbo.git@v2.0.0rc10"
+pip install "perturbo @ git+https://github.com/pinellolab/PerTurbo.git@v2.0.0rc11"
 
 # same, with JAX's CUDA 12 wheels for an NVIDIA GPU
-pip install "perturbo[cuda] @ git+https://github.com/pinellolab/PerTurbo.git@v2.0.0rc10"
+pip install "perturbo[cuda] @ git+https://github.com/pinellolab/PerTurbo.git@v2.0.0rc11"
 
 # from a checkout
 git clone https://github.com/pinellolab/PerTurbo.git
@@ -34,14 +34,14 @@ Released images are published to GHCR, which is usually easier than installing
 CUDA wheels yourself:
 
 ```bash
-docker pull ghcr.io/pinellolab/perturbo:v2.0.0rc10
-docker run --rm --gpus all ghcr.io/pinellolab/perturbo:v2.0.0rc10 --help
+docker pull ghcr.io/pinellolab/perturbo:v2.0.0rc11
+docker run --rm --gpus all ghcr.io/pinellolab/perturbo:v2.0.0rc11 --help
 ```
 
 On a cluster without Docker:
 
 ```bash
-apptainer pull perturbo.sif docker://ghcr.io/pinellolab/perturbo:v2.0.0rc10
+apptainer pull perturbo.sif docker://ghcr.io/pinellolab/perturbo:v2.0.0rc11
 apptainer exec --nv perturbo.sif perturbo --help
 ```
 
