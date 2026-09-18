@@ -8,7 +8,7 @@ and this project adheres to [Semantic Versioning][].
 [keep a changelog]: https://keepachangelog.com/en/1.0.0/
 [semantic versioning]: https://semver.org/spec/v2.0.0.html
 
-## [Unreleased]
+## [2.0.0rc11] - 2026-09-18
 
 ### Added
 
@@ -23,7 +23,6 @@ and this project adheres to [Semantic Versioning][].
     and `covariate_metadata.json`. Motivated by a TAP-seq run that was believed
     to be exercising rc10 while the container's rc8 was executing.
 
-## [Unreleased]
 
 ### Fixed
 
@@ -36,6 +35,19 @@ and this project adheres to [Semantic Versioning][].
     p=1. This is a numerical/statistical correction and can change discoveries.
     Exact support-boundary probabilities and the symmetric convention are
     unchanged.
+
+-   Stage two sizes its gene blocks to the card. With co-occurring
+    perturbations the fit keeps every predictor and blocks genes, and
+    `design_matrix_product` materialises one `(cells, guides per cell, block)`
+    float32 array per block. The block was a hard-coded 256, chosen from the
+    `(cells, genes)` intermediate alone; on a 1,060,779-cell screen with up to
+    47 guides per cell that array is 47.6 GiB and the fit died in XLA's
+    allocator on a 40 GB card after the CRT had already finished. The block
+    now halves from 256 until the forward array fits a third of the device's
+    reported memory (40 GiB assumed when unreported), with a floor of 16 and
+    a log line stating the arithmetic. Low-MOI screens keep 256; genes are
+    independent given the baseline, so the block changes memory and time and
+    not the fit. `--gene-chunk-size` still overrides.
 
 -   The root-residual guard on the equal-tail propensity saddlepoint accepts
     residuals up to 1e-3 null standard deviations instead of 1e-6. log p is
