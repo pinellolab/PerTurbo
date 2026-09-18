@@ -9,6 +9,7 @@ from pathlib import Path
 import time
 from typing import Any
 
+import jax as _jax
 import jax.numpy as jnp
 import numpy as np
 import pandas as pd
@@ -251,6 +252,59 @@ def _bundle_size_factors(
         totals[start:stop] = np.asarray(block_totals, dtype=np.float64).reshape(-1)
     center = float(library_size_center_log_mean or 0.0)
     return (np.log1p(totals) - center).astype(np.float32)[:, None], "analyzed_count_total"
+
+
+_AUTO_GENE_BLOCK_MAX = 256
+_AUTO_GENE_BLOCK_MIN = 16
+# Fraction of the device's memory the stage-two gather may plan to occupy. The
+# gather is one array of (cells, guides per cell, genes in block) float32, and
+# reverse mode holds roughly two more of the same shape, so budgeting the
+# forward array at a third of the card leaves the rest for the counts, the
+# parameters and XLA's own scratch.
+_AUTO_GENE_BLOCK_MEMORY_FRACTION = 0.33
+_AUTO_GENE_BLOCK_FALLBACK_BYTES = 40 * 1024**3
+
+
+def _device_memory_bytes(device: str | None) -> int | None:
+    """Total memory of the first accelerator, or None when it is not reported."""
+    if device is not None and str(device).lower() == "cpu":
+        return None
+    try:
+        stats = _jax.devices()[0].memory_stats() or {}
+    except Exception:  # pragma: no cover - platform-specific introspection
+        return None
+    limit = stats.get("bytes_limit")
+    return int(limit) if limit else None
+
+
+def _auto_gene_block_size(num_cells: int, max_active: int, device_bytes: int | None) -> tuple[int, str]:
+    """Widest power-of-two gene block whose sparse-design gather fits the card.
+
+    With co-occurring perturbations stage two keeps every predictor and blocks
+    genes instead, and ``design_matrix_product`` materialises a
+    ``(cells, max guides per cell, block)`` float32 array for the block. At
+    256 genes that is small on a low-MOI screen (one guide per cell) but on a
+    1.06M-cell, 47-guides-per-cell screen it is 47.6 GiB, which no card
+    allocates. The block therefore halves until the forward array fits the
+    budget, down to a floor; blocking is over genes, which are independent
+    given the baseline, so the choice changes memory and time, not the fit.
+    """
+    budget_bytes = (device_bytes or _AUTO_GENE_BLOCK_FALLBACK_BYTES) * _AUTO_GENE_BLOCK_MEMORY_FRACTION
+    per_gene = max(1, int(num_cells)) * max(1, int(max_active)) * 4
+    block = _AUTO_GENE_BLOCK_MAX
+    while block > _AUTO_GENE_BLOCK_MIN and per_gene * block > budget_bytes:
+        block //= 2
+    gather_gib = per_gene * block / 1024**3
+    source = "reported by the device" if device_bytes else "assumed (device memory not reported)"
+    reason = (
+        f"{num_cells:,} cells x {max_active} guides per cell: the stage-two gather is "
+        f"{gather_gib:.2f} GiB per {block}-gene block against a budget of "
+        f"{budget_bytes / 1024**3:.1f} GiB ({_AUTO_GENE_BLOCK_MEMORY_FRACTION:.0%} of "
+        f"{(device_bytes or _AUTO_GENE_BLOCK_FALLBACK_BYTES) / 1024**3:.0f} GiB {source})"
+    )
+    if block == _AUTO_GENE_BLOCK_MIN and per_gene * block > budget_bytes:
+        reason += f"; even {block} genes exceed the budget - pass --gene-chunk-size or --minibatch-size-betas"
+    return block, reason
 
 
 def _gene_chunk_configuration_problem(args, size_factor_mode: str) -> str | None:
@@ -1334,8 +1388,15 @@ def main(argv: list[str] | None = None) -> None:
                         + ". Use a supported gene-block configuration, or raise --max-chunk-size "
                         "to fit all cells jointly with --perturbation-chunk-size 0."
                     )
-                gene_chunk_size = 256
-                print("[perturbo] Co-occurring perturbations detected: using 256-gene blocks with every predictor retained.")
+                gene_chunk_size, block_reason = _auto_gene_block_size(
+                    num_cells=int(pert_matrix.shape[0]),
+                    max_active=int(active_per_cell.max()),
+                    device_bytes=_device_memory_bytes(args.device),
+                )
+                print(
+                    f"[perturbo] Co-occurring perturbations detected: using {gene_chunk_size}-gene blocks "
+                    f"with every predictor retained ({block_reason})."
+                )
             else:
                 membership = _build_matrix_membership(
                     pert_matrix,
