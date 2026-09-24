@@ -1,7 +1,8 @@
 # rc11 follow-up changes (September 24, 2026)
 
-These changes are on `v2-port`; the package version remains `2.0.0rc11`.
-They do not tag or release rc12.
+These changes were validated on `v2-port` after rc11 and are included in
+`2.0.0rc12`. The release also includes the guide-efficacy/API compatibility
+changes documented in the changelog.
 
 ## API/CLI parity (#61)
 
@@ -60,3 +61,12 @@ CPU checks used the existing JAX 0.11.0 runtime without altering its environment
   at that root, not to exact finite-sample tail probabilities.
 
 No full-scale GPU timing or peak-memory guarantee is inferred from these checks.
+
+## rc12 release validation
+
+The merged release candidate passed 88 API, output-contract, saved-model,
+source-provenance, scheduling, detection-count and saddlepoint tests, plus
+28 Newton-cycle, Chernoff-fallback and packed-saddlepoint tests on the existing
+CPU runtime. `uv lock --check --offline` passed after updating only the package
+version. GitHub's full Test workflow was disabled for inactivity at release
+preparation; the build and container smoke-test workflows remained active.

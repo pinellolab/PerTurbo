@@ -8,7 +8,7 @@ and this project adheres to [Semantic Versioning][].
 [keep a changelog]: https://keepachangelog.com/en/1.0.0/
 [semantic versioning]: https://semver.org/spec/v2.0.0.html
 
-## [Unreleased]
+## [2.0.0rc12] - 2026-09-24
 
 ### Changed
 
@@ -43,6 +43,29 @@ and this project adheres to [Semantic Versioning][].
 -   `fit_guide_efficacy=True` alongside `guide_effect_strategy="shared"` now
     warns. The v1 flag is recorded in metadata and never read, so callers
     setting it have been getting no guide efficacy while believing otherwise.
+
+### Fixed
+
+-   CRT informative-count accumulation excludes padded memberships without
+    creating gradients for a large dummy segment, restoring Xaira throughput.
+    This is a computation/memory change; tested counts and results are preserved.
+-   Saddlepoint Newton steps now require sufficient progress, with bracketed
+    fallback and final polishing. Valid finite-tilt Chernoff bounds remain usable
+    for failure bits 16, 128, and 144. Formerly incomplete solves can change
+    p-values; this is a numerical correction, not a runtime-only change.
+-   Source provenance identifies the imported checkout even when another
+    editable installation has stale package metadata.
+
+### Added
+
+-   All-cells CRT now has an independent memory-planned gene schedule instead
+    of inheriting stage-two blocks. Stage-two fitting settings and the global
+    multiple-testing family are preserved. Device-memory planning is an estimate,
+    not a peak-memory guarantee.
+-   Python API support for the CRT informative-cell annotation threshold and
+    all-cells batch-support switch, matching the CLI. `fit_from_path` now defaults
+    to learning rate 0.01 (formerly 0.003); pass 0.003 explicitly to retain the old
+    API setting. Both interfaces default to 500 CRT genes per block.
 
 ## [2.0.0rc11] - 2026-09-18
 

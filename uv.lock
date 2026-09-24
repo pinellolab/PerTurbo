@@ -3268,7 +3268,7 @@ wheels = [
 
 [[package]]
 name = "perturbo"
-version = "2.0.0rc11"
+version = "2.0.0rc12"
 source = { editable = "." }
 dependencies = [
     { name = "anndata", version = "0.12.19", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12'" },
