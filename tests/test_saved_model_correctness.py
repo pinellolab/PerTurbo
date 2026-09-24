@@ -132,7 +132,10 @@ def _stub_cli_fits(monkeypatch, captured_size_factors: list[np.ndarray]) -> None
             dtype=np.float32,
         )[:, None]
         guide_values = np.broadcast_to(guide_ids + 0.1, (len(guide_names), 2)).copy()
-        relative = np.broadcast_to(guide_ids * 0.1 + 0.2, (len(guide_names), 2)).copy()
+        # Deliberately not constant across genes: the point of the assertion below
+        # is that the gene axis reaches the caller, and a per-guide-constant stub
+        # would pass just as well against the old mean-over-genes behaviour.
+        relative = (guide_ids * 0.1 + 0.2) + np.asarray([[0.0, 0.05]], dtype=np.float32)
         return api.BetaFit(
             posterior_mean=jnp.full((len(data.pert_names), 2), 0.4),
             posterior_scale=jnp.ones((len(data.pert_names), 2)),
@@ -184,13 +187,27 @@ def test_chunked_cli_bundle_preserves_global_guide_arrays_and_derived_offsets(mo
         ]
     )
 
+    # guide_efficacy.npy holds the fitted (n_guides, n_genes) efficiencies under
+    # "relative". It used to hold their mean over genes, which on a real screen is
+    # dominated by the null genes sitting at the prior.
+    on_disk = np.load(out / "guide_efficacy.npy")
+    assert on_disk.shape == (3, 2)
+    np.testing.assert_allclose(
+        on_disk, [[0.2, 0.25], [0.3, 0.35], [0.4, 0.45]], rtol=1e-6, atol=1e-6
+    )
+
     loaded = PerTurboModel.load(out)
     assert loaded.beta_fit is not None
     expected_guides = np.array([[0.1, 0.1], [1.1, 1.1], [2.1, 2.1]], dtype=np.float32)
     np.testing.assert_allclose(loaded.beta_fit.guide_effect_mean, expected_guides)
     np.testing.assert_allclose(loaded.beta_fit.guide_offset_mean, expected_guides + 1.0)
     np.testing.assert_allclose(loaded.beta_fit.guide_dispersion_excess_inverse, expected_guides + 2.0)
-    np.testing.assert_allclose(loaded.guide_efficacy, [0.2, 0.3, 0.4])
+    np.testing.assert_allclose(
+        loaded.guide_efficacy,
+        [[0.2, 0.25], [0.3, 0.35], [0.4, 0.45]],
+        rtol=1e-6,
+        atol=1e-6,
+    )
 
     fitted_offsets = np.concatenate(captured, axis=0)
     simulated_offsets = _resolve_size_factors(loaded, np.arange(6), 1.0)

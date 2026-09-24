@@ -276,7 +276,20 @@ def simulate_data_from_trained_model(
 
     guide_obs_arr = np.asarray(guide_obs, dtype=np.float32)
     guide_by_element_arr = np.asarray(guide_by_element, dtype=np.float32)
-    guide_eff_arr = np.asarray(guide_efficacy, dtype=np.float32).reshape(-1)
+    guide_eff_input = np.asarray(guide_efficacy, dtype=np.float32)
+    if guide_eff_input.ndim > 1 and 1 not in guide_eff_input.shape:
+        # The simulator weights guides before the gene axis exists
+        # (guide_obs @ guide_by_element), so it needs one scalar per guide. A
+        # relative fit's guide_efficacy is (n_guides, n_genes); which summary of
+        # it to simulate with is the caller's choice, and the mean over all genes
+        # is the wrong default because the null genes in it sit at the prior.
+        raise ValueError(
+            "guide_efficacy is per guide and gene "
+            f"(shape {tuple(guide_eff_input.shape)}); the simulator needs one "
+            "value per guide. Choose a summary explicitly - e.g. the mean over "
+            "the genes each guide has a detected effect on - and pass that."
+        )
+    guide_eff_arr = guide_eff_input.reshape(-1)
     if guide_obs_arr.shape[1] != guide_by_element_arr.shape[0]:
         raise ValueError("guide_obs columns must match guide_by_element rows.")
     if guide_eff_arr.shape[0] != guide_obs_arr.shape[1]:

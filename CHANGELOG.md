@@ -8,6 +8,42 @@ and this project adheres to [Semantic Versioning][].
 [keep a changelog]: https://keepachangelog.com/en/1.0.0/
 [semantic versioning]: https://semver.org/spec/v2.0.0.html
 
+## [Unreleased]
+
+### Changed
+
+-   **Breaking.** `guide_efficacy.npy` now holds the fitted
+    `(n_guides, n_genes)` relative efficiencies rather than their mean over
+    genes, and `PerTurboModel.guide_efficacy` returns the same. Relative
+    efficiency is fitted per guide *and* gene; on a transcriptome-wide screen
+    almost every gene is null for any given element, efficiency is unidentified
+    there and sits at its prior, so the mean over genes collapses onto the prior
+    whatever the identified pairs say. On Gasperini at-scale it read 0.781 with
+    a standard deviation of 0.014 across guides, against 0.809 and 0.183 over
+    the pairs each guide has a detected effect on, and the two correlate at
+    0.450. Under `shared` the file is unchanged: a one-dimensional vector of
+    ones, since efficacy is 1.0 by construction and no per-gene array is fitted.
+    Callers needing one value per guide must now choose a summary, and the
+    simulator refuses a matrix rather than averaging one.
+
+-   **Breaking.** The Python API resolves the PerTurbo v1 mode name
+    `efficiency_mode="scaled"` to `guide_effect_strategy="relative"`, with a
+    `DeprecationWarning`, rather than to `"shared"`. v1's enum was
+    `"scaled" | "mixture"` and both fit a per-guide efficacy - `"scaled"` is the
+    continuous multiplier that v2 renamed `"relative"` - so mapping it onto the
+    mode that fits none inverted the request. `"mixture"` now reports that v2
+    has no equivalent. `PerTurboModel`'s `efficiency_mode` default moves from
+    `"scaled"` to `None` so the default stays `"shared"`, matching the CLI;
+    without that, correcting the mapping alone would have switched every
+    unconfigured caller to `relative`. The CLI is unaffected throughout:
+    `--guide-effect-strategy` has always been `choices=("shared", "relative")`.
+    Callers relying on the old resolution - notably CRISPR_Pipeline - must pass
+    `guide_effect_strategy="shared"` explicitly.
+
+-   `fit_guide_efficacy=True` alongside `guide_effect_strategy="shared"` now
+    warns. The v1 flag is recorded in metadata and never read, so callers
+    setting it have been getting no guide efficacy while believing otherwise.
+
 ## [2.0.0rc11] - 2026-09-18
 
 ### Added

@@ -114,6 +114,17 @@ def _guide_efficacy_for_cli(
     guide_effect_strategy: str,
     n_guides: int,
 ) -> np.ndarray | None:
+    """The contents of ``guide_efficacy.npy``: (n_guides, n_genes) under ``relative``,
+    (n_guides,) of ones under ``shared``.
+
+    Relative efficiency is fitted per guide *and* gene, so this keeps that shape.
+    Averaging it over genes is not a summary of it: on a transcriptome-wide screen
+    almost every gene is null for any given element, efficiency is unidentified
+    there and sits at its prior, and the mean collapses onto the prior regardless
+    of what the identified pairs say. Under ``shared`` there is no fitted
+    efficiency at all - it is exactly 1.0 by construction - so the vector stays
+    one-dimensional rather than materialising a genes-wide array of ones.
+    """
     if str(guide_effect_strategy).lower() == "shared":
         return np.ones((int(n_guides),), dtype=np.float32)
     relative = beta_fit.guide_relative_efficiency_mean
@@ -122,9 +133,7 @@ def _guide_efficacy_for_cli(
     arr = np.asarray(relative, dtype=np.float32)
     if arr.shape[0] != int(n_guides):
         return None
-    if arr.ndim == 1:
-        return np.clip(arr, a_min=0.0, a_max=None)
-    return np.clip(arr.reshape(int(n_guides), -1).mean(axis=1), a_min=0.0, a_max=None).astype(np.float32)
+    return np.clip(arr, a_min=0.0, a_max=None).astype(np.float32)
 
 
 _GUIDE_POSTERIOR_FIELDS = (

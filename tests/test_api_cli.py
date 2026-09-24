@@ -1870,3 +1870,68 @@ def test_fit_from_path_maps_the_crt_keywords_onto_the_flags(monkeypatch) -> None
     api.fit_from_path("screen.h5mu", "out", modality_key="gene", perturbation_key="perturbation", control_substring="non-targeting")
     assert "--crt" not in captured["argv"]
     assert "--crt-only" not in captured["argv"]
+
+
+def test_legacy_efficiency_mode_names_resolve_to_the_mode_they_meant() -> None:
+    """PerTurbo v1 called the continuous per-guide efficiency "scaled". Mapping that
+    onto "shared" disables the feature the caller asked for, silently: "shared"
+    returns an efficacy of exactly 1.0 for every guide and writes no per-guide
+    estimates. It has to resolve to "relative", which is the v2 name for it."""
+    from perturbo.inference import _normalize_guide_effect_strategy as normalize
+
+    with pytest.deprecated_call():
+        assert normalize(None, "scaled") == "relative"
+
+    # An explicit strategy always wins over the legacy alias.
+    assert normalize("shared", "scaled") == "shared"
+    assert normalize("relative", "scaled") == "relative"
+
+    # The default stays "shared": no guide efficacy is fitted unless it is asked for.
+    assert normalize(None, None) == "shared"
+    assert normalize(None, "default") == "shared"
+    assert normalize(None, "same") == "shared"
+
+    # v1's other mode has no v2 equivalent, and should say so rather than fall
+    # through to the generic message.
+    with pytest.raises(ValueError, match="mixture"):
+        normalize(None, "mixture")
+
+
+def test_the_python_api_does_not_fit_guide_efficacy_by_default() -> None:
+    """The model class default has to match --guide-effect-strategy. Fitting
+    relative efficacy is a deliberate, expensive choice: it needs guide-level
+    inputs and blocks gene chunking, so it cannot be what an unconfigured caller
+    gets. The default only resolved to "shared" via the legacy-alias mapping, so
+    correcting that mapping had to move the default in the same change."""
+    import inspect
+
+    from perturbo.inference import PerTurboModel, _normalize_guide_effect_strategy
+
+    signature = inspect.signature(PerTurboModel.__init__)
+    api_default = _normalize_guide_effect_strategy(
+        signature.parameters["guide_effect_strategy"].default,
+        signature.parameters["efficiency_mode"].default,
+    )
+    assert api_default == "shared"
+
+
+def test_the_simulator_refuses_a_per_gene_efficacy_matrix() -> None:
+    """The simulator weights guides before the gene axis exists, so it needs one
+    value per guide. A relative fit's guide_efficacy is now (n_guides, n_genes);
+    silently averaging it would put the prior-dominated mean into the simulation,
+    which is what made Figure 6's efficacy pools flat."""
+    import perturbo.simulation.fitted as fitted
+
+    class _Model:
+        beta_fit = object()
+        control_fit = object()
+        guide_effect_strategy = "relative"
+
+    with pytest.raises(ValueError, match="one value per guide"):
+        fitted.simulate_data_from_trained_model(
+            model=_Model(),
+            guide_obs=np.zeros((4, 3), dtype=np.float32),
+            guide_by_element=np.zeros((3, 2), dtype=np.float32),
+            element_by_gene_lfc=np.zeros((2, 5), dtype=np.float32),
+            guide_efficacy=np.full((3, 5), 0.8, dtype=np.float32),
+        )

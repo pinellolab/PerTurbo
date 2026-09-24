@@ -737,7 +737,8 @@ def test_relative_guide_sharing_roundtrip_preserves_guide_outputs(tmp_path) -> N
     )
     expected_eff = np.asarray(medians["guide_relative_efficiency"], dtype=np.float32).reshape(
         len(model.guide_names), -1
-    ).mean(axis=1)
+    )
+    assert model.guide_efficacy.shape == expected_eff.shape
     np.testing.assert_allclose(model.guide_efficacy, expected_eff, rtol=1e-5, atol=1e-5)
     np.testing.assert_allclose(loaded.guide_efficacy, expected_eff, rtol=1e-5, atol=1e-5)
 
@@ -940,3 +941,16 @@ def test_train_rejects_mixed_step_and_epoch_schedule() -> None:
 
     with pytest.raises(ValueError, match="cannot be mixed"):
         model.train(max_epochs=2, steps=3, accelerator="cpu")
+
+
+def test_the_inert_v1_efficacy_flag_says_it_is_inert() -> None:
+    """CRISPR_Pipeline passes fit_guide_efficacy=True believing it turns guide
+    efficacy on. In v2 the flag is recorded in metadata and never read; the switch
+    is guide_effect_strategy. The mismatch should be audible."""
+    with pytest.warns(RuntimeWarning, match="no effect under"):
+        perturbo.PERTURBO(
+            _make_registered_mdata(),
+            likelihood="negbin",
+            guide_effect_strategy="shared",
+            fit_guide_efficacy=True,
+        )

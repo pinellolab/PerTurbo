@@ -316,6 +316,11 @@ def test_cli_saves_model_params_by_default_and_supports_opt_out(monkeypatch, tmp
     assert (tmp_path / "control_fit.npz").exists()
     assert (tmp_path / "beta_fit.npz").exists()
     assert (tmp_path / "guide_efficacy.npy").exists()
+    # Under "shared" there is no fitted efficacy, so this stays one value per
+    # guide rather than materialising a genes-wide array of ones.
+    shared_efficacy = np.load(tmp_path / "guide_efficacy.npy")
+    assert shared_efficacy.ndim == 1
+    np.testing.assert_allclose(shared_efficacy, 1.0)
     assert (tmp_path / "element_effects.parquet").exists()
     assert not (tmp_path / "mdata.h5mu").exists()
     assert not (tmp_path / "element_effects.csv").exists()

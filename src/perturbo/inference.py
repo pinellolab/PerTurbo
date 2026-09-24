@@ -68,11 +68,9 @@ def _guide_efficacy_from_model(
             f"guide_relative_efficiency_mean first dimension ({rel.shape[0]}) "
             f"must match number of guides ({n_guides})."
         )
-    if rel.ndim == 1:
-        eff = rel
-    else:
-        eff = rel.reshape(n_guides, -1).mean(axis=1)
-    return np.clip(np.asarray(eff, dtype=np.float32), a_min=0.0, a_max=None)
+    # Kept at (n_guides, n_genes). See _guide_efficacy_for_cli for why the mean
+    # over genes is not a usable summary of it.
+    return np.clip(rel, a_min=0.0, a_max=None)
 
 
 def _control_cell_keep_mask(mdata, setup: MuDataSetup) -> np.ndarray | None:
@@ -177,8 +175,25 @@ def _normalize_guide_effect_strategy(
         value = "shared"
     if value in {"shared", "relative"}:
         return value
-    if value in {"scaled", "default", "same"}:
+    if value == "scaled":
+        # PerTurbo v1 called the continuous per-guide efficiency "scaled"; v2 calls
+        # it "relative". Mapping it onto "shared" would silently disable the feature
+        # the caller asked for, so it resolves to the mode that actually fits it.
+        warnings.warn(
+            "efficiency_mode='scaled' is the PerTurbo v1 name for "
+            "guide_effect_strategy='relative'; pass 'relative' instead.",
+            DeprecationWarning,
+            stacklevel=3,
+        )
+        return "relative"
+    if value in {"default", "same"}:
         return "shared"
+    if value in {"mixture", "mixed"}:
+        raise ValueError(
+            "efficiency_mode='mixture' (the PerTurbo v1 Bernoulli guide-activity "
+            "mixture) has no equivalent in v2; use guide_effect_strategy='relative' "
+            "for a continuous per-guide efficiency."
+        )
     raise ValueError(
         "guide_effect_strategy must be one of: 'shared' or 'relative'."
     )
@@ -268,7 +283,7 @@ class PerTurboModel:
         setup: MuDataSetup | None = None,
         likelihood: str = "lnnb",
         effect_prior_dist: str = "normal",
-        efficiency_mode: str | None = "scaled",
+        efficiency_mode: str | None = None,  # legacy alias for guide_effect_strategy
         guide_effect_strategy: str | None = None,
         guide_activity_mode: str = "always_on",
         n_factors: int | None = None,
@@ -294,6 +309,17 @@ class PerTurboModel:
         )
         self.guide_effect_strategy = normalized_strategy
         self.guide_activity_mode = normalized_activity
+        if fit_guide_efficacy and normalized_strategy == "shared":
+            # v1's fit_guide_efficacy is recorded in metadata but has no effect in
+            # v2; guide_effect_strategy is the switch. Saying so beats fitting
+            # nothing while the caller believes otherwise.
+            warnings.warn(
+                "fit_guide_efficacy=True has no effect under "
+                "guide_effect_strategy='shared', which fixes every guide's efficacy "
+                "at 1.0. Pass guide_effect_strategy='relative' to fit it.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
         self.efficiency_mode = self.guide_effect_strategy
         self.n_factors = n_factors
         self.clip_gene_expression_percentile = clip_gene_expression_percentile
@@ -351,7 +377,10 @@ class PerTurboModel:
             model.covariate_transform_state = core.CovariateTransformState(**covariate_state_payload)
         loaded_guide_efficacy = loaded.get("guide_efficacy")
         if loaded_guide_efficacy is not None:
-            model._guide_efficacy = np.asarray(loaded_guide_efficacy, dtype=np.float32).reshape(-1)
+            # Shape-preserving: under "relative" this is (n_guides, n_genes), and
+            # flattening it would hand callers one long vector that still passes
+            # most sanity checks.
+            model._guide_efficacy = np.asarray(loaded_guide_efficacy, dtype=np.float32)
         else:
             try:
                 model._guide_efficacy = _guide_efficacy_from_model(

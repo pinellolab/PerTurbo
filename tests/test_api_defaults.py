@@ -54,3 +54,11 @@ def test_api_does_not_enable_crt_for_annotation_options(monkeypatch):
     assert "--crt" not in calls[0]
     assert "--crt-min-informative-cells" not in calls[0]
     assert "--no-crt-all-cells-batch-support" not in calls[0]
+
+
+def test_cli_guide_effect_strategy_default_is_shared(monkeypatch):
+    """The CLI half of the API-default assertion in test_api_cli.py. Fitting a
+    per-guide relative efficacy needs guide-level inputs and blocks gene
+    chunking, so neither entry point may reach for it on its own."""
+    parsed = _parsed(monkeypatch, ["--input", "screen.h5mu", "--out-dir", "out"])
+    assert parsed.guide_effect_strategy == "shared"
