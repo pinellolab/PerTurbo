@@ -476,36 +476,61 @@ def _source_provenance() -> tuple[str, str, str | None]:
     """
     import importlib.metadata as _md
     import re as _re
+    from urllib.parse import unquote as _url_unquote, urlparse as _urlparse
 
     import perturbo as _pkg
 
     source_dir = Path(_pkg.__file__).resolve().parent
     source = str(source_dir)
-    try:
-        installed = Path(_md.distribution("perturbo").locate_file("perturbo")).resolve()
-        installed_version = _md.version("perturbo")
-    except _md.PackageNotFoundError:
-        installed, installed_version = None, None
-    # An editable install locates to a path that does not exist; that is this
-    # checkout itself, not a shadow.
-    shadowing = installed is not None and installed.exists() and installed != source_dir
-    if not shadowing and installed_version is not None:
-        return installed_version, source, None
-    version = None
+    source_project = None
+    source_version = None
     for candidate in (source_dir.parent.parent / "pyproject.toml", source_dir.parent / "pyproject.toml"):
         if candidate.is_file():
             match = _re.search(r'^version\s*=\s*"([^"]+)"', candidate.read_text(), _re.M)
             if match:
-                version = match.group(1)
+                source_project = candidate.parent.resolve()
+                source_version = match.group(1)
                 break
-    if version is None:
-        version = "unknown (source tree without package metadata)"
-    note = None
-    if shadowing:
-        note = (
-            f"this is a source tree, not the installed package; the image's installed "
-            f"perturbo {installed_version} at {installed} is shadowed and NOT running"
+
+    try:
+        distribution = _md.distribution("perturbo")
+        installed = Path(distribution.locate_file("perturbo")).resolve()
+        installed_version = distribution.version
+    except _md.PackageNotFoundError:
+        distribution = None
+        installed = installed_version = None
+
+    installed_project = None
+    if distribution is not None:
+        try:
+            direct_url = json.loads(distribution.read_text("direct_url.json") or "null")
+        except (OSError, TypeError, ValueError):
+            direct_url = None
+        if isinstance(direct_url, dict) and direct_url.get("dir_info", {}).get("editable"):
+            parsed = _urlparse(str(direct_url.get("url", "")))
+            if parsed.scheme == "file":
+                installed_project = Path(_url_unquote(parsed.path)).resolve()
+
+    same_install = bool(
+        (installed is not None and installed.exists() and installed == source_dir)
+        or (
+            source_project is not None
+            and installed_project is not None
+            and installed_project == source_project
         )
+    )
+    if same_install and installed_version is not None:
+        return source_version or installed_version, source, None
+
+    version = source_version or "unknown (source tree without package metadata)"
+    if distribution is None:
+        return version, source, None
+
+    installed_location = installed_project or installed
+    note = (
+        f"the imported source at {source_dir} differs from the installed perturbo "
+        f"{installed_version} at {installed_location}; the installed package is shadowed and NOT running"
+    )
     return version, source, note
 
 
