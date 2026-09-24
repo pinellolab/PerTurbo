@@ -66,3 +66,31 @@ def test_row_chunking_does_not_change_the_answer(monkeypatch):
     chunked = _informative_cell_counts(**kw)
     np.testing.assert_array_equal(whole[0], chunked[0])
     np.testing.assert_allclose(whole[1], chunked[1], rtol=1e-6, atol=1e-6)
+
+
+def test_padded_chunks_and_empty_elements_match_host_reference(monkeypatch):
+    rng = np.random.default_rng(4)
+    genes, q, elements = 5, 3, 7
+    # Thirteen memberships require three five-row chunks. Elements 1, 4, and 6
+    # are intentionally empty, while repeated cells exercise high-MOI membership.
+    cell_index = np.array([0, 0, 1, 2, 3, 3, 4, 5, 6, 7, 8, 9, 10])
+    element_index = np.array([0, 2, 2, 3, 0, 5, 3, 5, 2, 0, 3, 5, 0])
+    member_cells, membership = _membership_matrix(cell_index, element_index, elements)
+    design = np.column_stack([np.ones(member_cells.size), rng.normal(size=(member_cells.size, q - 1))])
+    coefficients = rng.normal(scale=0.4, size=(q, genes))
+    offsets = rng.normal(scale=0.2, size=(member_cells.size, 1))
+    dispersion = np.exp(rng.normal(size=genes))
+    mean = np.exp(design @ coefficients + offsets)
+    counts = rng.negative_binomial(dispersion, dispersion / (dispersion + mean)).astype(np.float32)
+    problem = dict(
+        counts=counts,
+        nuisance_design=design,
+        offsets=offsets,
+        coefficients=coefficients,
+        dispersion=dispersion,
+        membership=membership,
+    )
+    monkeypatch.setattr(crt_module, "_DETECTION_ROWS_PER_CHUNK", 5 * genes)
+    if hasattr(crt_module._detection_counts_on_device, "clear_cache"):
+        crt_module._detection_counts_on_device.clear_cache()
+    _check(problem)

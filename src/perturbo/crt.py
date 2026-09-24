@@ -190,8 +190,10 @@ def _detection_counts_on_device(counts, design, offsets, coefficients, theta, el
     num_memberships = elements.shape[0]
     steps = -(-num_memberships // rows)
     pad = steps * rows - num_memberships
-    # pad memberships with a sentinel element that is dropped afterwards
-    elements_p = jnp.concatenate([elements, jnp.full((pad,), num_elements, dtype=elements.dtype)])
+    # Negative segment IDs are dropped by segment_sum.  Keeping padding out of
+    # the accumulator avoids routing every dummy row through one discarded
+    # bucket, where its atomic updates contend with each other on the device.
+    elements_p = jnp.concatenate([elements, jnp.full((pad,), -1, dtype=elements.dtype)])
     local_p = jnp.concatenate([local, jnp.zeros((pad,), dtype=local.dtype)])
 
     def body(step, acc):
