@@ -16,9 +16,12 @@ Chernoff bound about 3 nats looser. The raw Lugannani–Rice correction must be 
 probability; linear underflow alone is not a failure when the log probability
 is valid. A failing approximation uses `min(1, 2 * exp(K(t) - t * observed))`
 when the bound guards pass. A finite, nonnegative, nonoptimal tilt still gives
-a Chernoff bound: root-residual-only failures may therefore use that bound.
-Multiple failures do not get this relaxation. If no guarded bound is usable,
-the result is p=1. The checks are applied to the selected observed-side tail.
+a Chernoff bound, so a failure may use that bound whenever every bit it sets
+falls inside {16, 128}: the root residual, the raw Lugannani-Rice tail above
+one, or both together as 144. Neither bit impeaches the tilt itself - the root
+is bracketed and finite and `K(t) - t * observed` is finite - while every other
+bit (1, 2, 4, 8, 32, 64, 256, 512) still fails closed, alone or alongside 16 and
+128. If no guarded bound is usable, the result is p=1. The checks are applied to the selected observed-side tail.
 Exact support-boundary cases are handled directly.
 
 The symmetric convention retains its previous implementation. These diagnostics
