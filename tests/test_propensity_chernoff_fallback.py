@@ -78,11 +78,12 @@ def _frozen_policy_case():
     return jnp.asarray(observed), jnp.asarray(values), jnp.asarray(logits)
 
 
-def test_frozen_xaira_policy_regressions(monkeypatch):
+def test_frozen_xaira_policy_regressions_after_root_polish(monkeypatch):
     # Golden outputs cross-checked against the frozen successful Xaira wrapper
     # (full11194_newton_finite_bound_v4), finite-bound policy, at that wrapper's
     # 1e-6 root-residual tolerance. Seeded mixed Bernoulli contributions
-    # exercise LR failure and root-residual failure.
+    # exercise an LR failure and a formerly incomplete root solve. The clipped
+    # Newton polish now resolves the latter even at the old strict tolerance.
     monkeypatch.setattr(sp, "_PROPENSITY_ROOT_RESIDUAL_TOLERANCE", 1e-6)
     log_p, valid, diag = sp.propensity_saddlepoint_log_two_sided_diagnostics.__wrapped__(
         *_frozen_policy_case()
@@ -91,17 +92,15 @@ def test_frozen_xaira_policy_regressions(monkeypatch):
     assert int(diag.failure_reason_code[25]) == 32
     assert float(log_p[25]) == 0.
     assert bool(diag.fallback_used[25]) and bool(diag.chernoff_usable[25])
-    assert int(diag.failure_reason_code[67]) == 16
-    np.testing.assert_allclose(log_p[67], -0.4922154895294969, atol=1e-8)
-    assert bool(diag.fallback_used[67]) and bool(diag.chernoff_usable[67])
+    assert int(diag.failure_reason_code[67]) == 0
+    np.testing.assert_allclose(log_p[67], -2.7327796212938247, atol=1e-10)
+    assert not bool(diag.fallback_used[67])
 
 
-def test_default_tolerance_keeps_nearly_converged_roots_on_the_frozen_case():
-    # Under the shipped 1e-3 tolerance, column 67 (root residual 7e-6 null sd)
-    # is evaluated rather than bounded: log p -2.73 instead of the Chernoff
-    # -0.49. A 2e7-draw Monte Carlo of that column's equal-tail p gives
-    # log p = -5.74 +- 0.01, so both are conservative and the saddlepoint is
-    # the closer of the two. The LR-ratio failure on column 25 is unchanged.
+def test_default_tolerance_keeps_polished_roots_on_the_frozen_case():
+    # Column 67 now finishes at the root rather than relying on the tolerance
+    # to accept a nearly converged iterate. The LR-ratio failure on column 25
+    # is unchanged.
     log_p, valid, diag = sp.propensity_saddlepoint_log_two_sided_diagnostics(
         *_frozen_policy_case()
     )
@@ -109,8 +108,8 @@ def test_default_tolerance_keeps_nearly_converged_roots_on_the_frozen_case():
     assert int(diag.failure_reason_code[25]) == 32 and float(log_p[25]) == 0.
     assert int(diag.failure_reason_code[67]) == 0
     assert not bool(diag.fallback_used[67])
-    assert 1e-6 < float(diag.root_residual_null_sd[67]) < 1e-3
-    np.testing.assert_allclose(log_p[67], -2.732778, atol=1e-5)
+    assert float(diag.root_residual_null_sd[67]) <= 1e-12
+    np.testing.assert_allclose(log_p[67], -2.7327796212938247, atol=1e-10)
     assert float(log_p[67]) < -0.4922154895294969
 
 

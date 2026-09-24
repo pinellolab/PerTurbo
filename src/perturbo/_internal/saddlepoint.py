@@ -149,19 +149,39 @@ def _solve_stratified_saddlepoint(
     bracketed = (at_low <= target) & (at_high >= target)
 
     def refine(_, state):
-        t, low, high = state
+        t, low, high, previous = state
         _, first, second = _stratified_cgf_terms(
             t, pool, mask, selected, finite_population_factor
         )
         low = jnp.where(first < target, t, low)
         high = jnp.where(first < target, high, t)
-        newton = t + (target - first) / jnp.maximum(second, jnp.finfo(dtype).tiny)
-        inside = (newton > low) & (newton < high) & jnp.isfinite(newton)
-        return jnp.where(inside, newton, 0.5 * (low + high)), low, high
+        delta = (target - first) / jnp.maximum(second, jnp.finfo(dtype).tiny)
+        newton = t + delta
+        # Staying inside the bracket is insufficient on a flat-then-steep CGF:
+        # Newton can alternate between two interior points. Require progress
+        # relative to the preceding step, as in the rtsafe safeguard.
+        progressing = jnp.abs(2.0 * (target - first)) <= jnp.abs(previous * second)
+        inside = (newton > low) & (newton < high) & jnp.isfinite(newton) & progressing
+        return (
+            jnp.where(inside, newton, 0.5 * (low + high)),
+            low,
+            high,
+            jnp.where(inside, jnp.abs(delta), 0.5 * jnp.abs(high - low)),
+        )
 
     initial = jnp.zeros_like(target)
-    t_hat, _, _ = jax.lax.fori_loop(0, iterations, refine, (initial, low, high))
-    return t_hat, bracketed
+    t_hat, low, high, _ = jax.lax.fori_loop(
+        0, iterations, refine, (initial, low, high, jnp.abs(high - low))
+    )
+
+    def polish(_, t):
+        _, first, second = _stratified_cgf_terms(
+            t, pool, mask, selected, finite_population_factor
+        )
+        stepped = t + (target - first) / jnp.maximum(second, jnp.finfo(dtype).tiny)
+        return jnp.where(jnp.isfinite(stepped), jnp.clip(stepped, low, high), t)
+
+    return jax.lax.fori_loop(0, 3, polish, t_hat), bracketed
 
 
 def _solve_saddlepoint(target: jnp.ndarray, pool: jnp.ndarray, m: jnp.ndarray,
@@ -196,18 +216,31 @@ def _solve_saddlepoint(target: jnp.ndarray, pool: jnp.ndarray, m: jnp.ndarray,
     )
 
     def refine(_, state):
-        t, low, high = state
+        t, low, high, previous = state
         _, first, second = _cgf_terms(t, pool, m)
         low = jnp.where(first < target, t, low)
         high = jnp.where(first < target, high, t)
-        newton = t + (target - first) / jnp.maximum(second, 1e-300)
-        inside = (newton > low) & (newton < high) & jnp.isfinite(newton)
-        return (jnp.where(inside, newton, 0.5 * (low + high)), low, high)
+        delta = (target - first) / jnp.maximum(second, 1e-300)
+        newton = t + delta
+        progressing = jnp.abs(2.0 * (target - first)) <= jnp.abs(previous * second)
+        inside = (newton > low) & (newton < high) & jnp.isfinite(newton) & progressing
+        return (
+            jnp.where(inside, newton, 0.5 * (low + high)),
+            low,
+            high,
+            jnp.where(inside, jnp.abs(delta), 0.5 * jnp.abs(high - low)),
+        )
 
-    t_hat, low, high = jax.lax.fori_loop(
-        0, iterations, refine, (zero, low, high)
+    t_hat, low, high, _ = jax.lax.fori_loop(
+        0, iterations, refine, (zero, low, high, jnp.abs(high - low))
     )
-    return t_hat
+
+    def polish(_, t):
+        _, first, second = _cgf_terms(t, pool, m)
+        stepped = t + (target - first) / jnp.maximum(second, 1e-300)
+        return jnp.where(jnp.isfinite(stepped), jnp.clip(stepped, low, high), t)
+
+    return jax.lax.fori_loop(0, 3, polish, t_hat)
 
 
 def _lugannani_rice_log_sf(t_hat, cgf, second, observed):
@@ -1121,18 +1154,37 @@ def _solve_propensity_saddlepoint(
     high = jnp.maximum(bound, zero)
 
     def refine(_, state):
-        t, low, high = state
+        t, low, high, previous = state
         first, second = _propensity_cgf_derivatives(t, contribution, logits)
         low = jnp.where(first < target, t, low)
         high = jnp.where(first < target, high, t)
-        newton = t + (target - first) / jnp.maximum(second, jnp.finfo(jnp.float64).tiny)
-        inside = (newton > low) & (newton < high) & jnp.isfinite(newton)
-        return jnp.where(inside, newton, 0.5 * (low + high)), low, high
+        delta = (target - first) / jnp.maximum(second, jnp.finfo(jnp.float64).tiny)
+        newton = t + delta
+        # An interior Newton step can still alternate between two points.
+        # Require sufficient progress relative to the preceding accepted step;
+        # otherwise bisect and retain the bracket's convergence guarantee.
+        progressing = jnp.abs(2.0 * (target - first)) <= jnp.abs(previous * second)
+        inside = (newton > low) & (newton < high) & jnp.isfinite(newton) & progressing
+        return (
+            jnp.where(inside, newton, 0.5 * (low + high)),
+            low,
+            high,
+            jnp.where(inside, jnp.abs(delta), 0.5 * jnp.abs(high - low)),
+        )
 
-    t_hat, _, _ = jax.lax.fori_loop(
-        0, iterations, refine, (jnp.zeros_like(target), low, high)
+    t_hat, low, high, _ = jax.lax.fori_loop(
+        0, iterations, refine,
+        (jnp.zeros_like(target), low, high, jnp.abs(high - low)),
     )
-    return t_hat, bracketed
+
+    def polish(_, t):
+        first, second = _propensity_cgf_derivatives(t, contribution, logits)
+        stepped = t + (target - first) / jnp.maximum(
+            second, jnp.finfo(jnp.float64).tiny
+        )
+        return jnp.where(jnp.isfinite(stepped), jnp.clip(stepped, low, high), t)
+
+    return jax.lax.fori_loop(0, 3, polish, t_hat), bracketed
 
 
 @partial(jax.jit, static_argnames=("iterations", "two_sided"))
@@ -1249,8 +1301,10 @@ def _apply_root_residual_policy(
         raise ValueError("root_policy must be 'strict' or 'finite-bound'")
     if root_policy == "strict":
         return chernoff, usable
+    relaxable = jnp.int32(16 | 128)
     finite_bound_usable = (
-        (reason == 16) & (support_status == 1) & jnp.isfinite(tilt)
+        (reason != 0) & ((reason & ~relaxable) == 0)
+        & (support_status == 1) & jnp.isfinite(tilt)
         & (tilt >= 0.0) & jnp.isfinite(exponent)
     )
     bounded = jnp.minimum(jnp.log(2.0) + exponent, 0.0)
@@ -1273,8 +1327,8 @@ def propensity_saddlepoint_log_two_sided_diagnostics(
     alone is not failure: validity is evaluated in the log domain.
 
     On failure use min(1, 2 exp(K(t)-t*observed)) when its guards pass.
-    A correctly signed finite tilt remains a bound without root convergence;
-    relax the residual guard only when it is the sole diagnosed failure.
+    A correctly signed finite tilt remains a bound when the diagnosed failures
+    are limited to root residual (16), raw LR tail above one (128), or both.
     Otherwise return p=1. Exact support boundaries are not approximated.
     The legacy symmetric convention is unchanged and has no such diagnostics.
     """
@@ -1410,8 +1464,9 @@ def propensity_saddlepoint_log_two_sided_diagnostics(
     chernoff = choose(upper[9], lower[9])
     chernoff_usable = choose(upper[10], lower[10])
     # A finite, correctly signed, nonoptimal tilt still supplies a valid
-    # Chernoff bound.  Relax only the exact residual-only reason; every other
-    # numerical, support, sign, and finiteness guard remains fail closed.
+    # Chernoff bound. Relax only reasons composed of the residual and raw-LR
+    # bits; every other numerical, support, sign, and finiteness guard remains
+    # fail closed.
     chernoff, chernoff_usable = _apply_root_residual_policy(
         chernoff, chernoff_usable, reason, choose(upper[12], lower[12]),
         choose(upper[3], lower[3]), choose(upper[11], lower[11]),
