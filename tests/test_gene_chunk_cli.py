@@ -24,6 +24,27 @@ GUIDES = ["ctrl", "guide_a", "guide_b"]
 ELEMENTS = ["ctrl", "element_a", "element_b"]
 
 
+def test_all_cells_crt_width_reserves_gather_and_live_gene_buffers() -> None:
+    width, reason = cli_module._all_cells_crt_gene_block_size(
+        500,
+        num_cells=1_060_779,
+        device_bytes=16 * 1024**3,
+        max_gather_gib=8.0,
+    )
+    assert width == 100
+    assert "reserved 8.00 GiB" in reason
+
+
+def test_all_cells_crt_width_keeps_requested_width_when_it_fits() -> None:
+    width, _ = cli_module._all_cells_crt_gene_block_size(
+        64,
+        num_cells=10_000,
+        device_bytes=16 * 1024**3,
+        max_gather_gib=4.0,
+    )
+    assert width == 64
+
+
 def _write_cooccurring_screen(path: Path) -> tuple[np.ndarray, np.ndarray]:
     counts = np.array(
         [
@@ -206,6 +227,8 @@ def test_backed_gene_blocks_keep_the_joint_design_offsets_and_combined_posterior
 def test_gene_block_crt_only_has_the_same_screen_wide_p_and_q_values(tmp_path, monkeypatch) -> None:
     source = tmp_path / "screen.h5mu"
     _write_cooccurring_screen(source)
+    crt_gene_calls: list[tuple[str, ...]] = []
+    propensity_calls: list[tuple[str, ...]] = []
 
     def baseline(data, control, **kwargs):
         del control, kwargs
@@ -213,6 +236,7 @@ def test_gene_block_crt_only_has_the_same_screen_wide_p_and_q_values(tmp_path, m
 
     def crt_result(_baseline, data, **kwargs):
         del _baseline, kwargs
+        crt_gene_calls.append(tuple(data.gene_names))
         gene_ids = np.array([GENES.index(name) for name in data.gene_names], dtype=np.float64)
         row_ids = np.arange(len(data.pert_names), dtype=np.float64)[:, None]
         p_value = 0.01 * (row_ids + 1.0) + 0.001 * (gene_ids[None, :] + 1.0)
@@ -246,10 +270,21 @@ def test_gene_block_crt_only_has_the_same_screen_wide_p_and_q_values(tmp_path, m
     monkeypatch.setattr(api, "fit_control", _control_fit)
     monkeypatch.setattr(api, "_save_loss_plot", lambda *args, **kwargs: None)
     monkeypatch.setattr(cli_module, "prepare_crt_baseline", baseline)
-    monkeypatch.setattr(cli_module, "prepare_all_cells_propensity", lambda *args, **kwargs: object())
-    monkeypatch.setattr(cli_module, "run_crt_all_cells", crt_result)
+    def propensity(_baseline, data, **kwargs):
+        del _baseline, kwargs
+        propensity_calls.append(tuple(data.gene_names))
+        return object()
 
-    def run(out: Path, *, chunked: bool) -> pd.DataFrame:
+    monkeypatch.setattr(cli_module, "prepare_all_cells_propensity", propensity)
+    monkeypatch.setattr(cli_module, "run_crt_all_cells", crt_result)
+    monkeypatch.setattr(cli_module, "_device_memory_bytes", lambda _device: 16 * 1024**3)
+    monkeypatch.setattr(
+        api,
+        "fit_perturbation_effects",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("CRT-only ran stage two")),
+    )
+
+    def run(out: Path, *, chunked: bool, crt_only: bool = True) -> pd.DataFrame:
         argv = [
             "--input",
             str(source),
@@ -271,7 +306,6 @@ def test_gene_block_crt_only_has_the_same_screen_wide_p_and_q_values(tmp_path, m
             "1",
             "--backed",
             "--crt",
-            "--crt-only",
             "--crt-pool",
             "all-cells",
             "--crt-mechanism",
@@ -279,8 +313,12 @@ def test_gene_block_crt_only_has_the_same_screen_wide_p_and_q_values(tmp_path, m
             "--crt-tail-families",
             "saddlepoint",
             "--crt-saddlepoint-only",
+            "--crt-gene-chunk-size",
+            "3",
             "--no-save-model-params",
         ]
+        if crt_only:
+            argv.append("--crt-only")
         if chunked:
             argv.extend(["--gene-chunk-size", "2"])
         api.main(argv)
@@ -289,6 +327,34 @@ def test_gene_block_crt_only_has_the_same_screen_wide_p_and_q_values(tmp_path, m
         )
 
     full = run(tmp_path / "full", chunked=False)
+    assert crt_gene_calls == [tuple(GENES)]
+    assert propensity_calls == [tuple(GENES)]
+    crt_gene_calls.clear()
+    propensity_calls.clear()
     chunked = run(tmp_path / "chunked", chunked=True)
+    assert crt_gene_calls == [tuple(GENES[:3]), tuple(GENES[3:])]
+    assert propensity_calls == [tuple(GENES[:3])]
     for column in ("crt_saddlepoint_p_value", "crt_saddlepoint_q_value"):
         np.testing.assert_allclose(chunked[column], full[column], rtol=0.0, atol=0.0)
+
+    beta_gene_calls: list[tuple[str, ...]] = []
+
+    def beta_fit(data, control, **kwargs):
+        del control, kwargs
+        beta_gene_calls.append(tuple(data.gene_names))
+        shape = (len(data.pert_names), len(data.gene_names))
+        return api.BetaFit(
+            posterior_mean=jnp.zeros(shape),
+            posterior_scale=jnp.ones(shape),
+            z_values=jnp.zeros(shape),
+            losses=jnp.array([]),
+            svi_result=None,
+        )
+
+    monkeypatch.setattr(api, "fit_perturbation_effects", beta_fit)
+    crt_gene_calls.clear()
+    propensity_calls.clear()
+    run(tmp_path / "combined", chunked=True, crt_only=False)
+    assert crt_gene_calls == [tuple(GENES[:3]), tuple(GENES[3:])]
+    assert propensity_calls == [tuple(GENES[:3])]
+    assert beta_gene_calls == [tuple(GENES[:2]), tuple(GENES[2:4]), tuple(GENES[4:])]

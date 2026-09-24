@@ -307,6 +307,41 @@ def _auto_gene_block_size(num_cells: int, max_active: int, device_bytes: int | N
     return block, reason
 
 
+def _all_cells_crt_gene_block_size(
+    requested: int,
+    *,
+    num_cells: int,
+    device_bytes: int | None,
+    max_gather_gib: float,
+) -> tuple[int, str]:
+    """Bound the independent all-cells CRT gene schedule to its device budget.
+
+    ``crt_max_gather_gib`` bounds a different, target-axis temporary inside the
+    score kernel.  Reserve that budget first, then conservatively charge 40
+    bytes per cell/gene for counts plus the live float32/float64 baseline and
+    score buffers.  This avoids treating the gather cap as total device memory
+    while still allowing CRT blocks to be wider than stage-two blocks.
+    """
+
+    requested = max(1, int(requested))
+    total = int(device_bytes or _AUTO_GENE_BLOCK_FALLBACK_BYTES)
+    usable = int(total * 0.80)
+    gather = max(0, int(float(max_gather_gib) * 1024**3))
+    per_gene = max(1, int(num_cells)) * 40
+    memory_width = max(1, (usable - min(gather, usable - 1)) // per_gene)
+    width = min(requested, int(memory_width))
+    # Stable round widths make logs and compilation reuse easier at scale.
+    if width < requested and width >= 25:
+        width = (width // 25) * 25
+    source = "reported by the device" if device_bytes else "assumed (device memory not reported)"
+    reason = (
+        f"requested {requested}; reserved {gather / 1024**3:.2f} GiB for the target-axis gather "
+        f"and budgeted 40 bytes per cell/gene within 80% of "
+        f"{total / 1024**3:.0f} GiB {source}"
+    )
+    return max(1, width), reason
+
+
 def _gene_chunk_configuration_problem(args, size_factor_mode: str) -> str | None:
     """Gene blocks are independent only under the supported fixed-offset model."""
     if args.likelihood != "negbin":
@@ -1863,8 +1898,64 @@ def main(argv: list[str] | None = None) -> None:
                     full_panel_library_sizes[start:stop] = np.minimum(
                         np.asarray(block), gene_clip_thresholds[None, :]
                     ).sum(axis=1, dtype=np.float64)
+        independent_all_cells_crt = bool(args.crt and crt_pool == "all-cells")
+        if independent_all_cells_crt:
+            crt_device_bytes = _device_memory_bytes(args.device)
+            crt_requested_width = int(args.crt_gene_chunk_size)
+            if crt_device_bytes is None:
+                # An explicit stage-two width may be the user's only statement
+                # of a host/device limit.  Do not widen past it when the runtime
+                # cannot report an accelerator budget.
+                crt_requested_width = min(crt_requested_width, int(gene_chunk_size))
+            crt_width, crt_width_reason = _all_cells_crt_gene_block_size(
+                crt_requested_width,
+                num_cells=int(n_analysis_cells),
+                device_bytes=crt_device_bytes,
+                max_gather_gib=args.crt_max_gather_gib,
+            )
+            print(
+                f"[perturbo] All-cells CRT uses an independent {crt_width}-gene schedule "
+                f"({crt_width_reason}); stage two remains at {gene_chunk_size} genes."
+            )
+            for crt_start in range(0, n_genes, crt_width):
+                crt_stop = min(crt_start + crt_width, n_genes)
+                crt_slice = slice(crt_start, crt_stop)
+                print(f"[perturbo] CRT gene block {crt_start + 1}–{crt_stop}/{n_genes}")
+                loaded_crt = _load_all_analysis_cells(
+                    selected_gene_indices=crt_slice,
+                    full_panel_library_sizes=full_panel_library_sizes,
+                    design_cache=analysis_design_cache,
+                    return_design_cache=analysis_design_cache is None,
+                )
+                if analysis_design_cache is None:
+                    crt_data, analysis_design_cache = loaded_crt
+                else:
+                    crt_data = loaded_crt
+                del loaded_crt
+                if size_factor_mode == "none":
+                    crt_data.size_factors = _fixed_zero_size_factors(crt_data.counts)
+                all_perturbation_names = list(crt_data.pert_names)
+                if crt_accumulator is None:
+                    crt_accumulator = CRTAccumulator(
+                        element_names=tuple(all_perturbation_names),
+                        gene_names=tuple(analysis_gene_names),
+                        tail_families=tuple(args.crt_tail_families),
+                        saddlepoint_only=bool(args.crt_saddlepoint_only),
+                        min_informative_cells=float(args.crt_min_informative_cells),
+                    )
+                _run_all_cells_crt(
+                    crt_data,
+                    block_control_fit=subset_control_fit_genes(control_fit, crt_slice),
+                    accumulator=crt_accumulator,
+                )
+                del crt_data
+        if args.crt_only and independent_all_cells_crt:
+            beta_fit = _nan_beta_fit(len(all_perturbation_names), n_genes)
+            stage_two_skipped = True
+            analysis_data = None
+            print("[perturbo] --crt-only: stage two skipped; effect estimates are missing in the element table.")
         gene_posteriors: dict[str, np.ndarray] = {}
-        for start in range(0, n_genes, gene_chunk_size):
+        for start in (() if stage_two_skipped else range(0, n_genes, gene_chunk_size)):
             stop = min(start + gene_chunk_size, n_genes)
             gene_slice = slice(start, stop)
             print(f"[perturbo] Gene block {start + 1}–{stop}/{n_genes}: every cell and perturbation predictor retained")
@@ -1882,7 +1973,7 @@ def main(argv: list[str] | None = None) -> None:
                 analysis_data.size_factors = _fixed_zero_size_factors(analysis_data.counts)
             all_perturbation_names = list(analysis_data.pert_names)
             block_control_fit = subset_control_fit_genes(control_fit, gene_slice)
-            if args.crt:
+            if args.crt and crt_pool != "all-cells":
                 if crt_accumulator is None:
                     crt_accumulator = CRTAccumulator(
                         element_names=tuple(all_perturbation_names),
@@ -1891,42 +1982,37 @@ def main(argv: list[str] | None = None) -> None:
                         saddlepoint_only=bool(args.crt_saddlepoint_only),
                         min_informative_cells=float(args.crt_min_informative_cells),
                     )
-                if crt_pool == "all-cells":
-                    _run_all_cells_crt(
-                        analysis_data, block_control_fit=block_control_fit, accumulator=crt_accumulator
+                block_controls = replace(
+                    controls,
+                    counts=controls.counts[:, gene_slice],
+                    gene_names=analysis_gene_names[gene_slice],
+                )
+                block_baseline = prepare_crt_baseline(
+                    block_controls,
+                    block_control_fit,
+                    step_tolerance=args.crt_baseline_step_tolerance,
+                    strict=not args.crt_allow_unconverged_baseline,
+                    polish=args.crt_polish_baseline,
+                )
+                if crt_shares_selection_model and crt_shared_propensity is None:
+                    # Gene blocks keep every cell and every perturbation, so
+                    # this sees the whole screen already; it is fitted once
+                    # and reused, the selection model having no gene axis.
+                    _tested = _crt_tested_cell_mask(
+                        analysis_data,
+                        control_selector=args.control_substring,
+                        include_control_elements=args.crt_test_control_elements,
                     )
-                else:
-                    block_controls = replace(
-                        controls,
-                        counts=controls.counts[:, gene_slice],
-                        gene_names=analysis_gene_names[gene_slice],
+                    crt_shared_propensity = _fit_crt_shared_selection_model(
+                        None
+                        if analysis_data.covariates is None
+                        else np.asarray(analysis_data.covariates, dtype=np.float32)[_tested],
+                        int(np.count_nonzero(_tested)),
                     )
-                    block_baseline = prepare_crt_baseline(
-                        block_controls,
-                        block_control_fit,
-                        step_tolerance=args.crt_baseline_step_tolerance,
-                        strict=not args.crt_allow_unconverged_baseline,
-                        polish=args.crt_polish_baseline,
-                    )
-                    if crt_shares_selection_model and crt_shared_propensity is None:
-                        # Gene blocks keep every cell and every perturbation, so
-                        # this sees the whole screen already; it is fitted once
-                        # and reused, the selection model having no gene axis.
-                        _tested = _crt_tested_cell_mask(
-                            analysis_data,
-                            control_selector=args.control_substring,
-                            include_control_elements=args.crt_test_control_elements,
-                        )
-                        crt_shared_propensity = _fit_crt_shared_selection_model(
-                            None
-                            if analysis_data.covariates is None
-                            else np.asarray(analysis_data.covariates, dtype=np.float32)[_tested],
-                            int(np.count_nonzero(_tested)),
-                        )
-                    _run_crt_on_chunk(
-                        analysis_data, crt_accumulator,
-                        baseline_source=block_baseline, control_source=block_controls,
-                    )
+                _run_crt_on_chunk(
+                    analysis_data, crt_accumulator,
+                    baseline_source=block_baseline, control_source=block_controls,
+                )
             if analysis_data.guide_matrix is not None:
                 analysis_data = replace(analysis_data, guide_matrix=None, guide_to_element=None)
             if args.crt_only:
@@ -1961,14 +2047,13 @@ def main(argv: list[str] | None = None) -> None:
             # A combined posterior has no single SVI state. Retaining a block's
             # optimizer state would also keep its device buffers resident.
             del block_fit, block_control_fit
-        beta_fit = BetaFit(
-            **gene_posteriors,
-            losses=jnp.concatenate(chunk_losses) if chunk_losses else jnp.array([]),
-            svi_result=None,
-        )
-        stage_two_skipped = True
-        if args.crt_only:
-            print("[perturbo] --crt-only: stage two skipped; effect estimates are missing in the element table.")
+        if not stage_two_skipped:
+            beta_fit = BetaFit(
+                **gene_posteriors,
+                losses=jnp.concatenate(chunk_losses) if chunk_losses else jnp.array([]),
+                svi_result=None,
+            )
+            stage_two_skipped = True
     if chunks is not None and args.crt and crt_pool == "all-cells":
         # The all-cells pool needs every cell at once, whatever the stage-two
         # chunking does: load the full analysis data, test, and release it.
