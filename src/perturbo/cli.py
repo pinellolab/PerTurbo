@@ -629,7 +629,7 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument(
         "--crt-gene-chunk-size",
         type=int,
-        default=2000,
+        default=500,
         help=(
             "Genes per inner CRT block. The score gather scales with this times the cells per "
             "target times the resample block, so it is the main memory knob."

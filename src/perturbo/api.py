@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from . import cli, core
+from .crt import DEFAULT_CRT_MIN_INFORMATIVE_CELLS
 from .inference import PerTurboModel, PERTURBO
 from .io import MuDataSetup, get_mudata_setup, load_fit_bundle, save_fit_bundle, setup_mudata
 from .preprocessing import compute_gene_clip_thresholds, count_gene_outliers_per_cell
@@ -129,7 +130,7 @@ def fit_from_path(
     num_steps_betas: int | None = None,
     num_epochs_betas: int | None = None,
     num_particles: int = 1,
-    step_size: float = 0.003,
+    step_size: float = 0.01,
     num_factors: int = 0,
     minibatch_size: int = 0,
     minibatch_size_control: int = 0,
@@ -147,13 +148,15 @@ def fit_from_path(
     crt: bool = False,
     crt_num_resamples: int = 999,
     crt_seed: int = 0,
-    crt_gene_chunk_size: int = 2000,
+    crt_gene_chunk_size: int = 500,
     crt_max_gather_gib: float = 8.0,
     crt_tail_families: list[str] | tuple[str, ...] | None = None,
     crt_mechanism: str = "permutation",
     crt_saddlepoint_only: bool = False,
     crt_screen_p_value: float = 0.05,
     crt_two_sided: str = "equal-tail",
+    crt_min_informative_cells: float = DEFAULT_CRT_MIN_INFORMATIVE_CELLS,
+    crt_all_cells_batch_support: bool = True,
     crt_baseline_step_tolerance: float | None = None,
     crt_allow_unconverged_baseline: bool = False,
     crt_polish_baseline: bool = False,
@@ -178,6 +181,15 @@ def fit_from_path(
     ``'all-cells'`` for high MOI; ``None`` lets the CLI choose from the design).
     ``crt_only=True`` stops after stage one and the CRT, skipping the stage-two
     fit: the path for power calculations, where the posterior is not needed.
+    ``crt_min_informative_cells`` controls the low-information annotation;
+    ``crt_all_cells_batch_support`` limits all-cells resampling to batches
+    where each perturbation was observed, matching the CLI options.
+
+    The API and CLI share defaults of 0.01 for ``step_size`` and 500 for
+    ``crt_gene_chunk_size``. On a 16 GiB device, consider smaller CRT gene
+    blocks, ``max_chunk_size=25000``, and ``perturbation_chunk_size=270``
+    as starting settings; memory requirements depend on the cell count,
+    design, and available device memory. Explicit values are preserved.
 
     ``pairs_to_test`` names a two-column ``element,gene`` table. It does not
     change the run: every pair is still fitted and tested. A second effect
@@ -258,6 +270,12 @@ def fit_from_path(
             argv.append("--crt-saddlepoint-only")
         _append_cli_arg(argv, "--crt-screen-p-value", crt_screen_p_value)
         _append_cli_arg(argv, "--crt-two-sided", crt_two_sided)
+        _append_cli_arg(argv, "--crt-min-informative-cells", crt_min_informative_cells)
+        argv.append(
+            "--crt-all-cells-batch-support"
+            if crt_all_cells_batch_support
+            else "--no-crt-all-cells-batch-support"
+        )
         _append_cli_arg(argv, "--crt-baseline-step-tolerance", crt_baseline_step_tolerance)
         if crt_allow_unconverged_baseline:
             argv.append("--crt-allow-unconverged-baseline")
