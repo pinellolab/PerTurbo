@@ -10,6 +10,7 @@ import jax.numpy as jnp
 import mudata as md
 import numpy as np
 import pandas as pd
+import pytest
 import scipy.sparse as sp
 
 import perturbo.api as api
@@ -45,7 +46,7 @@ def test_all_cells_crt_width_keeps_requested_width_when_it_fits() -> None:
     assert width == 64
 
 
-def _write_cooccurring_screen(path: Path) -> tuple[np.ndarray, np.ndarray]:
+def _write_cooccurring_screen(path: Path, *, sparse_mapping: bool = False) -> tuple[np.ndarray, np.ndarray]:
     counts = np.array(
         [
             [1, 2, 3, 4, 5],
@@ -88,6 +89,9 @@ def _write_cooccurring_screen(path: Path) -> tuple[np.ndarray, np.ndarray]:
         index=GUIDES,
         columns=ELEMENTS,
     )
+    if sparse_mapping:
+        guides.varm["mapping"] = sp.eye(len(GUIDES), format="csr")
+        guides.uns["elements"] = ELEMENTS
     md.MuData({"rna": rna, "grna": guides}).write_h5mu(path)
     return counts, assignments
 
@@ -115,12 +119,13 @@ def _gene_values(row_count: int, gene_names: list[str], *, base: float) -> np.nd
     return base + 100.0 * row_ids + gene_ids[None, :]
 
 
+@pytest.mark.parametrize("strategy", ["shared", "relative"])
 def test_backed_gene_blocks_keep_the_joint_design_offsets_and_combined_posterior(
-    tmp_path, monkeypatch
+    tmp_path, monkeypatch, strategy
 ) -> None:
     source = tmp_path / "screen.h5mu"
     out = tmp_path / "out"
-    counts, assignments = _write_cooccurring_screen(source)
+    counts, assignments = _write_cooccurring_screen(source, sparse_mapping=strategy == "relative")
 
     original_load = api.load_analysis_cells
     requested_gene_indices: list[slice | None] = []
@@ -131,13 +136,17 @@ def test_backed_gene_blocks_keep_the_joint_design_offsets_and_combined_posterior
         return original_load(*args, **kwargs)
 
     def beta_fit(data, control, **kwargs):
-        del kwargs
+        assert kwargs["guide_effect_strategy"] == strategy
         assert isinstance(data.pert_id, IndexedDesignMatrix)
         dense_elements = np.asarray(indexed_design_to_dense(data.pert_id))
         np.testing.assert_array_equal(dense_elements, assignments)
         # Shared guide effects need only the grouped element design. Avoiding a
         # second indexed guide matrix is part of the memory-bounded path.
-        assert data.guide_matrix is None
+        if strategy == "shared":
+            assert data.guide_matrix is None
+        else:
+            np.testing.assert_array_equal(indexed_design_to_dense(data.guide_matrix), assignments)
+            np.testing.assert_array_equal(data.guide_to_element, np.eye(len(GUIDES)))
 
         names = list(data.gene_names)
         gene_ids = np.array([GENES.index(name) for name in names])
@@ -157,6 +166,9 @@ def test_backed_gene_blocks_keep_the_joint_design_offsets_and_combined_posterior
             posterior_mean=jnp.asarray(_gene_values(n_elements, names, base=0.0)),
             posterior_scale=jnp.asarray(_gene_values(n_elements, names, base=1_000.0)),
             z_values=jnp.asarray(_gene_values(n_elements, names, base=2_000.0)),
+            guide_relative_efficiency_mean=(
+                _gene_values(len(GUIDES), names, base=1.0) / 300 if strategy == "relative" else None
+            ),
             losses=jnp.array([], dtype=jnp.float32),
             svi_result=None,
         )
@@ -183,6 +195,9 @@ def test_backed_gene_blocks_keep_the_joint_design_offsets_and_combined_posterior
             "ctrl",
             "--likelihood",
             "negbin",
+            *(["--perturbation-element-names-uns-key", "elements"] if strategy == "relative" else []),
+            "--guide-effect-strategy",
+            strategy,
             "--gene-chunk-size",
             "2",
             "--num-steps-control",
@@ -214,7 +229,14 @@ def test_backed_gene_blocks_keep_the_joint_design_offsets_and_combined_posterior
         bundle["beta_arrays"]["posterior_scale"],
         _gene_values(len(ELEMENTS), GENES, base=1_000.0),
     )
-    assert bundle["guide_posteriors"] == {}
+    if strategy == "shared":
+        assert bundle["guide_posteriors"] == {}
+    else:
+        expected = _gene_values(len(GUIDES), GENES, base=1.0) / 300
+        np.testing.assert_array_equal(bundle["guide_posteriors"]["guide_relative_efficiency_mean"], expected)
+        np.testing.assert_array_equal(bundle["guide_efficacy"], expected)
+        exported = pd.read_parquet(out / "guide_efficiency.parquet")
+        np.testing.assert_array_equal(exported["posterior_mean"], expected.ravel())
 
     effects = pd.read_parquet(out / "element_effects.parquet")
     np.testing.assert_array_equal(effects["element"], np.repeat(ELEMENTS, len(GENES)))

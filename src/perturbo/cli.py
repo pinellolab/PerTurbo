@@ -13,6 +13,7 @@ import jax as _jax
 import jax.numpy as jnp
 import numpy as np
 import pandas as pd
+from scipy import sparse
 
 from .core import *  # noqa: F403 - CLI delegates to the fitting workflow namespace.
 from .core import (
@@ -359,8 +360,8 @@ def _gene_chunk_configuration_problem(args, size_factor_mode: str) -> str | None
         return "gene chunking requires observed or fixed-zero size factors"
     if args.num_factors or args.guide_random_effects or args.propagate_baseline_uncertainty:
         return "gene chunking requires zero latent factors and no guide random effects or baseline uncertainty propagation"
-    if args.guide_effect_strategy != "shared" or args.guide_activity_mode != "always_on":
-        return "gene chunking currently requires shared, always-on guide effects"
+    if args.guide_effect_strategy not in {"shared", "relative"} or args.guide_activity_mode != "always_on":
+        return "gene chunking currently requires shared or relative, always-on guide effects"
     if args.fit_perturbation_dispersion:
         return "gene chunking currently requires fixed perturbation dispersion"
     return None
@@ -1049,7 +1050,7 @@ def main(argv: list[str] | None = None) -> None:
             "Genes loaded and fit together in stage two; keeps every cell and perturbation predictor. "
             "0 uses perturbation chunks for mutually exclusive assignments and 256-gene blocks "
             "when co-occurring perturbations would otherwise be split. Requires plain NB with fixed "
-            "size factors, shared guide effects, and no latent factors or extra dispersion. "
+            "size factors, shared or relative guide effects, and no latent factors or extra dispersion. "
             "Control fitting remains capped by --max-control-cells."
         ),
     )
@@ -1434,6 +1435,8 @@ def main(argv: list[str] | None = None) -> None:
             pert_adata = pert_adata[analysis_adata_for_workflow.obs_names]
             all_guide_names = _extract_pert_names(pert_adata)
             pert_matrix = _get_layer_matrix(pert_adata, args.perturbation_layer)
+            active_guides = (np.asarray((pert_matrix > 0).sum(axis=1)).reshape(-1)
+                             if guide_effect_strategy == "relative" else None)
             if args.perturbation_element_varm_key is not None:
                 element_mapping, element_names = _load_perturbation_element_mapping(
                     data,
@@ -1459,7 +1462,7 @@ def main(argv: list[str] | None = None) -> None:
                     )
                 gene_chunk_size, block_reason = _auto_gene_block_size(
                     num_cells=int(pert_matrix.shape[0]),
-                    max_active=int(active_per_cell.max()),
+                    max_active=int(active_per_cell.max() if active_guides is None else active_guides.max()),
                     device_bytes=_device_memory_bytes(args.device),
                 )
                 print(
@@ -1870,6 +1873,7 @@ def main(argv: list[str] | None = None) -> None:
             covariate_transform_state=covariate_transform_state,
             retain_guide_structure=retain_guide_structure and (
                 gene_chunk_size is None
+                or guide_effect_strategy == "relative"
                 or (args.crt and crt_pool == "all-cells")
             ),
             library_size_center_log_mean=controls.library_size_center_log_mean,
@@ -1964,6 +1968,7 @@ def main(argv: list[str] | None = None) -> None:
             analysis_data = None
             print("[perturbo] --crt-only: stage two skipped; effect estimates are missing in the element table.")
         gene_posteriors: dict[str, np.ndarray] = {}
+        relative_parent_map = None
         for start in (() if stage_two_skipped else range(0, n_genes, gene_chunk_size)):
             stop = min(start + gene_chunk_size, n_genes)
             gene_slice = slice(start, stop)
@@ -2022,7 +2027,13 @@ def main(argv: list[str] | None = None) -> None:
                     analysis_data, crt_accumulator,
                     baseline_source=block_baseline, control_source=block_controls,
                 )
-            if analysis_data.guide_matrix is not None:
+            # The relative likelihood takes a dense guide-by-element map. Keep
+            # the much larger cell-by-guide design indexed across all blocks.
+            if guide_effect_strategy == "relative" and sparse.issparse(analysis_data.guide_to_element):
+                if relative_parent_map is None:
+                    relative_parent_map = jnp.asarray(analysis_data.guide_to_element.toarray(), dtype=jnp.float32)
+                analysis_data = replace(analysis_data, guide_to_element=relative_parent_map)
+            if guide_effect_strategy == "shared" and analysis_data.guide_matrix is not None:
                 analysis_data = replace(analysis_data, guide_matrix=None, guide_to_element=None)
             if args.crt_only:
                 block_fit = _nan_beta_fit(len(all_perturbation_names), stop - start)
@@ -2030,6 +2041,7 @@ def main(argv: list[str] | None = None) -> None:
                 block_fit = fit_perturbation_effects(
                     analysis_data,
                     block_control_fit,
+                    guide_effect_strategy=guide_effect_strategy,
                     num_steps=schedule.resolve_stage_steps(
                         stage="beta", num_cells=int(analysis_data.counts.shape[0]), minibatch_size=minibatch_betas,
                     ),
