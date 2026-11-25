@@ -119,10 +119,11 @@ def _gene_values(row_count: int, gene_names: list[str], *, base: float) -> np.nd
     return base + 100.0 * row_ids + gene_ids[None, :]
 
 
-@pytest.mark.parametrize("strategy", ["shared", "relative"])
+@pytest.mark.parametrize("spelling", ["shared", "relative", "scaled"])
 def test_backed_gene_blocks_keep_the_joint_design_offsets_and_combined_posterior(
-    tmp_path, monkeypatch, strategy
+    tmp_path, monkeypatch, spelling
 ) -> None:
+    strategy = "relative" if spelling == "scaled" else spelling
     source = tmp_path / "screen.h5mu"
     out = tmp_path / "out"
     counts, assignments = _write_cooccurring_screen(source, sparse_mapping=strategy == "relative")
@@ -197,7 +198,7 @@ def test_backed_gene_blocks_keep_the_joint_design_offsets_and_combined_posterior
             "negbin",
             *(["--perturbation-element-names-uns-key", "elements"] if strategy == "relative" else []),
             "--guide-effect-strategy",
-            strategy,
+            spelling,
             "--gene-chunk-size",
             "2",
             "--num-steps-control",

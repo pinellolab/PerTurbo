@@ -62,3 +62,11 @@ def test_cli_guide_effect_strategy_default_is_shared(monkeypatch):
     chunking, so neither entry point may reach for it on its own."""
     parsed = _parsed(monkeypatch, ["--input", "screen.h5mu", "--out-dir", "out"])
     assert parsed.guide_effect_strategy == "shared"
+
+def test_fit_from_path_forwards_scaled_gene_blocks(monkeypatch):
+    calls = []
+    monkeypatch.setattr(api, "main", lambda argv: calls.append(argv))
+    api.fit_from_path("screen.h5mu", "out", guide_effect_strategy="scaled", gene_chunk_size=32)
+    argv, = calls
+    assert argv[argv.index("--gene-chunk-size") + 1] == "32"
+    assert argv[argv.index("--guide-effect-strategy") + 1] == "scaled"

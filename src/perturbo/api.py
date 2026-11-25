@@ -135,6 +135,7 @@ def fit_from_path(
     minibatch_size: int = 0,
     minibatch_size_control: int = 0,
     minibatch_size_betas: int = 0,
+    gene_chunk_size: int = 0,
     perturbation_chunk_size: int = 0,
     max_chunk_size: int = 50000,
     backed: bool = False,
@@ -238,6 +239,7 @@ def fit_from_path(
     _append_cli_arg(argv, "--minibatch-size", minibatch_size)
     _append_cli_arg(argv, "--minibatch-size-control", minibatch_size_control)
     _append_cli_arg(argv, "--minibatch-size-betas", minibatch_size_betas)
+    _append_cli_arg(argv, "--gene-chunk-size", gene_chunk_size)
     _append_cli_arg(argv, "--perturbation-chunk-size", perturbation_chunk_size)
     _append_cli_arg(argv, "--max-chunk-size", max_chunk_size)
     if backed:

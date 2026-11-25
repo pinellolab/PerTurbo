@@ -923,8 +923,8 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument(
         "--guide-effect-strategy",
         default="shared",
-        choices=("shared", "relative"),
-        help="How guides targeting the same element share information during stage-2 fitting.",
+        choices=("shared", "relative", "scaled"),
+        help="Stage-two guide effects. The legacy spelling scaled selects relative efficiency.",
     )
     parser.add_argument(
         "--guide-activity-mode",
@@ -1162,6 +1162,8 @@ def main(argv: list[str] | None = None) -> None:
         raise ValueError(
             "--perturbation-element-names-uns-key requires --perturbation-element-varm-key."
         )
+    if args.guide_effect_strategy == "scaled":
+        args.guide_effect_strategy = "relative"
     guide_effect_strategy, guide_activity_mode = _validate_guide_strategy(
         args.guide_effect_strategy,
         args.guide_activity_mode,
