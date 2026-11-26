@@ -1,6 +1,7 @@
 import json
 
 import anndata as ad
+import h5py
 import mudata as md
 import numpy as np
 import pandas as pd
@@ -149,6 +150,30 @@ def test_restore_model(tmp_path, strategy):
                 np.testing.assert_array_equal(getattr(restored.beta_fit, field), guide[field])
     else:
         np.testing.assert_array_equal(restored.guide_efficacy, np.ones(3))
+
+
+@pytest.mark.parametrize("missing", [False, True])
+def test_restore_nullable_string_ids_checks_mask(tmp_path, missing):
+    from anndata.io import write_elem
+    from perturbo.inference import PerTurboModel
+
+    root = bundle(tmp_path / "old", "shared")
+    path = export(root, tmp_path / "new", primary="saddlepoint") / "fitted.h5mu"
+    with h5py.File(path, "r+") as handle, ad.settings.override(allow_write_nullable_strings=True):
+        table = handle["uns/_perturbo/effects"]
+        del table["element"]
+        values = ["A", pd.NA if missing else "B", "A", "B"]
+        write_elem(table, "element", pd.array(values, dtype="string"))
+        var = handle["mod/grna/var"]
+        key = var.attrs["_index"]
+        del var[key]
+        write_elem(var, key, pd.array(["a2", "b", "a1"], dtype="string"))
+    if missing:
+        with pytest.raises(ValueError, match="Missing fit identifier"):
+            PerTurboModel.load(path)
+    else:
+        model = PerTurboModel.load(path)
+        np.testing.assert_array_equal(model.beta_fit.posterior_mean, [[3, 1], [2, 4]])
 
 
 def test_low_moi_construct_design_and_categorical_fit_ids(tmp_path):

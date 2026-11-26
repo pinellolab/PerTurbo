@@ -48,9 +48,22 @@ def _axis_codes(column, expected):
     if isinstance(column, h5py.Dataset):
         strings = column.asstr()
         return lambda rows: expected.get_indexer(strings[rows])
-    if column.attrs.get("encoding-type") != "categorical":
+    encoding = column.attrs.get("encoding-type")
+    if encoding == "nullable-string-array":
+        values = column["values"].asstr()
+        mask = column["mask"]
+        if values.shape != mask.shape:
+            raise ValueError(f"Identifier values and mask differ in shape at {column.name}")
+
+        def read_strings(rows):
+            if mask[rows].any():
+                raise ValueError(f"Missing fit identifier at {column.name}")
+            return expected.get_indexer(values[rows])
+
+        return read_strings
+    if encoding != "categorical":
         raise ValueError(f"Unsupported identifier encoding at {column.name}")
-    lookup = expected.get_indexer(column["categories"].asstr()[:])
+    lookup = _axis_codes(column["categories"], expected)(slice(None))
     codes = column["codes"]
 
     def read(rows):
@@ -138,11 +151,11 @@ def _prepare_assays(path, metadata, setup, keep, offsets):
         pert = md.read_h5ad(path, mod=setup.perturbation_modality, backed="r")
         if keep is not None:
             pert = pert[rna.obs_names]
-        if not pert.obs_names.equals(rna.obs_names):
+        if not np.array_equal(pert.obs_names.to_numpy(), rna.obs_names.to_numpy()):
             raise ValueError("RNA and guide cell axes differ")
         mdata = md.MuData({setup.rna_modality: rna, setup.perturbation_modality: pert})
     actual_guide = mdata[setup.perturbation_modality].var_names
-    if not pd.Index(metadata["guide_names"]).equals(actual_guide):
+    if not np.array_equal(metadata["guide_names"], actual_guide.to_numpy()):
         raise ValueError("Guide IDs conflict with the fitted guide axis")
     actual_elements = _extract_element_names(
         mdata,
