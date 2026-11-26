@@ -146,7 +146,7 @@ def fit_from_path(
     single_frame: bool = False,
     save_model_params: bool = True,
     return_model: bool = False,
-    crt: bool = False,
+    crt: bool | None = None,
     crt_num_resamples: int = 999,
     crt_seed: int = 0,
     crt_gene_chunk_size: int = 500,
@@ -170,6 +170,7 @@ def fit_from_path(
     delegates to ``perturbo.api.main`` so Python and CLI fits share the same
     validation, loading, chunking, fitting, output, and light-bundle behavior.
 
+    Leave ``crt=None`` for the CLI default or pass ``crt=False`` for an effects-only fit.
     ``crt=True`` also runs the conditional randomization test against the
     stage-one baseline and adds ``crt_*`` columns to ``element_effects.parquet``.
     The testing methods build on SCEPTRE and spaCRT; see :mod:`perturbo.crt`
@@ -257,6 +258,8 @@ def fit_from_path(
         argv.append("--save-model-params")
     else:
         argv.append("--no-save-model-params")
+    if crt is False:
+        argv.append("--no-crt")
     if crt:
         argv.append("--crt")
         _append_cli_arg(argv, "--crt-num-resamples", crt_num_resamples)
