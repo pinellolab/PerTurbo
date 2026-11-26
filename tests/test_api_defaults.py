@@ -51,6 +51,7 @@ def test_api_does_not_enable_crt_for_annotation_options(monkeypatch):
     monkeypatch.setattr(api, "main", lambda argv: calls.append(argv))
     api.fit_from_path("screen.h5mu", "out", crt=False, crt_min_informative_cells=12,
                       crt_all_cells_batch_support=False)
+    assert _parsed(monkeypatch, calls[0]).crt is False
     assert "--crt" not in calls[0]
     assert "--crt-min-informative-cells" not in calls[0]
     assert "--no-crt-all-cells-batch-support" not in calls[0]
@@ -58,7 +59,16 @@ def test_api_does_not_enable_crt_for_annotation_options(monkeypatch):
 
 def test_cli_guide_effect_strategy_default_is_shared(monkeypatch):
     """The CLI half of the API-default assertion in test_api_cli.py. Fitting a
-    per-guide relative efficacy needs guide-level inputs and blocks gene
-    chunking, so neither entry point may reach for it on its own."""
+    per-guide relative efficacy needs guide-level inputs, so neither entry
+    point may reach for it on its own."""
     parsed = _parsed(monkeypatch, ["--input", "screen.h5mu", "--out-dir", "out"])
     assert parsed.guide_effect_strategy == "shared"
+
+def test_fit_from_path_forwards_scaled_gene_blocks(monkeypatch):
+    calls = []
+    monkeypatch.setattr(api, "main", lambda argv: calls.append(argv))
+    api.fit_from_path("screen.h5mu", "out", guide_effect_strategy="scaled", gene_chunk_size=32)
+    argv, = calls
+    assert _parsed(monkeypatch, argv).crt is None
+    assert argv[argv.index("--gene-chunk-size") + 1] == "32"
+    assert argv[argv.index("--guide-effect-strategy") + 1] == "scaled"

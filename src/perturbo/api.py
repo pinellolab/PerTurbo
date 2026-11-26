@@ -136,6 +136,7 @@ def fit_from_path(
     minibatch_size: int = 0,
     minibatch_size_control: int = 0,
     minibatch_size_betas: int = 0,
+    gene_chunk_size: int = 0,
     perturbation_chunk_size: int = 0,
     max_chunk_size: int = 50000,
     backed: bool = False,
@@ -146,7 +147,7 @@ def fit_from_path(
     single_frame: bool = False,
     save_model_params: bool = True,
     return_model: bool = False,
-    crt: bool = False,
+    crt: bool | None = None,
     crt_num_resamples: int = 999,
     crt_seed: int = 0,
     crt_gene_chunk_size: int = 500,
@@ -170,6 +171,7 @@ def fit_from_path(
     delegates to ``perturbo.api.main`` so Python and CLI fits share the same
     validation, loading, chunking, fitting, output, and light-bundle behavior.
 
+    Leave ``crt=None`` for the CLI default or pass ``crt=False`` for an effects-only fit.
     ``crt=True`` also runs the conditional randomization test against the
     stage-one baseline and writes primary p-values and named BH corrections
     alongside the diagnostic ``crt_*`` columns in ``element_effects.parquet``.
@@ -244,6 +246,7 @@ def fit_from_path(
     _append_cli_arg(argv, "--minibatch-size", minibatch_size)
     _append_cli_arg(argv, "--minibatch-size-control", minibatch_size_control)
     _append_cli_arg(argv, "--minibatch-size-betas", minibatch_size_betas)
+    _append_cli_arg(argv, "--gene-chunk-size", gene_chunk_size)
     _append_cli_arg(argv, "--perturbation-chunk-size", perturbation_chunk_size)
     _append_cli_arg(argv, "--max-chunk-size", max_chunk_size)
     if backed:
@@ -261,6 +264,8 @@ def fit_from_path(
         argv.append("--save-model-params")
     else:
         argv.append("--no-save-model-params")
+    if crt is False:
+        argv.append("--no-crt")
     if crt:
         argv.append("--crt")
         _append_cli_arg(argv, "--crt-num-resamples", crt_num_resamples)

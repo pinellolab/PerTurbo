@@ -463,3 +463,44 @@ def test_shared_mean_counts_an_element_once_when_two_guides_target_it() -> None:
     )
 
     np.testing.assert_allclose(np.asarray(trace["obs"]["fn"].mean), [[20.0]], rtol=1e-5)
+
+
+def test_relative_gene_blocks_preserve_every_conditional_mean_and_log_likelihood() -> None:
+    counts = jnp.array([[3, 2, 4], [6, 1, 2], [2, 5, 6]], dtype=jnp.int32)
+    guides = np.array([[1, 0, 0], [1, 1, 0], [0, 1, 1]], dtype=np.float32)
+    parents = jnp.array([[1, 0], [1, 0], [0, 1]], dtype=jnp.float32)
+    elements = (guides @ parents > 0).astype(jnp.float32)
+    beta = jnp.array([[0.2, -0.4, 0.3], [-0.1, 0.3, -0.6]], dtype=jnp.float32)
+    eta = jnp.array([[0.6, 0.9, 0.3], [0.8, 0.4, 0.2], [0.4, 0.3, 0.7]], dtype=jnp.float32)
+    beta_0 = jnp.array([0.8, 0.4, 1.2], dtype=jnp.float32)
+    theta = jnp.array([8.0, 18.0, 6.0], dtype=jnp.float32)
+    offsets = jnp.array([[0.0], [-0.3], [0.12]], dtype=jnp.float32)
+
+    def evaluate(columns, element_design, guide_design):
+        conditioned = numpyro.handlers.condition(
+            GuideSharedNegativeBinomialModel,
+            data={
+                "beta": beta[:, columns],
+                "guide_relative_efficiency": eta[:, columns],
+                "beta_0": beta_0[columns],
+                "theta": theta[columns],
+            },
+        )
+        block = counts[:, columns]
+        trace = numpyro.handlers.trace(numpyro.handlers.seed(conditioned, rng_seed=4)).get_trace(
+            block, element_design, size_factors=offsets, guide_matrix=guide_design,
+            guide_to_element=parents, guide_effect_strategy="relative",
+            num_cells=len(block), num_genes=block.shape[1], num_perts=len(beta), num_guides=len(eta),
+        )
+        observation = trace["obs"]["fn"]
+        return observation.mean, observation.log_prob(block)
+
+    dense_mean, dense_log_prob = evaluate(slice(None), elements, jnp.asarray(guides))
+    expected_mean = np.exp(beta_0 + offsets + guides @ ((parents @ beta) * eta))
+    np.testing.assert_allclose(dense_mean, expected_mean, rtol=1e-6)
+    indexed_guides = core.indexed_design_from_matrix(guides)
+    indexed_elements = core.indexed_design_from_matrix(np.asarray(elements))
+    for columns in (slice(0, 2), slice(2, 3)):
+        mean, log_prob = evaluate(columns, indexed_elements, indexed_guides)
+        np.testing.assert_allclose(mean, dense_mean[:, columns], rtol=1e-6)
+        np.testing.assert_allclose(log_prob, dense_log_prob[:, columns], rtol=1e-6)
