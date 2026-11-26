@@ -346,9 +346,20 @@ class PerTurboModel:
     @classmethod
     def load(cls, bundle_dir: str | Path, adata=None) -> "PerTurboModel":
         bundle_path = Path(bundle_dir)
+        if bundle_path.is_file() and bundle_path.suffix == ".h5mu":
+            if adata is not None:
+                raise ValueError("A fitted MuData file already contains its source assays")
+            from .fitted_restore import load_native_fit
+
+            loaded = load_native_fit(bundle_path)
+            return cls._from_saved_arrays(loaded, loaded["mdata"])
         is_light_bundle = not (bundle_path / "mdata.h5mu").exists()
         loaded = load_fit_bundle(bundle_path, source_data=adata if is_light_bundle else None)
         mdata = loaded["mdata"] if (adata is None or is_light_bundle) else adata
+        return cls._from_saved_arrays(loaded, mdata)
+
+    @classmethod
+    def _from_saved_arrays(cls, loaded, mdata):
         setup = get_mudata_setup(mdata)
         metadata = loaded["metadata"]
         model = cls(

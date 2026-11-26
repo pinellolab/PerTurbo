@@ -19,8 +19,18 @@ def bundle(path, strategy):
         var=pd.DataFrame(index=genes),
     )
     grna = ad.AnnData(np.eye(3, dtype=np.uint8), obs=pd.DataFrame(index=cells), var=pd.DataFrame(index=guides))
+    grna.varm["mapping"] = np.array([[1, 0], [0, 1], [1, 0]])
+    grna.uns["elements"] = elems
     md.MuData({"rna": rna, "grna": grna}).write_h5mu(path / "mdata.h5mu")
     meta = dict(
+        setup={
+            "rna_modality": "rna",
+            "perturbation_modality": "grna",
+            "guide_by_element_key": "mapping",
+            "guide_element_uns_key": "elements",
+        },
+        likelihood="negbin",
+        effect_prior_dist="normal",
         gene_names=genes,
         guide_names=guides,
         perturbation_names=elems,
@@ -44,7 +54,13 @@ def bundle(path, strategy):
     cis = df.iloc[[2, 0]].copy()
     cis["crt_saddlepoint_q_value"] = [0.31, 2e-200]
     cis.to_parquet(path / "element_effects_requested_pairs.parquet")
-    np.savez(path / "control_fit.npz", beta_0=np.ones(2, dtype="f4"), size_factors=np.array([4.0, 5.0]))
+    np.savez(
+        path / "control_fit.npz",
+        beta_0=np.ones(2, dtype="f4"),
+        theta=np.ones(2, dtype="f4"),
+        noise_scale=np.ones(2, dtype="f4"),
+        size_factors=np.array([4.0, 5.0]),
+    )
     np.save(path / "baseline_cell_indices.npy", [2, 0])
     np.save(path / "cell_keep_indices.npy", [0, 2])
     np.save(path / "size_factors.npy", [5.0, 4.0])
@@ -113,3 +129,48 @@ def test_mismatch_rejects_export(tmp_path):
     with pytest.raises(ValueError, match="Values differ"):
         export(root, tmp_path / "new", primary="saddlepoint")
     assert not (tmp_path / "new").exists()
+
+
+@pytest.mark.parametrize("strategy", ["shared", "relative"])
+def test_restore_model(tmp_path, strategy):
+    from perturbo.inference import PerTurboModel
+
+    root = bundle(tmp_path / "old", strategy)
+    name = export(root, tmp_path / "new", primary="saddlepoint") / "fitted.h5mu"
+    restored = PerTurboModel.load(name)
+    assert restored.element_names == ["A", "B"] and restored.gene_names == ["g2", "g1"]
+    np.testing.assert_equal(restored.beta_fit.posterior_mean, [[3, 1], [2, 4]])
+    np.testing.assert_array_equal(restored.control_fit.size_factors, [4, 5])
+    np.testing.assert_array_equal(restored.adata["rna"].obs["_perturbo_saved_size_factor"], [5, 4])
+    assert list(restored.adata["rna"].obs_names) == ["z", "y"]
+    if strategy == "relative":
+        with np.load(root / "guide_posteriors.npz") as guide:
+            for field in guide.files:
+                np.testing.assert_array_equal(getattr(restored.beta_fit, field), guide[field])
+    else:
+        np.testing.assert_array_equal(restored.guide_efficacy, np.ones(3))
+
+
+def test_low_moi_construct_design_and_categorical_fit_ids(tmp_path):
+    from perturbo.inference import PerTurboModel
+
+    root = bundle(tmp_path / "old", "shared")
+    native = export(root, tmp_path / "new", primary="saddlepoint") / "fitted.h5mu"
+    screen = md.read_h5mu(native)
+    pt = screen.uns["_perturbo"]
+    pt["metadata"].update(input_mode="low_moi", perturbation_key="gene_transcript", guide_names=["A", "B"])
+    del pt["metadata"]["setup"]["guide_by_element_key"]
+    del pt["metadata"]["setup"]["guide_element_uns_key"]
+    screen["rna"].obs["gene_transcript"] = ["B", "none", "A"]
+    for column in ["gene", "element"]:
+        pt["effects"][column] = pd.Categorical(pt["effects"][column])
+    native = tmp_path / "low_moi.h5mu"
+    screen.write_h5mu(native)
+    model = PerTurboModel.load(native)
+    np.testing.assert_array_equal(model.adata["grna"].X.toarray(), [[0, 1], [1, 0]])
+    np.testing.assert_array_equal(model.beta_fit.posterior_mean, [[3, 1], [2, 4]])
+    pt["effects"].iloc[0] = pt["effects"].iloc[-1]
+    corrupt = tmp_path / "duplicate.h5mu"
+    screen.write_h5mu(corrupt)
+    with pytest.raises(ValueError, match="Duplicate"):
+        PerTurboModel.load(corrupt)

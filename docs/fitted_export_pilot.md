@@ -23,4 +23,16 @@ A shared fit stores its strategy and omits the fixed-efficiency table. Relative 
 
 The reference Gasperini subset has 12,988 cells, 9 genes and 18 guides. Its relative-effect run yielded 81 element–gene rows, 162 guide–gene rows and three transformed covariates. The fit had 10,000 baseline offsets. Native modality IDs and counts and all baseline arrays were independently compared with the original files. This input has no primary significance test. Tests exercise missing and finite p/q-values including 1e-200, cis family alignment, reversed guide/gene table ordering and failure handling.
 
-This is an explicit conversion experiment. The existing CLI fit writer and model restoration API still use the rc12 layout. The new directory contains manuscript-scope tables rather than the full set of legacy posterior diagnostics. Replaced source files must be authenticated separately; gene-ID and shape checks alone cannot establish input identity. The converter reads the assays and tables into RAM and is unsuitable for full GWPS. Large-scale work needs a bounded-memory writer and a benchmark on real native DataFrame encoding. AnnData and MuData cross-version reserialization remains to be tested.
+## Restore a fitted model
+
+`PerTurboModel.load("fitted.h5mu")` restores the shared or relative stage-two fit and its saved control baseline. The reader streams native result-table columns into dense posterior arrays. It opens the RNA counts backed and reconstructs a low-MOI construct design from the original per-cell treatment labels. A source-cell filter combined with saved offsets or a gene-name override currently materializes the retained RNA slice. Budget memory for the fitted matrices themselves. The converter above still reads its inputs into RAM.
+
+Compare restored parameters against an existing directory bundle with
+
+```sh
+python -m perturbo.fitted_restore fitted.h5mu --reference-bundle /path/to/rc12_bundle
+```
+
+This checks the saved posterior means and scales, baseline parameters, size factors and fitted identifier axes. The reader recomputes derived z-values from their saved operands. The comparison allows three machine epsilons of relative error for CPU/GPU division. Repeated, missing or unknown pair identifiers fail restoration. Relative recovery on the real 9-gene subset passed these checks.
+
+The fit CLI continues writing rc12 bundles. Restoration currently covers complete shared and relative effect tables without fitted perturbation dispersion. The manuscript tables omit legacy posterior diagnostics outside this scope. Authenticate replacement source files separately, since matching gene IDs and shapes alone cannot establish input identity.
