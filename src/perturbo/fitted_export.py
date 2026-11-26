@@ -50,6 +50,20 @@ def _effects(root, metadata, test_meta, primary, cis):
     _check_keys(source, PAIR)
     _method(source, metadata)
     effects = source[PAIR + ["posterior_mean", "posterior_scale"]].copy()
+    if "p_value" in source:
+        saved_primary = test_meta.get("primary_test")
+        if saved_primary not in PRIMARY or (primary is not None and primary != saved_primary):
+            raise ValueError("Primary test conflicts with the fitted bundle metadata")
+        if cis and "cis_family" not in test_meta:
+            raise ValueError("This bundle did not declare a cis family at fit time")
+        names = ["p_value", "q_global", "q_element"]
+        if "q_cis" in test_meta["result_fields"]:
+            names.append("q_cis")
+        if ("q_cis" in source) != ("q_cis" in names):
+            raise ValueError("Cis results differ from the recorded correction family")
+        for name in names:
+            effects[name] = source[name].astype("float64")
+        return effects
     if primary is None:
         if cis or any(
             key in source and source[key].notna().any() for key in ("crt_p_value", "crt_saddlepoint_p_value")

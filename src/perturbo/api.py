@@ -98,6 +98,7 @@ def fit_from_path(
     out_dir: str | Path,
     *,
     pairs_to_test: str | Path | None = None,
+    cis_pairs: str | Path | None = None,
     modality_key: str | None = None,
     perturbation_key: str | None = None,
     perturbation_modality_key: str | None = None,
@@ -170,7 +171,8 @@ def fit_from_path(
     validation, loading, chunking, fitting, output, and light-bundle behavior.
 
     ``crt=True`` also runs the conditional randomization test against the
-    stage-one baseline and adds ``crt_*`` columns to ``element_effects.parquet``.
+    stage-one baseline and writes primary p-values and named BH corrections
+    alongside the diagnostic ``crt_*`` columns in ``element_effects.parquet``.
     The testing methods build on SCEPTRE and spaCRT; see :mod:`perturbo.crt`
     for references. PerTurbo does not introduce these statistical methods.
     ``crt_tail_families=None`` keeps the CLI default (the moment-fitted
@@ -195,10 +197,14 @@ def fit_from_path(
     change the run: every pair is still fitted and tested. A second effect
     table restricted to those pairs is written beside the transcriptome-wide
     one, with Benjamini-Hochberg recomputed within that smaller family, so a
-    single run yields both a cis-scale comparison and the full analysis.
+    single run yields both a restricted comparison and the full analysis.
+    Use ``cis_pairs`` to declare the candidate cis pairs for a single BH
+    correction in the main table. Testing always supplies global and
+    within-element BH corrections.
     """
     argv = ["--input", str(input_path), "--out-dir", str(out_dir)]
     _append_cli_arg(argv, "--pairs-to-test", pairs_to_test)
+    _append_cli_arg(argv, "--cis-pairs", cis_pairs)
     _append_cli_arg(argv, "--modality-key", modality_key)
     _append_cli_arg(argv, "--perturbation-key", perturbation_key)
     _append_cli_arg(argv, "--perturbation-modality-key", perturbation_modality_key)

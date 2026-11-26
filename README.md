@@ -118,11 +118,41 @@ concentrated in one batch. Add `--pairs-to-test pairs.parquet` (columns
 `element,gene`) to have a second table q-corrected over just those pairs; the
 fit and the test still cover every pair. `--no-crt` fits effects alone.
 
+### Choosing a discovery family
+
+Each tested element–gene pair has one primary raw `p_value`. The default
+saddlepoint-only run uses its saddlepoint p-value. Runs that draw resamples
+use the resampling p-value. All named q-values use this same primary test.
+
+| Column | Which question does a threshold answer? | Benjamini–Hochberg family |
+| --- | --- | --- |
+| `q_global` | Which associations can I report across my whole screen? | All finite element–gene tests together |
+| `q_element` | Which genes respond to this particular perturbation? | All finite response-gene tests for that element, corrected separately for each element |
+| `q_cis` | Which associations can I report across my predefined cis candidates? | All finite tests in the declared cis list, pooled across elements |
+
+Supply cis candidates before inspecting results with `--cis-pairs cis.tsv`
+or `fit_from_path(..., cis_pairs="cis.tsv")`. The file accepts CSV, TSV or
+Parquet with columns `element` and `gene`, using the identifiers in the fit.
+For example, a candidate list can use a genomic distance window specified
+before fitting. Include all candidates meeting that definition. Repeated pairs
+count once. Candidates outside the fitted axes and pairs without a finite
+test do not contribute to the denominator. Other rows have missing `q_cis`;
+the column is omitted when no cis pair has a finite test.
+
+Filtering the output preserves the named q-values. Choose the family for the
+claim you want to make. Pooling separate within-element discovery lists does
+not give screen-wide FDR control. The optional `--pairs-to-test` output keeps
+the named q-values and recomputes its legacy `crt_*q_value` columns over the
+requested set. A requested list is only designated cis by `--cis-pairs`.
+`crt_metadata.json` records the primary test, cis list and finite family
+sizes. Within-element counts follow the order of `metadata.json`'s
+`perturbation_names`.
+
 ### Outputs
 
 | file | contents |
 | --- | --- |
-| `element_effects.parquet` | one row per element-gene pair: effect size, CRT p-value and q-value |
+| `element_effects.parquet` | element–gene estimates, primary p-value and named BH corrections |
 | `element_effects_requested_pairs.parquet` | the same rows for `--pairs-to-test`, q-corrected within that set |
 | `crt_metadata.json` | the pool used and why, and the counts behind it |
 | `covariate_metadata.json` | the covariates and batch levels the design carried |

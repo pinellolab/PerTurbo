@@ -174,3 +174,23 @@ def test_low_moi_construct_design_and_categorical_fit_ids(tmp_path):
     screen.write_h5mu(corrupt)
     with pytest.raises(ValueError, match="Duplicate"):
         PerTurboModel.load(corrupt)
+
+
+def test_export_preserves_declared_fdr_families(tmp_path):
+    root = bundle(tmp_path / "bundle", "shared")
+    path = root / "element_effects.parquet"
+    fx = pd.read_parquet(path)
+    fx["p_value"] = fx["crt_saddlepoint_p_value"]
+    fx["q_global"] = fx["crt_saddlepoint_q_value"]
+    fx["q_element"] = [2e-200, 0.12, 0.31, np.nan]
+    fx["q_cis"] = [1e-200, np.nan, np.nan, np.nan]
+    fx.to_parquet(path, index=False)
+    fields = {name: {"column": name} for name in ["p_value", "q_global", "q_element", "q_cis"]}
+    meta = {"primary_test": "saddlepoint", "result_fields": fields, "cis_family": {"finite_p": 1}}
+    (root / "crt_metadata.json").write_text(json.dumps(meta))
+    dest = export(root, tmp_path / "new")
+    pt = md.read_h5mu(dest / "fitted.h5mu").uns["_perturbo"]
+    pd.testing.assert_frame_equal(pt["effects"][list(fields)].reset_index(drop=True), fx[list(fields)], check_exact=True)
+    assert pt["crt_metadata"]["cis_family"]["finite_p"] == 1
+    with pytest.raises(ValueError, match="Primary test"):
+        export(root, tmp_path / "mismatch", primary="resampling")

@@ -7,7 +7,13 @@ python -m perturbo.fitted_export /path/to/rc12_bundle /path/to/new_export \
   --source /path/to/original_assays.h5mu --primary saddlepoint --cis
 ```
 
-Supply the original assays when the saved input path has moved. Use `--primary resampling` for primary resampling results. Omit `--primary` for effects-only fits. Supply `--cis` only with independent knowledge that the requested pairs were a cis family. Outputs are published to a new directory after native MuData and Parquet results read back identically. Old bundle files remain untouched.
+New fits with named FDR columns record their primary test and family sizes in
+`crt_metadata.json`. For these bundles, omit `--primary` and `--cis` when
+exporting. The exporter copies `p_value`, `q_global`, `q_element`, and the
+optional `q_cis` from the main effect table. It preserves the saved values
+and missing entries in `mdata.uns["_perturbo"]["effects"]`.
+
+For older rc12 bundles, supply the original assays when the saved input path has moved. Use `--primary resampling` for primary resampling results. Omit `--primary` for effects-only fits. Supply `--cis` only with independent knowledge that the requested pairs were a cis family. Outputs are published to a new directory after native MuData and Parquet results read back identically. Old bundle files remain untouched.
 
 ```python
 import mudata

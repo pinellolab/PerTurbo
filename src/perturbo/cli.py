@@ -77,6 +77,7 @@ from .crt import (
     validate_crt_config,
 )
 from .core import control_cell_mask, measure_realized_moi
+from .fdr import FdrFamilies
 from .results import (
     build_guide_efficiency_df,
     load_pairs_to_test,
@@ -592,10 +593,15 @@ def main(argv: list[str] | None = None) -> None:
         help=(
             "Optional CSV/TSV/Parquet with columns element,gene. The run is unchanged - every "
             "pair is still fitted and tested - but a second effect table restricted to these "
-            "pairs is written beside the transcriptome-wide one, with Benjamini-Hochberg "
-            "recomputed within that family. Use it to obtain a cis-scale comparison and the "
-            "transcriptome-wide analysis from a single run."
+            "pairs is written beside the transcriptome-wide one. Legacy crt_*q_value fields "
+            "are recomputed over the requested set; named q_global, q_element and q_cis "
+            "retain their original families."
         ),
+    )
+    parser.add_argument(
+        "--cis-pairs", metavar="FILE",
+        help="CSV/TSV/Parquet of candidate element,gene pairs. Apply one BH correction "
+        "over finite tests in this set and include q_cis in the main effect table.",
     )
     parser.add_argument("--out-dir", required=True, help="Directory to write outputs")
     parser.add_argument("--modality-key", default=None, help="MuData modality key (e.g., rna)")
@@ -686,7 +692,7 @@ def main(argv: list[str] | None = None) -> None:
         help=(
             "Run conditional randomization testing based on SCEPTRE and spaCRT, against "
             "the stage-1 baseline, adding "
-            "crt_p_value/crt_q_value/crt_z_value to element_effects.parquet. On by default; "
+            "p_value, q_global, q_element and optional q_cis to element_effects.parquet. On by default; "
             "--no-crt fits the effects alone. It needs --size-factor-mode observed (or none), "
             "--likelihood nb, --num-factors 0, no --guide-random-effects, and one perturbation "
             "per cell: left to the default it steps aside with a message when the configuration "
@@ -1105,6 +1111,9 @@ def main(argv: list[str] | None = None) -> None:
     )
     parser.add_argument("--single-frame", action="store_true", help="Output long dataframe")
     args = parser.parse_args(argv)
+    if args.cis_pairs is not None and args.crt is False:
+        raise ValueError("--cis-pairs requires significance testing.")
+    cis_pairs = load_pairs_to_test(args.cis_pairs, option="cis-pairs") if args.cis_pairs is not None else None
     args.likelihood = _normalize_likelihood_name(args.likelihood)
     size_factor_mode = _resolve_cli_size_factor_mode(
         size_factor_mode=args.size_factor_mode,
@@ -1198,7 +1207,7 @@ def main(argv: list[str] | None = None) -> None:
             CRT_SADDLEPOINT_FAMILY
         ]
     crt_pool: str | None = None
-    crt_requested = args.crt is True or bool(args.crt_only)
+    crt_requested = args.crt is True or bool(args.crt_only) or cis_pairs is not None
     if args.crt is False:
         args.crt = False
     else:
@@ -1407,8 +1416,8 @@ def main(argv: list[str] | None = None) -> None:
         print(
             "[perturbo] --pairs-to-test given: the fit and the test still cover every "
             "perturbation and gene. The file selects the rows of a second table, "
-            "element_effects_requested_pairs.parquet, whose q-values are corrected "
-            "within that set alone."
+            "element_effects_requested_pairs.parquet. Its legacy crt_*q_value fields "
+            "use the requested set; named q-values keep their declared families."
         )
     if args.perturbation_chunk_size > 0:
         should_chunk = True
@@ -2394,10 +2403,9 @@ def main(argv: list[str] | None = None) -> None:
     else:
         null_z_values = null_z
     crt_columns = None
+    fdr = None
     if crt_accumulator is not None:
-        # Benjamini-Hochberg happens here and only here: it has to see every
-        # hypothesis at once, and each chunk was by construction only part of
-        # the family.
+        # Global BH uses the complete screen after all fit and gene chunks.
         crt_columns = crt_accumulator.finalize(streaming=True)
         if crt_accumulator.num_multi_assignment_cells_dropped:
             print(
@@ -2500,12 +2508,24 @@ def main(argv: list[str] | None = None) -> None:
         crt_metadata["perturbo_version"] = _version
         crt_metadata["perturbo_source"] = _source
         crt_metadata["perturbo_source_shadows_installed"] = _shadow_note is not None
+        fdr = FdrFamilies(
+            crt_columns,
+            primary="saddlepoint" if args.crt_saddlepoint_only else "resampling",
+            elements=all_perturbation_names,
+            genes=analysis_gene_names,
+            cis_pairs=cis_pairs,
+            cis_source=args.cis_pairs,
+        )
+        crt_metadata.update(fdr.metadata)
+        if cis_pairs is not None:
+            cis = fdr.metadata["cis_family"]
+            print(
+                f"[perturbo] Cis BH: {cis['declared_pairs']:,} declared pairs, "
+                f"{cis['matched_pairs']:,} on the fitted axes, {cis['finite_p']:,} with a p-value."
+            )
         (out_dir / "crt_metadata.json").write_text(json.dumps(crt_metadata, indent=2, default=str))
         tested = int(crt_accumulator.tested.sum())
-        primary = (
-            f"crt_{CRT_SADDLEPOINT_FAMILY}_p_value" if args.crt_saddlepoint_only else "crt_p_value"
-        )
-        finite = np.isfinite(crt_columns[primary])
+        finite = np.isfinite(fdr.p)
         print(
             f"[perturbo] CRT ({args.crt_mechanism}): {tested}/{len(all_perturbation_names)} elements "
             f"tested, {int(finite.sum())} pairs with a p-value."
@@ -2542,6 +2562,7 @@ def main(argv: list[str] | None = None) -> None:
         null_z_values=null_z_values,
         extra_columns=crt_columns,
         requested_pairs=requested_pairs,
+        fdr=fdr,
     )
     print(f"[perturbo] Wrote {element_effects_path}")
 
@@ -2555,7 +2576,7 @@ def main(argv: list[str] | None = None) -> None:
         print(
             f"[perturbo] Wrote {restricted_path}: {len(restricted):,} of {len(requested_pairs):,} requested pairs"
             + (f" ({missing:,} not present in the analysed grid)" if missing else "")
-            + "; q-values recomputed within this family."
+            + "; legacy test q-values recomputed within this family."
         )
 
     if guide_effect_strategy == "relative":

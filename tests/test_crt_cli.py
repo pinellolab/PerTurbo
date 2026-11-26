@@ -231,6 +231,10 @@ def test_the_crt_columns_are_absent_only_when_refused(tmp_path) -> None:
 def test_the_crt_writes_its_columns_and_finds_the_planted_effect(tmp_path) -> None:
     frame = _run_cli(tmp_path, "--crt", "--crt-mechanism", "permutation", "--crt-tail-families", "skew_normal", "student_t", "--crt-num-resamples", "199", "--crt-seed", "1")
 
+    np.testing.assert_array_equal(frame["p_value"], frame["crt_p_value"])
+    np.testing.assert_array_equal(frame["q_global"], frame["crt_q_value"])
+    assert "q_element" in frame and "q_cis" not in frame
+
     for column in ("crt_z_value", "crt_p_value", "crt_q_value"):
         assert column in frame.columns
 

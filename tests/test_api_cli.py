@@ -1854,6 +1854,7 @@ def test_fit_from_path_maps_the_crt_keywords_onto_the_flags(monkeypatch) -> None
         perturbation_element_names_uns_key="intended_targets",
         crt=True,
         crt_only=True,
+        cis_pairs="candidates.tsv",
         crt_pool="all-cells",
         crt_mechanism="propensity",
         crt_tail_families=("saddlepoint",),
@@ -1862,6 +1863,7 @@ def test_fit_from_path_maps_the_crt_keywords_onto_the_flags(monkeypatch) -> None
         crt_polish_baseline=True,
     )
     argv = captured["argv"]
+    assert argv[argv.index("--cis-pairs") + 1] == "candidates.tsv"
     for flag in ("--crt", "--crt-only", "--crt-saddlepoint-only", "--crt-allow-unconverged-baseline", "--crt-polish-baseline"):
         assert flag in argv
     for flag, value in (("--crt-pool", "all-cells"), ("--crt-mechanism", "propensity"), ("--crt-tail-families", "saddlepoint")):
