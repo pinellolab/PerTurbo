@@ -1,6 +1,12 @@
-# Fitted MuData pilot
+# Export and reload a fitted MuData file
 
-Local prototype against tag `v2.0.0rc12`. The command packages saved results without running a model or correcting p-values. Use it on small files that fit in memory.
+A fitted MuData file keeps the original assays, fit settings, effects, and test results together. The converter reads the directory bundle into memory, so the input and result tables must fit in RAM. The command below uses the named FDR columns and recorded primary test from a new fit.
+
+```bash
+python -m perturbo.fitted_export runs/gasperini gasperini-export
+```
+
+The export directory must be new. For a legacy rc12 bundle, identify the primary test explicitly. Include `--cis` only if the saved requested-pairs table contains the predefined cis family.
 
 ```sh
 python -m perturbo.fitted_export /path/to/rc12_bundle /path/to/new_export \

@@ -1,170 +1,86 @@
-# 🏎️ PerTurbo
+# PerTurbo
 
-## Robust GPU-accelerated differential expression for Perturb-seq
+PerTurbo estimates how CRISPR perturbations change gene expression in single cells. For each perturbed element and response gene, it reports an estimated natural-log fold change (lnFC) and a p-value. Screens with several guides per element can also estimate guide-specific efficiencies. The analysis runs on CPU or an NVIDIA GPU.
 
-**PerTurbo** delivers fast and accurate differential expression analyses for
-large-scale Perturb-seq experiments of up to millions of cells and thousands of CRISPR perturbations.
-It uses GPU accelerated routines for both Bayesian effect size estimation and 
-frequentist statistical testing to obtain fast and accurate inferences based on
-count-based regression models.
+## Start with your data
 
-Specifically, we use stochastic variational inference from NumPyro to obtain
-posterior estimates of perturbation effect sizes based on a Bayesian generalized linear model,
-we obtain calibrated frequentist p-values using a custom JAX implementation of the score-based 
-conditional randomization test, using a saddlepoint approximation to obtain calibrated tail probabilities
-based on the statistical approaches proposed in (Barry et al. 2024) and (Niu et al. 2024).
-
-## Installation
-
-PerTurbo requires Python 3.11 or newer. It is **not yet published on PyPI**; install
-it from GitHub, from a container image, or from a checkout.
-
-```bash
-# from GitHub, pinned to a release tag
-pip install "perturbo @ git+https://github.com/pinellolab/PerTurbo.git@v2.0.0rc11"
-
-# same, with JAX's CUDA 12 wheels for an NVIDIA GPU
-pip install "perturbo[cuda] @ git+https://github.com/pinellolab/PerTurbo.git@v2.0.0rc11"
-
-# from a checkout
-git clone https://github.com/pinellolab/PerTurbo.git
-cd PerTurbo && uv sync
-```
-
-Pin a tag rather than a branch: `v2-port` moves, and the mutable `v2-dev`
-container tag follows it.
-
-## Container image
-
-Released images are published to GHCR, which is usually easier than installing
-CUDA wheels yourself:
-
-```bash
-docker pull ghcr.io/pinellolab/perturbo:v2.0.0rc11
-docker run --rm --gpus all ghcr.io/pinellolab/perturbo:v2.0.0rc11 --help
-```
-
-On a cluster without Docker:
-
-```bash
-apptainer pull perturbo.sif docker://ghcr.io/pinellolab/perturbo:v2.0.0rc11
-apptainer exec --nv perturbo.sif perturbo --help
-```
-
-Pin a version tag, or a digest, rather than `v2-dev` or `latest`, both of which
-move. To build the image locally instead:
-
-```bash
-docker build --tag perturbo:local .
-docker run --rm --gpus all perturbo:local --help
-```
-
-The image uses JAX's CUDA 12 pip wheels, so the host must provide the NVIDIA
-Container Toolkit and a Linux NVIDIA driver version 525 or newer. Do not set
-`LD_LIBRARY_PATH` in the container: JAX uses its pip-installed CUDA libraries.
-GitHub Actions builds the `linux/amd64` image. Version tags publish releases;
-pushes to `v2-port` refresh the mutable `v2-dev` tag, and manual dispatches can
-also publish. Pull requests build and smoke-test the image without publishing.
-
-## Quick start
-
-The command line is the supported way to run a screen. It takes an `.h5ad` or
-`.h5mu` file, writes every result to a directory, and records what it did.
-
-### A low-MOI screen in an AnnData
-
-One perturbation per cell, named by a column of `adata.obs`:
-
-```bash
-perturbo --input screen.h5ad --out-dir results/ \
-  --perturbation-key perturbation \
-  --control-substring non-targeting \
-  --library-size-key total_counts \
-  --batch-covariate batch
-```
-
-`--perturbation-key` names the `obs` column holding each cell's perturbation,
-and `--control-substring` matches the control labels within it. The CRT runs by
-default and resamples each perturbation against the control cells plus its own.
-
-### A high-MOI screen in a MuData
-
-Several perturbations per cell, in a second modality:
-
-```bash
-perturbo --input screen.h5mu --out-dir results/ \
-  --modality-key rna \
-  --perturbation-modality-key grna \
-  --perturbation-layer guide_assignment \
-  --control-substring non-targeting \
-  --library-size-key total_counts \
-  --batch-covariate batch
-```
-
-`--perturbation-layer` should name the binary guide-by-cell assignment, not raw
-guide counts: with raw counts nearly every cell looks multiply assigned. To test
-elements rather than individual guides, add
-`--perturbation-element-varm-key element_targeted` (a guide-by-element indicator
-in `varm`) and `--perturbation-element-names-uns-key element_names`.
-
-
-### Useful defaults, and what to override
-
-`--crt` is on, `--size-factor-mode` is `observed`, and `--crt-pool` is `auto`,
-which reads the assignments and picks `control-anchored` for a low-MOI screen
-and `all-cells` for a high-MOI one. Set `--crt-pool` explicitly when the
-declared design and the assignments disagree, or when the control cells are
-concentrated in one batch. Add `--pairs-to-test pairs.parquet` (columns
-`element,gene`) to have a second table q-corrected over just those pairs; the
-fit and the test still cover every pair. `--no-crt` fits effects alone.
-
-### Choosing a discovery family
-
-Each tested element–gene pair has one primary raw `p_value`. The default
-saddlepoint-only run uses its saddlepoint p-value. Runs that draw resamples
-use the resampling p-value. All named q-values use this same primary test.
-
-| Column | Which question does a threshold answer? | Benjamini–Hochberg family |
-| --- | --- | --- |
-| `q_global` | Which associations can I report across my whole screen? | All finite element–gene tests together |
-| `q_element` | Which genes respond to this particular perturbation? | All finite response-gene tests for that element, corrected separately for each element |
-| `q_cis` | Which associations can I report across my predefined cis candidates? | All finite tests in the declared cis list, pooled across elements |
-
-Supply cis candidates before inspecting results with `--cis-pairs cis.tsv`
-or `fit_from_path(..., cis_pairs="cis.tsv")`. The file accepts CSV, TSV or
-Parquet with columns `element` and `gene`, using the identifiers in the fit.
-For example, a candidate list can use a genomic distance window specified
-before fitting. Include all candidates meeting that definition. Repeated pairs
-count once. Candidates outside the fitted axes and pairs without a finite
-test do not contribute to the denominator. Other rows have missing `q_cis`;
-the column is omitted when no cis pair has a finite test.
-
-Filtering the output preserves the named q-values. Choose the family for the
-claim you want to make. Pooling separate within-element discovery lists does
-not give screen-wide FDR control. The optional `--pairs-to-test` output keeps
-the named q-values and recomputes its legacy `crt_*q_value` columns over the
-requested set. A requested list is only designated cis by `--cis-pairs`.
-`crt_metadata.json` records the primary test, cis list and finite family
-sizes. Within-element counts follow the order of `metadata.json`'s
-`perturbation_names`.
-
-### Outputs
-
-| file | contents |
+| What do you have? | Where to start |
 | --- | --- |
-| `element_effects.parquet` | element–gene estimates, primary p-value and named BH corrections |
-| `element_effects_requested_pairs.parquet` | the same rows for `--pairs-to-test`, q-corrected within that set |
-| `crt_metadata.json` | the pool used and why, and the counts behind it |
-| `covariate_metadata.json` | the covariates and batch levels the design carried |
-| `control_fit.npz` | the stage-one control fit |
-| `guide_efficiency.parquet` | per-guide efficiency, when guide effects are estimated |
+| RNA counts and one assigned construct per cell | [Replogle low-MOI notebook](docs/tutorials/replogle.ipynb). Compare targeted cells with labeled non-targeting controls. |
+| RNA counts and multiple guide assignments per cell | [Gasperini high-MOI notebook](docs/tutorials/gasperini.ipynb). Map guides to elements, estimate their relative efficiencies, and test associations across all cells. |
+| RNA and guide sequencing reads | [CRISPR_Pipeline input and samplesheet guide](https://github.com/pinellolab/CRISPR_Pipeline/blob/8061b88d871b8fa2720c8484906de9b6d9cd7330/README.md). Start with preprocessing and guide assignment. The pipeline has its own configuration for downstream inference. |
 
+Both notebooks include small real datasets, complete commands, and plotted results. [Tutorial inputs and setup](docs/tutorials/index.md)
+
+## Install
+
+From this checkout, install the code and verify the command:
+
+```bash
+python -m pip install .
+perturbo --help
+```
+
+Use Python 3.11 or 3.12. For NVIDIA CUDA 12 support, install `".[cuda]"` in place of `.`. The published reference version for these tutorials is [v2.0.0rc12](https://github.com/pinellolab/PerTurbo/releases/tag/v2.0.0rc12). To install that specific version:
+
+```bash
+python -m pip install "perturbo @ git+https://github.com/pinellolab/PerTurbo.git@v2.0.0rc12"
+```
+
+The named FDR columns, fitted MuData export, and relative-mode gene blocking described below are available in this development checkout. The tutorial commands for running a screen also work with rc12. [Container and contributor setup](docs/contributing.md)
+
+## Run a screen
+
+Use raw RNA counts. When you subset genes, retain the library sizes calculated from the full expression matrix. The following commands use the two inputs shipped with this checkout.
+
+**One construct per cell.** In the Replogle example, `gene_transcript` identifies the perturbation and `non-targeting` identifies the control cells. `UMI_count` supplies the library size and `gem_group` identifies the batch.
+
+```bash
+perturbo --input docs/tutorials/inputs/replogle.h5ad --out-dir runs/replogle \
+  --perturbation-key gene_transcript --control-substring non-targeting \
+  --gene-name-key gene_name --library-size-key UMI_count --batch-covariate gem_group \
+  --crt-pool control-anchored --guide-effect-strategy shared \
+  --num-steps-control 2500 --num-steps-betas 1000 --step-size 0.01
+```
+
+**Multiple guides per cell.** The Gasperini input stores binary assignments in the `guide` modality. Its guide-by-element matrix identifies guides aimed at the same element, and its ordered element names identify the matrix columns. The relative fit estimates an element effect and a guide multiplier for each response gene.
+
+```bash
+perturbo --input docs/tutorials/inputs/gasperini.h5mu --out-dir runs/gasperini \
+  --modality-key gene --perturbation-modality-key guide --gene-name-key symbol \
+  --perturbation-element-varm-key guide_intended_target_pairs \
+  --perturbation-element-names-uns-key intended_targets \
+  --library-size-key total_umis --continuous-covariates total_umis percent_mito \
+  --batch-covariate prep_batch --crt-pool all-cells --guide-effect-strategy relative \
+  --num-steps-control 2500 --num-steps-betas 1000 --step-size 0.01
+```
+
+For a large fit, `--gene-chunk-size` can limit the number of response genes fitted together in stage two. See `perturbo --help` for supported modes and memory controls.
+
+## Read the results
+
+```python
+import pandas as pd
+
+effects = pd.read_parquet("runs/gasperini/element_effects.parquet")
+hits = effects.loc[effects["q_global"] < 0.1, ["element", "gene", "posterior_mean", "q_global"]]
+print(hits.sort_values("q_global").head())
+```
+
+A `posterior_mean` of −0.69 corresponds to roughly half the expression. In relative mode it is the parent element effect. The separate `guide_efficiency.parquet` table reports the guide multiplier in its `posterior_mean` column. Match the tables by **both element and response gene** to see the guides for a hit. Shared mode fixes the multiplier to one.
+
+Choose the correction family that matches the question. All three use Benjamini–Hochberg on finite values of the same primary `p_value`.
+
+| Question | Column | Tests corrected together |
+| --- | --- | --- |
+| Which associations can I report across my screen? | `q_global` | All tested element–gene pairs |
+| Which genes respond to this specific perturbation? | `q_element` | Tested response genes for that element |
+| Which of my predefined local associations are detected? | `q_cis` | All tested pairs in the supplied cis list, pooled across elements |
+
+To request `q_cis`, supply the complete candidate set with `--cis-pairs cis.tsv` (`element` and `gene` columns, using the fitted IDs). Other rows have missing `q_cis`. The column is omitted when no candidate has a finite test. The metadata records the primary test and family sizes. Filtering a result table preserves its named q-values. In rc12 saddlepoint-only runs, use `crt_saddlepoint_q_value` for screen-wide correction.
+
+The default output is a directory bundle. For a single file containing assays, results and fit parameters, see [exporting and reloading fitted MuData](docs/fitted_export_pilot.md).
 
 ## License
 
-PerTurbo is distributed under the GNU General Public License, version 3 or
-any later version (GPL-3.0-or-later). See [LICENSE](LICENSE) for the full terms
-and [NOTICE](NOTICE) for retained copyright and third-party license notices.
-
-## Manuscript
-Coming soon!
+PerTurbo is licensed under [GPL-3.0-or-later](LICENSE). [NOTICE](NOTICE) records the retained MIT and NumPyro attributions. Tutorial datasets are credited to their original providers in the [tutorial guide](docs/tutorials/index.md).

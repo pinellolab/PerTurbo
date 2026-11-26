@@ -17,7 +17,7 @@ uv run --with jupyterlab --with ipykernel jupyter lab docs/tutorials
 
 For a local Jupyter setup, you can also download the {download}`Gasperini notebook <gasperini.ipynb>` and {download}`Replogle notebook <replogle.ipynb>`. Put the {download}`Gasperini MuData <inputs/gasperini.h5mu>` and {download}`Replogle AnnData <inputs/replogle.h5ad>` in an adjacent `inputs/` folder and use a kernel with PerTurbo installed.
 
-The two examples use the rc12 results bundle. Read `element_effects.parquet` for estimated effects and test results. Gasperini also produces `guide_efficiency.parquet`. Each notebook shows how to use these tables directly in pandas.
+Both examples read a directory bundle and work with the named FDR columns or the original rc12 saddlepoint columns. Read `element_effects.parquet` for estimated effects and test results. Gasperini also produces `guide_efficiency.parquet`. Each notebook shows how to use these tables directly in pandas.
 
 ## Rebuild the teaching subsets
 

@@ -5,6 +5,7 @@
 # https://www.sphinx-doc.org/en/master/usage/configuration.html
 
 # -- Path setup --------------------------------------------------------------
+import os
 import sys
 from datetime import datetime
 from importlib.metadata import metadata
@@ -38,7 +39,7 @@ html_context = {
     "display_github": True,  # Integrate GitHub
     "github_user": "pinellolab",
     "github_repo": project_name,
-    "github_version": "main",
+    "github_version": os.environ.get("READTHEDOCS_GIT_COMMIT_HASH", "v2-port"),
     "conf_py_path": "/docs/",
 }
 
@@ -93,10 +94,10 @@ source_suffix = {
 
 intersphinx_mapping = {
     "python": ("https://docs.python.org/3", None),
-    "anndata": ("https://anndata.readthedocs.io/en/stable/", None),
+    "anndata": ("https://anndata.scverse.org/en/stable/", None),
     "scanpy": ("https://scanpy.readthedocs.io/en/stable/", None),
     "numpy": ("https://numpy.org/doc/stable/", None),
-    "jax": ("https://jax.readthedocs.io/en/latest/", None),
+    "jax": ("https://docs.jax.dev/en/latest/", None),
     "numpyro": ("https://num.pyro.ai/en/stable/", None),
 }
 

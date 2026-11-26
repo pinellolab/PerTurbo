@@ -1,6 +1,7 @@
 name: Test
 
 on:
+  workflow_dispatch:
   push:
     branches: [main, v2-port]
   pull_request:
@@ -29,7 +30,12 @@ jobs:
         with:
           enable-cache: true
       - run: uv sync --locked --group test
-      - run: uv run pytest
+      - run: uv run --locked --group test pytest -ra --junitxml=test-results.xml
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: tests-python-${{ matrix.python }}
+          path: test-results.xml
 
   clean-import:
     runs-on: ubuntu-latest
@@ -60,4 +66,5 @@ jobs:
         with:
           enable-cache: true
       - run: uv sync --locked --group test --extra legacy
-      - run: uv run pytest tests/legacy
+      - run: uv run --locked --group test --extra legacy python -c "import pyro, scvi, torch"
+      - run: uv run --locked --group test --extra legacy pytest -ra tests/legacy

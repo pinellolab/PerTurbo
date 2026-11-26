@@ -1,6 +1,7 @@
 name: Check build
 
 on:
+  workflow_dispatch:
   push:
     branches: [main, v2-port]
   pull_request:
@@ -20,3 +21,26 @@ jobs:
       - run: uv venv /tmp/perturbo-wheel
       - run: uv pip install --python /tmp/perturbo-wheel/bin/python dist/*.whl
       - run: /tmp/perturbo-wheel/bin/perturbo --help
+      - name: Run tutorials and build docs using the installed wheel
+        env:
+          JAX_PLATFORM_NAME: cpu
+          MPLBACKEND: Agg
+        run: |
+          wheel=(dist/*.whl)
+          uv pip install --python /tmp/perturbo-wheel/bin/python "${wheel[0]}[docs]"
+          export PATH="/tmp/perturbo-wheel/bin:$PATH"
+          jupyter execute --inplace --timeout=600 docs/tutorials/gasperini.ipynb docs/tutorials/replogle.ipynb
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          for screen in ("gasperini", "replogle"):
+              notebook = json.loads(Path(f"docs/tutorials/{screen}.ipynb").read_text())
+              outputs = [out for cell in notebook["cells"] for out in cell.get("outputs", [])]
+              assert any("image/png" in out.get("data", {}) for out in outputs), screen
+          PY
+          for screen in gasperini replogle; do
+            bundle="docs/tutorials/runs/$screen"
+            python -m perturbo.fitted_export "$bundle" "$RUNNER_TEMP/export-$screen"
+            python -m perturbo.fitted_restore "$RUNNER_TEMP/export-$screen/fitted.h5mu" --reference-bundle "$bundle"
+          done
+          sphinx-build -W --keep-going -b html docs docs/_build/html

@@ -8,6 +8,13 @@ and this project adheres to [Semantic Versioning][].
 [keep a changelog]: https://keepachangelog.com/en/1.0.0/
 [semantic versioning]: https://semver.org/spec/v2.0.0.html
 
+## Unreleased
+
+- The main effect table records one primary p-value and BH adjustments across the screen, within each element, and across an optional prespecified cis list. Use `--cis-pairs` to supply the cis family. The existing method-specific columns remain available.
+- Relative (scaled) guide-efficiency fits support stage-two gene blocking and retain guide-by-gene estimates across blocks.
+- A fitted bundle can be exported to a single MuData file and reloaded. The exported tables preserve the fitted values and their declared test families.
+- Added executable Gasperini high-MOI and Replogle low-MOI analysis tutorials with compact real inputs.
+
 ## [2.0.0rc12] - 2026-09-24
 
 ### Changed

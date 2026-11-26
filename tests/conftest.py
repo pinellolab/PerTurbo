@@ -17,6 +17,7 @@ def _resolve_test_output_dir(*parts: str) -> Path:
 
 
 def pytest_configure() -> None:
+    os.environ.setdefault("MPLBACKEND", "Agg")
     os.environ.setdefault("CORTADO_TEST_OUTPUT_DIR", str(DEFAULT_TEST_OUTPUT_DIR))
 
 
