@@ -242,6 +242,7 @@ def prepare_bordered_propensity(
     )
 
 
+@jax.enable_x64()
 @partial(jax.jit, static_argnames=("max_iterations",))
 def _logistic_irls_bordered(
     indicators: jnp.ndarray,
@@ -265,7 +266,12 @@ def _logistic_irls_bordered(
         # eps I in Q coordinates is eps Z'Z here, including all global
         # design rows even when a model's likelihood uses only a subset.
         information = BorderedInfo(*(block + damp for block, damp in zip(information, damping)))
-        return coef + solve(design, information, gradient), None
+        # Eliminating batch indicators subtracts nearly equal curvature terms
+        # when a level has very few assignments. Widen only the small system;
+        # cell arrays, fitted coefficients and the returned basis stay float32.
+        small_system = jax.tree.map(lambda block: block.astype(jnp.float64), information)
+        update = solve(design, small_system, gradient.astype(jnp.float64))
+        return coef + update.astype(coef.dtype), None
 
     coef, _ = jax.lax.scan(
         step,
