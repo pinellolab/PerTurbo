@@ -199,8 +199,8 @@ def build_standard_element_effects_df(
 
 NON_FLOAT_EXTRA_COLUMNS = frozenset(
     {
-        "crt_observed_nonzero",
-        "crt_low_information",
+        "observed_nonzero",
+        "low_information",
         "crt_tail_failure_reason",
         "crt_used_chernoff",
         "crt_used_conservative_one",
@@ -210,7 +210,7 @@ NON_FLOAT_EXTRA_COLUMNS = frozenset(
 
 Every other extra column is a probability or a statistic and float64 is the
 right container for it. A cell count is an integer and a flag is a boolean, and
-a consumer that has to compare ``crt_low_information == 1.0`` to read a yes/no
+a consumer that has to compare ``low_information == 1.0`` to read a yes/no
 is being handed the wrong type. Named explicitly rather than inferred from the
 array's dtype, so that adding a boolean column elsewhere cannot silently change
 the parquet schema of a column that already ships as a double (the tail

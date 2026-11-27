@@ -10,6 +10,8 @@ and this project adheres to [Semantic Versioning][].
 
 ## Unreleased
 
+- With `--report-low-information` or an explicit `--crt-min-informative-cells` threshold, `observed_nonzero`, `expected_nonzero` and `low_information` replace their `crt_`-prefixed names. Fitted MuData exports preserve these columns from new and older bundles when available.
+
 - The main effect table records one primary p-value and BH adjustments across the screen, within each element, and across an optional prespecified cis list. Use `--cis-pairs` to supply the cis family. The existing method-specific columns remain available.
 - Relative (scaled) guide-efficiency fits support stage-two gene blocking and retain guide-by-gene estimates across blocks.
 - A fitted bundle can be exported to a single MuData file and reloaded. The exported tables preserve the fitted values and their declared test families.

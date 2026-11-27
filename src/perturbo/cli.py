@@ -802,13 +802,17 @@ def main(argv: list[str] | None = None) -> None:
         ),
     )
     parser.add_argument(
+        "--report-low-information", action="store_true",
+        help="Include observed_nonzero, expected_nonzero and low_information in the per-pair output.",
+    )
+    parser.add_argument(
         "--crt-min-informative-cells",
         type=float,
-        default=DEFAULT_CRT_MIN_INFORMATIVE_CELLS,
+        default=None,
         help=(
-            "Flag a pair as low-information when neither the element's detected cells for the gene "
-            "(crt_observed_nonzero) nor the number the fitted null expected to detect "
-            "(crt_expected_nonzero) reaches this many. It is a flag and nothing else: p-values, "
+            "Also enables per-pair reporting. Default threshold: 5. Flag a pair as low-information when neither the element's detected cells for the gene "
+            "(observed_nonzero) nor the number the fitted null expected to detect "
+            "(expected_nonzero) reaches this many. It is a flag and nothing else: p-values, "
             "q-values and validity are identical with it set to any value. 0 keeps the two count "
             "columns and flags nothing."
         ),
@@ -1112,6 +1116,10 @@ def main(argv: list[str] | None = None) -> None:
     )
     parser.add_argument("--single-frame", action="store_true", help="Output long dataframe")
     args = parser.parse_args(argv)
+    if args.crt_min_informative_cells is None:
+        args.crt_min_informative_cells = DEFAULT_CRT_MIN_INFORMATIVE_CELLS
+    else:
+        args.report_low_information = True
     if args.cis_pairs is not None and args.crt is False:
         raise ValueError("--cis-pairs requires significance testing.")
     cis_pairs = load_pairs_to_test(args.cis_pairs, option="cis-pairs") if args.cis_pairs is not None else None
@@ -2478,8 +2486,8 @@ def main(argv: list[str] | None = None) -> None:
         # data cannot support, and that is where two runs of the same binary
         # disagree.
         crt_metadata["min_informative_cells"] = float(args.crt_min_informative_cells)
-        if "crt_low_information" in crt_columns:
-            flagged = np.asarray(crt_columns["crt_low_information"], dtype=bool)
+        if "low_information" in crt_columns:
+            flagged = np.asarray(crt_columns["low_information"], dtype=bool)
             primary_q = crt_columns[
                 f"crt_{CRT_SADDLEPOINT_FAMILY}_q_value"
                 if CRT_SADDLEPOINT_FAMILY in crt_accumulator.tail_families
@@ -2514,6 +2522,9 @@ def main(argv: list[str] | None = None) -> None:
                 f"q<0.05; {genes_all_flagged:,} of {len(analysis_gene_names):,} genes are flagged "
                 "for every element. Flag only; no p-value or q-value changed."
             )
+        if not args.report_low_information:
+            for name in ("observed_nonzero", "expected_nonzero", "low_information"):
+                crt_columns.pop(name, None)
         # How the control cells sit across the batch levels. Both pools are
         # interpreted differently when the controls are confined to one level, and
         # neither the p-values nor the effect sizes say so on their own.

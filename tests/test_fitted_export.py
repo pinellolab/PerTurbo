@@ -111,6 +111,23 @@ def test_native_export(tmp_path, strategy):
     assert (dest / "guide_efficiency.parquet").exists() == (strategy == "relative")
 
 
+@pytest.mark.parametrize("prefix", ["", "crt_"])
+def test_detection_annotations_round_trip(tmp_path, prefix):
+    root = bundle(tmp_path / "bundle", "shared")
+    path = root / "element_effects.parquet"
+    table = pd.read_parquet(path)
+    annotations = pd.DataFrame({
+        "observed_nonzero": [0, 3, 5, 0],
+        "expected_nonzero": [1.5, 4.0, 8.0, 0.0],
+        "low_information": [True, True, False, False],
+    })
+    pd.concat([table, annotations.add_prefix(prefix)], axis=1).to_parquet(path, index=False)
+    dest = export(root, tmp_path / "export", primary="saddlepoint")
+    effects = md.read_h5mu(dest / "fitted.h5mu").uns["_perturbo"]["effects"]
+    pd.testing.assert_frame_equal(effects[annotations.columns].reset_index(drop=True), annotations)
+    assert not set(annotations.add_prefix("crt_").columns).intersection(effects.columns)
+
+
 def test_unverified_legacy_baseline_and_undeclared_family(tmp_path):
     root = bundle(tmp_path / "old", "shared")
     (root / "baseline_cell_indices.npy").unlink()

@@ -282,12 +282,12 @@ def test_the_accumulator_emits_the_three_columns(chunk_result) -> None:
     accumulator.absorb(chunk_result)
     columns = accumulator.finalize()
 
-    assert np.issubdtype(columns["crt_observed_nonzero"].dtype, np.integer)
-    assert columns["crt_expected_nonzero"].dtype == np.float64
-    assert columns["crt_low_information"].dtype == bool
-    assert columns["crt_low_information"][TARGET_SMALL, GENE_SPARSE]
-    assert not columns["crt_low_information"][TARGET_KNOCKDOWN, GENE_KNOCKDOWN]
-    assert not columns["crt_low_information"][TARGET_INDUCTION, GENE_INDUCTION]
+    assert np.issubdtype(columns["observed_nonzero"].dtype, np.integer)
+    assert columns["expected_nonzero"].dtype == np.float64
+    assert columns["low_information"].dtype == bool
+    assert columns["low_information"][TARGET_SMALL, GENE_SPARSE]
+    assert not columns["low_information"][TARGET_KNOCKDOWN, GENE_KNOCKDOWN]
+    assert not columns["low_information"][TARGET_INDUCTION, GENE_INDUCTION]
 
 
 def test_a_threshold_of_zero_flags_nothing_and_keeps_the_columns(chunk_result) -> None:
@@ -300,9 +300,9 @@ def test_a_threshold_of_zero_flags_nothing_and_keeps_the_columns(chunk_result) -
     accumulator.absorb(chunk_result)
     columns = accumulator.finalize()
 
-    assert "crt_observed_nonzero" in columns
-    assert "crt_expected_nonzero" in columns
-    assert not columns["crt_low_information"].any()
+    assert "observed_nonzero" in columns
+    assert "expected_nonzero" in columns
+    assert not columns["low_information"].any()
 
 
 def test_a_run_without_the_counts_emits_no_columns() -> None:
@@ -325,8 +325,8 @@ def test_a_run_without_the_counts_emits_no_columns() -> None:
     accumulator.absorb(result)
     columns = accumulator.finalize()
 
-    assert "crt_observed_nonzero" not in columns
-    assert "crt_low_information" not in columns
+    assert "observed_nonzero" not in columns
+    assert "low_information" not in columns
 
 
 # --- (d) and (e) the CLI -----------------------------------------------------
@@ -387,22 +387,22 @@ def _run_cli(tmp_path, *extra: str):
 
 
 def test_the_cli_writes_the_columns_with_their_own_dtypes(tmp_path) -> None:
-    frame, metadata = _run_cli(tmp_path)
+    frame, metadata = _run_cli(tmp_path, "--report-low-information")
 
-    assert np.issubdtype(frame["crt_observed_nonzero"].dtype, np.integer)
-    assert np.issubdtype(frame["crt_expected_nonzero"].dtype, np.floating)
-    assert frame["crt_low_information"].dtype == bool
+    assert np.issubdtype(frame["observed_nonzero"].dtype, np.integer)
+    assert np.issubdtype(frame["expected_nonzero"].dtype, np.floating)
+    assert frame["low_information"].dtype == bool
 
     tested = frame[frame["element"] != "non-targeting"]
     sparse_gene = tested[tested["gene"] == f"gene_{GENE_SPARSE}"]
     ordinary = tested[tested["gene"] == "gene_3"]
-    assert sparse_gene["crt_low_information"].all()
-    assert not ordinary["crt_low_information"].any()
+    assert sparse_gene["low_information"].all()
+    assert not ordinary["low_information"].any()
     # The p-values are untouched by the flag, so the flagged rows still carry them.
     assert sparse_gene["crt_p_value"].notna().all()
 
     assert metadata["min_informative_cells"] == DEFAULT_CRT_MIN_INFORMATIVE_CELLS
-    assert metadata["low_information_pairs"] == int(frame["crt_low_information"].sum())
+    assert metadata["low_information_pairs"] == int(frame["low_information"].sum())
     assert metadata["low_information_total_pairs"] == len(frame)
     assert metadata["low_information_genes_entirely_flagged"] >= 1
     assert 0 <= metadata["low_information_pairs_significant"] <= metadata["low_information_pairs"]
@@ -411,23 +411,31 @@ def test_the_cli_writes_the_columns_with_their_own_dtypes(tmp_path) -> None:
 def test_the_cli_threshold_is_honoured_and_zero_disables_it(tmp_path) -> None:
     lenient, metadata = _run_cli(tmp_path, "--crt-min-informative-cells", "0")
 
-    assert "crt_observed_nonzero" in lenient.columns
-    assert "crt_expected_nonzero" in lenient.columns
-    assert not lenient["crt_low_information"].any()
+    assert "observed_nonzero" in lenient.columns
+    assert "expected_nonzero" in lenient.columns
+    assert not lenient["low_information"].any()
     assert metadata["min_informative_cells"] == 0.0
     assert metadata["low_information_pairs"] == 0
+
+
+def test_default_omits_annotations_and_preserves_results(tmp_path):
+    ordinary, meta = _run_cli(tmp_path / "default")
+    annotated, annotated_meta = _run_cli(tmp_path / "annotated", "--report-low-information")
+    names = ["observed_nonzero", "expected_nonzero", "low_information"]
+    pd.testing.assert_frame_equal(ordinary, annotated.drop(columns=names), check_exact=True)
+    assert meta["low_information_pairs"] == annotated_meta["low_information_pairs"]
 
 
 def test_the_cli_threshold_only_moves_the_flag(tmp_path) -> None:
     """Two thresholds, same run: the counts and every p-value are identical."""
 
-    default_frame, _ = _run_cli(tmp_path / "a")
+    default_frame, _ = _run_cli(tmp_path / "a", "--report-low-information")
     strict_frame, strict_metadata = _run_cli(tmp_path / "b", "--crt-min-informative-cells", "1000")
 
     keys = ["element", "gene"]
     merged = default_frame.merge(strict_frame, on=keys, suffixes=("_d", "_s"))
     np.testing.assert_array_equal(
-        merged["crt_observed_nonzero_d"], merged["crt_observed_nonzero_s"]
+        merged["observed_nonzero_d"], merged["observed_nonzero_s"]
     )
     np.testing.assert_allclose(
         merged["crt_p_value_d"].to_numpy(dtype=float),
@@ -438,11 +446,11 @@ def test_the_cli_threshold_only_moves_the_flag(tmp_path) -> None:
     # control element is not tested under this pool, so its rows stay unflagged:
     # the flag describes measurements, and it has none.
     tested_rows = strict_frame["element"] != "non-targeting"
-    assert strict_frame.loc[tested_rows, "crt_low_information"].all()
-    assert not strict_frame.loc[~tested_rows, "crt_low_information"].any()
+    assert strict_frame.loc[tested_rows, "low_information"].all()
+    assert not strict_frame.loc[~tested_rows, "low_information"].any()
     assert strict_metadata["low_information_pairs"] == int(tested_rows.sum())
     assert strict_metadata["low_information_pairs"] == int(
-        strict_frame["crt_low_information"].sum()
+        strict_frame["low_information"].sum()
     )
 
 
@@ -508,21 +516,21 @@ def test_the_all_cells_pool_counts_over_each_elements_own_cells(tmp_path) -> Non
         "--likelihood", "nb", "--num-steps-control", "200", "--num-steps-betas", "50",
         "--no-save-model-params", "--crt", "--crt-mechanism", "propensity",
         "--crt-tail-families", "saddlepoint", "--crt-saddlepoint-only",
-        "--crt-allow-unconverged-baseline", "--crt-only", "--crt-pool", "all-cells",
+        "--crt-allow-unconverged-baseline", "--crt-only", "--crt-pool", "all-cells", "--report-low-information",
     ])
     frame = pd.read_parquet(out / "element_effects.parquet")
     metadata = json.loads((out / "crt_metadata.json").read_text())
 
     assert metadata["pool"] == "all-cells"
-    assert np.issubdtype(frame["crt_observed_nonzero"].dtype, np.integer)
-    assert frame["crt_low_information"].dtype == bool
+    assert np.issubdtype(frame["observed_nonzero"].dtype, np.integer)
+    assert frame["low_information"].dtype == bool
     # Each element sits in roughly a third of 800 cells, so a well-detected gene
     # is informative and the barely-detected one is not, whatever the element.
     sparse_gene = frame[frame["gene"] == f"gene_{GENE_SPARSE}"]
     ordinary = frame[frame["gene"] == "gene_0"]
-    assert sparse_gene["crt_low_information"].all()
-    assert not ordinary["crt_low_information"].any()
-    assert (ordinary["crt_observed_nonzero"] > 100).all()
+    assert sparse_gene["low_information"].all()
+    assert not ordinary["low_information"].any()
+    assert (ordinary["observed_nonzero"] > 100).all()
     assert metadata["low_information_genes_entirely_flagged"] == 1
     assert sparse_gene["crt_saddlepoint_p_value"].notna().any()
 
@@ -548,8 +556,8 @@ def test_an_untested_element_is_not_flagged_by_its_placeholder(chunk_result) -> 
 
     untested = len(chunk_result.target_names)
     assert not accumulator.tested[untested]
-    assert (columns["crt_observed_nonzero"][untested] == 0).all()
-    assert (columns["crt_expected_nonzero"][untested] == 0.0).all()
-    assert not columns["crt_low_information"][untested].any()
+    assert (columns["observed_nonzero"][untested] == 0).all()
+    assert (columns["expected_nonzero"][untested] == 0.0).all()
+    assert not columns["low_information"][untested].any()
     # The tested rows are untouched by the gate.
-    assert columns["crt_low_information"][TARGET_SMALL, GENE_SPARSE]
+    assert columns["low_information"][TARGET_SMALL, GENE_SPARSE]

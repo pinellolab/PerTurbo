@@ -69,6 +69,8 @@ print(hits.sort_values("q_global").head())
 
 A `posterior_mean` of −0.69 corresponds to roughly half the expression. In relative mode it is the parent element effect. The separate `guide_efficiency.parquet` table reports the guide multiplier in its `posterior_mean` column. Match the tables by **both element and response gene** to see the guides for a hit. Shared mode fixes the multiplier to one.
 
+With `--report-low-information`, the effects table also reports how many assigned cells expressed the gene (`observed_nonzero`) and how many the null model expected (`expected_nonzero`). For tested pairs, `low_information` is true when both counts fall below the threshold (5 by default). This annotation leaves the p-value and BH correction unchanged.
+
 Choose the correction family that matches the question. All three use Benjamini–Hochberg on finite values of the same primary `p_value`.
 
 | Question | Column | Tests corrected together |

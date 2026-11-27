@@ -22,7 +22,7 @@ def test_independent_gene_schedule_preserves_real_crt(tmp_path, monkeypatch):
             "--likelihood", "nb", "--num-steps-control", "100", "--num-steps-betas", "1", "--backed",
             "--no-save-model-params", "--crt", "--crt-only", "--crt-pool", "all-cells",
             "--crt-mechanism", "propensity", "--crt-tail-families", "saddlepoint",
-            "--crt-saddlepoint-only", "--crt-allow-unconverged-baseline",
+            "--crt-saddlepoint-only", "--crt-allow-unconverged-baseline", "--report-low-information",
             "--crt-gene-chunk-size", str(crt_width),
         ]
         if stage_width is not None:
@@ -40,8 +40,8 @@ def test_independent_gene_schedule_preserves_real_crt(tmp_path, monkeypatch):
                       "crt_saddlepoint_log_p_value"):
             np.testing.assert_allclose(frame[field], reference[field], rtol=1e-5, atol=1e-10,
                                        equal_nan=True, err_msg=field)
-        for field in ("crt_tail_failure_reason", "crt_used_chernoff", "crt_low_information",
-                      "crt_observed_nonzero"):
+        for field in ("crt_tail_failure_reason", "crt_used_chernoff", "low_information",
+                      "observed_nonzero"):
             np.testing.assert_array_equal(frame[field], reference[field], err_msg=field)
         np.testing.assert_array_equal(frame.crt_saddlepoint_q_value < .05,
                                       reference.crt_saddlepoint_q_value < .05)

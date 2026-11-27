@@ -2467,7 +2467,7 @@ class CRTAccumulator:
     tail_families: tuple[str, ...] = CRT_TAIL_FAMILIES
     saddlepoint_only: bool = False
     min_informative_cells: float = DEFAULT_CRT_MIN_INFORMATIVE_CELLS
-    """Threshold for ``crt_low_information``; ``0`` flags nothing. See
+    """Threshold for ``low_information``; ``0`` flags nothing. See
     :data:`DEFAULT_CRT_MIN_INFORMATIVE_CELLS`."""
 
     def __post_init__(self) -> None:
@@ -2596,9 +2596,9 @@ class CRTAccumulator:
         columns.update(self.null_summaries)
         columns.setdefault("crt_null_excess_kurtosis", missing)
         if self.observed_nonzero is not None:
-            columns["crt_observed_nonzero"] = np.rint(self.observed_nonzero).astype(np.int64)
-            columns["crt_expected_nonzero"] = self.expected_nonzero
-            columns["crt_low_information"] = self.low_information()
+            columns["observed_nonzero"] = np.rint(self.observed_nonzero).astype(np.int64)
+            columns["expected_nonzero"] = self.expected_nonzero
+            columns["low_information"] = self.low_information()
         return columns
 
     def low_information(self) -> np.ndarray:

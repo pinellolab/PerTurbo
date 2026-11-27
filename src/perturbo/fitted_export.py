@@ -50,6 +50,10 @@ def _effects(root, metadata, test_meta, primary, cis):
     _check_keys(source, PAIR)
     _method(source, metadata)
     effects = source[PAIR + ["posterior_mean", "posterior_scale"]].copy()
+    for name in ("observed_nonzero", "expected_nonzero", "low_information"):
+        source_name = name if name in source else f"crt_{name}"
+        if source_name in source:
+            effects[name] = source[source_name]
     if "p_value" in source:
         saved_primary = test_meta.get("primary_test")
         if saved_primary not in PRIMARY or (primary is not None and primary != saved_primary):
