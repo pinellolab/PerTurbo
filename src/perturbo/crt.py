@@ -674,6 +674,53 @@ def polish_baseline_to_null_mode(
     return dataclasses.replace(nuisance, coefficients=coefficients)
 
 
+def _retry_failed_null_genes(nuisance, check, *, curvature_jitter):
+    """Refine only failed genes, one at a time to bound float64 working memory."""
+    from perturbo._internal.score_resampling import fit_batched_nb_null
+
+    coefficients = nuisance.coefficients.copy()
+    steps = check.newton_step.copy()
+    offsets = np.asarray(nuisance.offsets).reshape(nuisance.counts.shape[0], -1)
+    design = np.asarray(nuisance.nuisance_design, dtype=np.float64)
+    for gene in np.flatnonzero(check.failed):
+        counts = nuisance.counts[:, gene : gene + 1]
+        theta = nuisance.dispersion[gene : gene + 1]
+        offset = offsets if offsets.shape[1] == 1 else offsets[:, gene : gene + 1]
+        original = coefficients[:, gene : gene + 1]
+
+        # Fixed-theta NB likelihood, omitting terms independent of beta.
+        def loglike(beta):
+            log_ratio = offset + design @ beta - np.log(theta)
+            return -np.sum(theta * np.logaddexp(0., log_ratio)
+                           + counts * np.logaddexp(0., -log_ratio))
+
+        try:
+            fit = fit_batched_nb_null(
+                counts, nuisance_design=design, offsets=offset, theta=theta,
+                curvature_jitter=curvature_jitter, max_iterations=2000,
+                gradient_tolerance=1e-10,
+            )
+        except np.linalg.LinAlgError:
+            continue  # Preserve the original diagnostic and strict/warn policy.
+        beta = fit.nuisance_mean
+        if not np.isfinite(beta).all():
+            continue
+        old_ll, new_ll = loglike(original), loglike(beta)
+        if not np.isfinite(new_ll) or not np.isfinite(old_ll) or new_ll < old_ll - 1e-6:
+            continue
+        candidate = dataclasses.replace(
+            nuisance, counts=counts, offsets=offset, dispersion=theta,
+            coefficients=beta, gene_names=(nuisance.gene_names[gene],),
+        )
+        checked = check_baseline_is_null_mode(
+            candidate, step_tolerance=check.tolerance, curvature_jitter=curvature_jitter,
+        )
+        if checked.ok:
+            coefficients[:, gene] = beta[:, 0]
+            steps[gene] = checked.newton_step[0]
+    return dataclasses.replace(nuisance, coefficients=coefficients), dataclasses.replace(check, newton_step=steps)
+
+
 @dataclass(frozen=True)
 class CRTBaseline:
     """Everything the CRT needs from stage one, validated once and reused.
@@ -730,7 +777,8 @@ def prepare_crt_baseline(
     ``polish`` first moves the coefficients onto the control-cell null mode
     (:func:`polish_baseline_to_null_mode`), keeping stage one's dispersion,
     offsets and design; the check then measures the polished baseline and the
-    supplied one's check is kept as ``pre_polish_check``.
+    supplied one's check is kept as ``pre_polish_check``. Genes still above the
+    requested tolerance receive a bounded float64 Fisher-scoring retry.
     """
 
     nuisance = assemble_control_nuisance(control_data, control_fit)
@@ -745,6 +793,10 @@ def prepare_crt_baseline(
         step_tolerance=step_tolerance,
         curvature_jitter=curvature_jitter,
     )
+    if polish and not null_check.ok:
+        nuisance, null_check = _retry_failed_null_genes(
+            nuisance, null_check, curvature_jitter=curvature_jitter,
+        )
     if not null_check.ok:
         message = (
             "The stage-one baseline is not at the control-cell null mode, so the CRT statistic "
