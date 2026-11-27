@@ -15,6 +15,7 @@ BACKED_ROW_CHUNK_SIZE = 50_000
 
 
 def to_dense_array(x) -> np.ndarray:
+    """Materialize dense or sparse input as a NumPy array. The full result must fit in memory."""
     if hasattr(x, "toarray"):
         return np.asarray(x.toarray())
     if hasattr(x, "A"):
@@ -164,6 +165,7 @@ def count_gene_outliers_per_cell(
     *,
     row_chunk_size: int | None = None,
 ) -> np.ndarray:
+    """Count genes exceeding their individual thresholds in each cell."""
     if thresholds is None:
         raise ValueError("thresholds must not be None when counting gene outliers per cell.")
 
@@ -206,6 +208,7 @@ def count_gene_outliers_per_cell(
 
 
 def winsorize_counts_to_gene_thresholds(counts: np.ndarray, thresholds: np.ndarray | None) -> np.ndarray:
+    """Cap each gene’s counts at its threshold; passing no thresholds preserves the counts."""
     if thresholds is None:
         return counts
     arr = np.asarray(counts)

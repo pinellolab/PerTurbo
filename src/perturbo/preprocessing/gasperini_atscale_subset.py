@@ -14,6 +14,7 @@ from perturbo.preprocessing.counts import to_dense_array
 
 @dataclass(frozen=True)
 class GasperiniAtScaleSubsetSummary:
+    """Counts of features and cells retained by the TSS subset builder."""
     cells_before: int
     cells_after: int
     genes_before: int
@@ -33,6 +34,7 @@ def build_gasperini_atscale_tss_subset(
     guide_by_element_key: str = "guide_intended_target_pairs",
     guide_element_uns_key: str = "intended_targets",
 ) -> tuple[md.MuData, GasperiniAtScaleSubsetSummary]:
+    """Select guide targets, their measured TSS response genes and cells carrying retained guides. Return the subset and its summary."""
     gene = mdata[gene_modality]
     guide = mdata[guide_modality]
 
@@ -131,6 +133,7 @@ def write_gasperini_atscale_tss_subset_h5mu(
     guide_by_element_key: str = "guide_intended_target_pairs",
     guide_element_uns_key: str = "intended_targets",
 ) -> tuple[Path, GasperiniAtScaleSubsetSummary]:
+    """Read the source screen and write its TSS subset. Return the output path and subset summary."""
     input_path = Path(input_path).expanduser()
     output_path = Path(output_path).expanduser()
 

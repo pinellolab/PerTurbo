@@ -12,6 +12,7 @@ import pandas as pd
 
 @dataclass(frozen=True)
 class GasperiniPilotMatchSummary:
+    """Cell counts and median guide coverage before and after matching the pilot screen."""
     shared_guides: int
     at_scale_cells_before: int
     at_scale_cells_with_shared_guides: int
@@ -29,6 +30,7 @@ def build_at_scale_pilot_matched_mudata(
     *,
     random_seed: int = 0,
 ) -> tuple[md.MuData, GasperiniPilotMatchSummary]:
+    """Subsample cells from the at-scale screen to approximate the pilot’s median coverage across shared guides. Return the matched screen and coverage summary."""
     shared_guides = _shared_guides_in_pilot_order(at_scale["guide"], pilot["guide"])
     if not shared_guides:
         raise ValueError("No shared guides found between the at-scale and pilot guide modalities.")
@@ -92,6 +94,7 @@ def write_at_scale_pilot_matched_h5mu(
     *,
     random_seed: int = 0,
 ) -> tuple[Path, GasperiniPilotMatchSummary]:
+    """Read both screens and write the pilot-matched subset. Return its path and coverage summary."""
     at_scale_path = Path(at_scale_path).expanduser()
     pilot_path = Path(pilot_path).expanduser()
     output_path = Path(output_path).expanduser()
