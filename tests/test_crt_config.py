@@ -343,13 +343,13 @@ def test_prepare_baseline_accepts_a_converged_stage_one_fit() -> None:
     assert baseline.nuisance.nuisance_names == ("intercept", "cov_0", "cov_1")
 
 
-def test_prepare_baseline_refuses_a_displaced_stage_one_fit() -> None:
+def test_prepare_baseline_withholds_a_displaced_stage_one_fit() -> None:
     # Reuse-only means this check is the sole guard between an under-trained
     # stage one and a statistic that is no longer the efficient score.
     data, _, theta, _ = _simulate_controls(num_cells=4000)
     displaced = _fitted_coefficients(data, theta)[0] + 0.6
-    with pytest.raises(ValueError, match="not at the control-cell null mode"):
-        prepare_crt_baseline(data, _control_fit(displaced, theta, None))
+    with pytest.warns(RuntimeWarning, match="Strict mode withholds"):
+        assert prepare_crt_baseline(data, _control_fit(displaced, theta, None)).withheld_genes
 
 
 def test_prepare_baseline_can_downgrade_the_refusal_to_a_warning() -> None:

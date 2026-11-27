@@ -743,6 +743,25 @@ class CRTBaseline:
     """The null-mode check of the supplied baseline before polishing, when
     :func:`prepare_crt_baseline` was asked to polish; ``None`` otherwise."""
 
+    withheld_genes: tuple[str, ...] = ()
+    """Genes with an unresolved null fit for which strict mode withholds inference."""
+
+    zero_baseline_genes: tuple[str, ...] = ()
+
+    def test_slices(self, width):
+        """Yield contiguous blocks with a common testing status, preserving the gene axis."""
+        withheld = set(self.withheld_genes) | set(self.zero_baseline_genes)
+        for block in iter_gene_chunks(self.num_genes, width):
+            start = block.start
+            skip = self.gene_names[start] in withheld
+            if withheld:
+                for i in range(start + 1, block.stop):
+                    next_skip = self.gene_names[i] in withheld
+                    if skip != next_skip:
+                        yield slice(start, i), skip
+                        start, skip = i, next_skip
+            yield slice(start, block.stop), skip
+
     @property
     def gene_names(self) -> tuple[str, ...]:
         return self.nuisance.gene_names
@@ -767,12 +786,8 @@ def prepare_crt_baseline(
 ) -> CRTBaseline:
     """Lift a production stage-one fit into a validated CRT null.
 
-    ``strict`` decides what happens when the baseline is not at the control-cell
-    null mode. Because this path reuses the SVI baseline rather than refitting,
-    that check is the only thing standing between an under-trained stage one and
-    a statistic that is quietly no longer the efficient score, so it fails hard
-    by default. Set ``strict=False`` to downgrade it to a warning when you want
-    to inspect the result anyway.
+    With ``strict=True``, genes failing the null-mode check retain their rows
+    with missing CRT statistics. With ``strict=False``, warn and test them.
 
     ``polish`` first moves the coefficients onto the control-cell null mode
     (:func:`polish_baseline_to_null_mode`), keeping stage one's dispersion,
@@ -797,22 +812,24 @@ def prepare_crt_baseline(
         nuisance, null_check = _retry_failed_null_genes(
             nuisance, null_check, curvature_jitter=curvature_jitter,
         )
+    withheld = ()
     if not null_check.ok:
         message = (
             "The stage-one baseline is not at the control-cell null mode, so the CRT statistic "
             "would not be the efficient score for the fitted model. "
-            f"{null_check.describe()} Train stage one longer, or pass strict=False to proceed "
-            "anyway (the resampling null stays exact either way; what degrades is power and the "
-            "interpretation of the statistic)."
+            f"{null_check.describe()}"
         )
         if strict:
-            raise ValueError(message)
+            withheld = tuple(np.asarray(nuisance.gene_names)[null_check.failed].tolist())
+            message += " Strict mode withholds CRT statistics for these genes."
         warnings.warn(message, RuntimeWarning, stacklevel=2)
     return CRTBaseline(
         nuisance=nuisance,
         null_check=null_check,
         curvature_jitter=float(curvature_jitter),
         pre_polish_check=pre_polish_check,
+        withheld_genes=withheld,
+        zero_baseline_genes=tuple(np.asarray(nuisance.gene_names)[null_check.degenerate].tolist()) if strict else (),
     )
 
 
@@ -1186,6 +1203,8 @@ class ChunkCRTResult:
     # expected to. Diagnostics: nothing in the statistic or the tail reads them.
     observed_nonzero: np.ndarray | None = None
     expected_nonzero: np.ndarray | None = None
+    withheld_genes: tuple[str, ...] = ()
+    zero_baseline_genes: tuple[str, ...] = ()
 
 
 def _categorical_batch_applies(design) -> bool:
@@ -1581,7 +1600,12 @@ def run_crt_for_chunk(
         expected_nonzero = np.zeros(shape, dtype=np.float64)
         informative_state = (member_cells, membership, member_design, member_offsets)
 
-    for gene_slice in iter_gene_chunks(num_genes, width):
+    for gene_slice, skip in baseline.test_slices(width):
+        if skip:
+            if informative_state is not None:
+                observed_nonzero[:, gene_slice] = membership @ (counts[member_cells, gene_slice] > 0)
+                expected_nonzero[:, gene_slice] = np.nan
+            continue
         block_counts = counts[:, gene_slice]
         sliced = replace_gene_axis(
             design,
@@ -1681,6 +1705,8 @@ def run_crt_for_chunk(
         saddlepoint_only=saddlepoint_only,
         observed_nonzero=observed_nonzero,
         expected_nonzero=expected_nonzero,
+        withheld_genes=baseline.withheld_genes,
+        zero_baseline_genes=baseline.zero_baseline_genes,
     )
     return (result, permutations) if _return_permutations else result
 
@@ -2312,8 +2338,12 @@ def run_crt_all_cells(
         member_design = np.asarray(baseline.nuisance.nuisance_design)[member_cells]
         member_offsets = np.asarray(baseline.nuisance.offsets)[member_cells]
         panel_counts = np.asarray(baseline.nuisance.counts)
-    for start in range(0, num_genes, width):
-        gene_slice = slice(start, min(start + width, num_genes))
+    for gene_slice, skip in baseline.test_slices(width):
+        if skip:
+            if count_informative_cells:
+                observed_nonzero[:, gene_slice] = membership @ (panel_counts[member_cells, gene_slice] > 0)
+                expected_nonzero[:, gene_slice] = np.nan
+            continue
         block = control_block_for_genes(baseline, gene_slice, bordered_design=bordered_design)
         correction = (
             {"nuisance_direction": block.nuisance_direction}
@@ -2411,6 +2441,8 @@ def run_crt_all_cells(
         saddlepoint_only=True,
         observed_nonzero=observed_nonzero,
         expected_nonzero=expected_nonzero,
+        withheld_genes=baseline.withheld_genes,
+        zero_baseline_genes=baseline.zero_baseline_genes,
     )
 
 
@@ -2525,6 +2557,8 @@ class CRTAccumulator:
     def __post_init__(self) -> None:
         shape = (len(self.element_names), len(self.gene_names))
         self._index = {name: position for position, name in enumerate(self.element_names)}
+        self.withheld_genes: set[str] = set()
+        self.zero_baseline_genes: set[str] = set()
         self._gene_index = {name: position for position, name in enumerate(self.gene_names)}
         self._dropped_by_target_chunk: dict[tuple[str, ...], int] = {}
         self.num_multi_assignment_cells_dropped = 0
@@ -2566,6 +2600,8 @@ class CRTAccumulator:
             )
         rows = np.asarray([self._index[name] for name in result.target_names])
         columns = np.asarray([self._gene_index[name] for name in result.gene_names])
+        self.zero_baseline_genes.update(result.zero_baseline_genes)
+        self.withheld_genes.update(result.withheld_genes)
         destination = np.ix_(rows, columns)
         target_chunk = tuple(result.target_names)
         self._dropped_by_target_chunk[target_chunk] = max(

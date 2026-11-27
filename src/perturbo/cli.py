@@ -857,10 +857,8 @@ def main(argv: list[str] | None = None) -> None:
         action=argparse.BooleanOptionalAction,
         default=True,
         help=(
-            "Warn instead of failing when the stage-1 baseline is not at the control-cell null mode. "
-            "On by default: after the polish the guard's percentile is dominated by genes with almost "
-            "no control counts, and every production run passes it. --no-crt-allow-unconverged-baseline "
-            "makes the guard fatal."
+            "Test genes whose stage-one baseline fails the null-mode check, with a warning "
+            "(default). Disable to withhold their CRT p-values and continue testing other genes."
         ),
     )
     parser.add_argument(
@@ -2477,6 +2475,8 @@ def main(argv: list[str] | None = None) -> None:
         # four detected cells has a far tail the saddlepoint can describe but the
         # data cannot support, and that is where two runs of the same binary
         # disagree.
+        crt_metadata["genes_withheld_zero_baseline_counts"] = sorted(crt_accumulator.zero_baseline_genes)
+        crt_metadata["genes_withheld_unconverged_baseline"] = sorted(crt_accumulator.withheld_genes)
         crt_metadata["min_informative_cells"] = float(args.crt_min_informative_cells)
         if "crt_low_information" in crt_columns:
             flagged = np.asarray(crt_columns["crt_low_information"], dtype=bool)
