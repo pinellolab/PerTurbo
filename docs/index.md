@@ -5,12 +5,14 @@ Estimate perturbation effects on gene expression, identify differentially expres
 - For one construct per cell, fit the [Replogle K562 essential-wide screen](tutorials/replogle.ipynb), then explore [GATA1 regulon power](tutorials/replogle_power.ipynb).
 - For several guides per cell, fit the [Gasperini enhancer screen](tutorials/gasperini.ipynb), then explore [cis and locus-level power](tutorials/gasperini_power.ipynb).
 - For sequencing reads, start with the [CRISPR_Pipeline samplesheet and preprocessing guide](https://github.com/pinellolab/CRISPR_Pipeline/blob/8061b88d871b8fa2720c8484906de9b6d9cd7330/README.md).
+- For function signatures and model accessors, see the [Python API](api.md).
 - For an existing fit, see [reading results and exporting fitted MuData](fitted_export_pilot.md).
 
 ```{toctree}
 :maxdepth: 1
 
 tutorials/index.md
+reference/cli
 api.md
 fitted_export_pilot.md
 changelog.md

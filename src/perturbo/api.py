@@ -176,7 +176,7 @@ def fit_from_path(
     ``crt=True`` also runs the conditional randomization test against the
     stage-one baseline and writes primary p-values and named BH corrections
     in the effects table. Choose ``output_format="bundle"`` for Parquet results.
-    The testing methods build on SCEPTRE and spaCRT; see :mod:`perturbo.crt`
+    The testing methods build on SCEPTRE and spaCRT; see ``perturbo.crt``
     for references. PerTurbo does not introduce these statistical methods.
     ``crt_tail_families=None`` keeps the CLI default; pass ``("saddlepoint",)`` with ``crt_mechanism="propensity"`` and
     ``crt_saddlepoint_only=True`` for a saddlepoint tail approximation without

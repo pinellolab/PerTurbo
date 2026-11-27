@@ -128,7 +128,9 @@ html_theme_options = {
 pygments_style = "default"
 
 nitpick_ignore = [
-    # If building the documentation fails because of a missing link that is outside your control,
-    # you can add an exception to this list.
-    #     ("py:class", "igraph.Graph"),
+    # Runtime annotations contain implementation paths absent from the public inventories.
+    ("py:class", "mudata._core.mudata.MuData"),
+    ("py:class", "pandas.core.frame.DataFrame"),
+    # Internal cache used by the gene-block runner; it has no public API page.
+    ("py:class", "perturbo.core._AnalysisDesignCache"),
 ]

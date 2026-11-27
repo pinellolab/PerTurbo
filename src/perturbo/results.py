@@ -43,6 +43,7 @@ class PosteriorMedians(Mapping[str, np.ndarray]):
         return len(self._values)
 
     def to_dict(self) -> dict[str, np.ndarray]:
+        """Return fitted parameter arrays in a dictionary keyed by parameter name."""
         return {key: np.asarray(value) for key, value in self._values.items()}
 
 
@@ -86,6 +87,7 @@ def build_guide_effects_df(
     guide_parent_elements: list[str],
     gene_names: list[str],
 ) -> pd.DataFrame:
+    """Convert guide-by-gene effect means and scales into a table keyed by guide, parent element and gene."""
     loc = np.asarray(effect_loc, dtype=float)
     scale = np.clip(np.asarray(effect_scale, dtype=float), a_min=1e-6, a_max=None)
     if loc.shape != scale.shape:

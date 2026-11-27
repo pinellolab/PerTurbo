@@ -12,6 +12,8 @@ PerTurbo estimates how CRISPR perturbations change gene expression in single cel
 
 Each analysis notebook fits an observed screen of 100 elements or targeting constructs and 256 genes. Its companion notebook uses the saved baseline to simulate the effects of changing coverage and effect size. [Gasperini cis power](docs/tutorials/gasperini_power.ipynb) · [Replogle regulon power](docs/tutorials/replogle_power.ipynb) · [Tutorial inputs and setup](docs/tutorials/index.md)
 
+The [Python API reference](docs/api.md) covers fitting from files or MuData, reloading a model and generating counts.
+
 ## Install
 
 From this checkout, install the code and verify the command:

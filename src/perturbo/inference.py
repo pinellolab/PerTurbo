@@ -282,7 +282,7 @@ def _loss_history(control_fit, beta_fit) -> pd.DataFrame:
 
 
 class PerTurboModel:
-    """Notebook-friendly fitted model with a PerTurbo-like public workflow surface."""
+    """Fit baseline expression and perturbation effects on registered MuData, or reload an existing fit."""
 
     def __init__(
         self,
@@ -350,10 +350,17 @@ class PerTurboModel:
 
     @classmethod
     def setup_mudata(cls, mdata, **kwargs: Any) -> MuDataSetup:
+        """Register the expression and guide measurements for an in-memory fit."""
         return setup_mudata(mdata, **kwargs)
 
     @classmethod
     def load(cls, bundle_dir: str | Path, adata=None, *, source_path: str | Path | None = None) -> "PerTurboModel":
+        """Restore fitted parameters, assays and their axes from a saved run.
+
+        Pass the fitted .h5mu file, a bundle directory, or a run directory
+        containing a single output. For a compact bundle whose input has moved,
+        supply its new location in ``source_path``. The bytes must match the
+        source checksum recorded at fit time."""
         bundle_path = Path(bundle_dir)
         if bundle_path.is_dir():
             candidates = [p for p in (bundle_path / "fitted.h5mu", bundle_path / "bundle") if p.exists()]
@@ -442,12 +449,14 @@ class PerTurboModel:
 
     @property
     def gene_names(self) -> list[str]:
+        """Response gene IDs in the RNA feature order."""
         if self.beta_fit is not None:
             return list(self.adata[self.setup.rna_modality].var_names.astype(str))
         return list(self.adata[self.setup.rna_modality].var_names.astype(str))
 
     @property
     def element_names(self) -> list[str]:
+        """Element IDs in fitted order, taken from the registered guide map when present."""
         if self.setup.guide_by_element_key is None:
             return list(self.adata[self.setup.perturbation_modality].var_names.astype(str))
         return core._load_perturbation_element_mapping(
@@ -459,6 +468,7 @@ class PerTurboModel:
 
     @property
     def guide_names(self) -> list[str]:
+        """Guide IDs in the perturbation modality feature order."""
         return list(self.adata[self.setup.perturbation_modality].var_names.astype(str))
 
     def _guide_effect_payload(self) -> tuple[np.ndarray, np.ndarray, list[str], list[str]] | None:
@@ -490,6 +500,7 @@ class PerTurboModel:
         return effect_loc, effect_scale, guide_names, parent_elements
 
     def view_anndata_setup(self) -> dict[str, Any]:
+        """Print the registered input keys and return them as a dictionary."""
         payload = self.setup.to_json_dict()
         print(payload)
         return payload
@@ -635,6 +646,7 @@ class PerTurboModel:
         return self.control_fit, self.beta_fit
 
     def posterior_medians(self) -> PosteriorMedians:
+        """Return named baseline, element and available guide parameter arrays after fitting."""
         control_fit, beta_fit = self._require_fit()
         values = {
             "beta_0": np.asarray(control_fit.beta_0),
@@ -673,6 +685,7 @@ class PerTurboModel:
 
     @property
     def guide_efficacy(self) -> np.ndarray:
+        """Guide multipliers. Relative fits return a guide-by-gene array; shared fits return one per guide, fixed at 1."""
         if self._guide_efficacy is None:
             _control_fit, beta_fit = self._require_fit()
             self._guide_efficacy = _guide_efficacy_from_model(
@@ -683,6 +696,7 @@ class PerTurboModel:
         return np.asarray(self._guide_efficacy)
 
     def posterior_parameter_table(self):
+        """Return a dictionary grouping fitted values, locations and scales by parameter name."""
         control_fit, beta_fit = self._require_fit()
         params = {
             "beta_0": control_fit.beta_0,
@@ -716,6 +730,7 @@ class PerTurboModel:
         return extract_parameter_table(params)
 
     def get_element_effects(self) -> pd.DataFrame:
+        """Return one row per element and response gene with its fitted effect and posterior uncertainty."""
         _control_fit, beta_fit = self._require_fit()
         return build_element_effects_df(
             effect_loc=np.asarray(beta_fit.posterior_mean),
@@ -725,6 +740,7 @@ class PerTurboModel:
         )
 
     def get_guide_effects(self) -> pd.DataFrame:
+        """Return fitted guide–gene effects and parent element IDs using the registered guide-to-element map."""
         payload = self._guide_effect_payload()
         if payload is None:
             raise RuntimeError("Guide effects are unavailable because no guide-to-element mapping is registered.")
@@ -745,6 +761,11 @@ class PerTurboModel:
         output_format: str = "h5mu",
         overwrite: bool = False,
     ) -> Path:
+        """Write the trained model and return its output path.
+
+        The default writes a self-contained ``fitted.h5mu``; a direct .h5mu
+        filename is also accepted. Use ``output_format="bundle"`` for a
+        compact directory or ``"legacy"`` for the earlier file layout."""
         self._require_fit()
         out_path = Path(out_dir)
         direct_file = out_path if output_format == "h5mu" and out_path.suffix == ".h5mu" else None
