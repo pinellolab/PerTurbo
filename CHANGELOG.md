@@ -16,7 +16,7 @@ and this project adheres to [Semantic Versioning][].
 
 - The main effect table records one primary p-value and BH adjustments across the screen, within each element, and across an optional prespecified cis list. Use `--cis-pairs` to supply the cis family. The existing method-specific columns remain available.
 - Relative (scaled) guide-efficiency fits support stage-two gene blocking and retain guide-by-gene estimates across blocks.
-- A fitted bundle can be exported to a single MuData file and reloaded. The exported tables preserve the fitted values and their declared test families.
+- The default output is a self-contained `fitted.h5mu` containing the input assays, fit, and result tables. Use `--output-format bundle` for the compact bundle or `--output-format legacy` for scripts that consume the earlier directory layout.
 - Added executable Gasperini high-MOI and Replogle low-MOI analysis tutorials with compact real inputs.
 
 ## [2.0.0rc12] - 2026-09-24

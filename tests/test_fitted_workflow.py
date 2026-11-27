@@ -954,3 +954,12 @@ def test_the_inert_v1_efficacy_flag_says_it_is_inert() -> None:
             guide_effect_strategy="shared",
             fit_guide_efficacy=True,
         )
+
+
+def test_unequal_training_history_lengths(tmp_path):
+    model = perturbo.PerTurboModel(_make_registered_mdata(), likelihood="negbin")
+    model.train(control_steps=2, beta_steps=3, batch_size=2, accelerator="cpu")
+    history = model.history["elbo_train"]
+    assert history.notna().sum().to_dict() == {"control_loss": 2, "beta_loss": 3}
+    restored = perturbo.PerTurboModel.load(model.save(tmp_path / "fit", output_format="legacy"), adata=model.adata)
+    pd.testing.assert_frame_equal(history, restored.history["elbo_train"])

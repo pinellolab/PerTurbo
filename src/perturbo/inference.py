@@ -273,6 +273,14 @@ class _ModuleCompat:
         )
 
 
+def _loss_history(control_fit, beta_fit) -> pd.DataFrame:
+    control = pd.Series(np.asarray(control_fit.losses).reshape(-1))
+    beta = pd.Series(np.asarray(beta_fit.losses).reshape(-1))
+    if control.empty and beta.empty:
+        return pd.DataFrame()
+    return pd.DataFrame({"control_loss": control, "beta_loss": beta})
+
+
 class PerTurboModel:
     """Notebook-friendly fitted model with a PerTurbo-like public workflow surface."""
 
@@ -429,16 +437,7 @@ class PerTurboModel:
                     stacklevel=2,
                 )
                 model._guide_efficacy = None
-        control_loss = np.asarray(model.control_fit.losses).reshape(-1)
-        beta_loss = np.asarray(model.beta_fit.losses).reshape(-1)
-        history_len = max(len(control_loss), len(beta_loss))
-        history = {}
-        if history_len > 0:
-            history["control_loss"] = np.full(history_len, np.nan, dtype=float)
-            history["beta_loss"] = np.full(history_len, np.nan, dtype=float)
-            history["control_loss"][: len(control_loss)] = control_loss
-            history["beta_loss"][: len(beta_loss)] = beta_loss
-        model.history = {"elbo_train": pd.DataFrame(history)}
+        model.history = {"elbo_train": _loss_history(model.control_fit, model.beta_fit)}
         return model
 
     @property
@@ -627,14 +626,7 @@ class PerTurboModel:
             guide_effect_strategy=self.guide_effect_strategy,
             n_guides=_num_guides(self.adata, self.setup),
         )
-        self.history = {
-            "elbo_train": pd.DataFrame(
-                {
-                    "control_loss": np.asarray(self.control_fit.losses).reshape(-1),
-                    "beta_loss": np.asarray(self.beta_fit.losses).reshape(-1),
-                }
-            )
-        }
+        self.history = {"elbo_train": _loss_history(self.control_fit, self.beta_fit)}
         return self
 
     def _require_fit(self) -> tuple[core.ControlFit, core.BetaFit]:

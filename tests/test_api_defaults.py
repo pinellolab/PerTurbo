@@ -72,3 +72,19 @@ def test_fit_from_path_forwards_scaled_gene_blocks(monkeypatch):
     assert _parsed(monkeypatch, argv).crt is None
     assert argv[argv.index("--gene-chunk-size") + 1] == "32"
     assert argv[argv.index("--guide-effect-strategy") + 1] == "scaled"
+
+
+@pytest.mark.parametrize("pool", ["all-cells", "control-anchored"])
+def test_automatic_testing_uses_cli_defaults_and_respects_explicit_options(monkeypatch, pool):
+    calls = []
+    monkeypatch.setattr(api, "main", calls.append)
+    api.fit_from_path("screen.h5mu", "out", crt_only=True, crt_pool=pool,
+                      report_low_information=True, crt_polish_baseline=False)
+    actual = _parsed(monkeypatch, calls[0])
+    expected = _parsed(monkeypatch, ["--input", "screen.h5mu", "--out-dir", "out"])
+    assert actual.crt and actual.crt_only and actual.report_low_information
+    assert actual.crt_pool == pool
+    assert actual.crt_polish_baseline is False
+    assert actual.size_factor_mode == expected.size_factor_mode == "observed"
+    assert actual.crt_mechanism == expected.crt_mechanism == "propensity"
+    assert actual.crt_saddlepoint_only == expected.crt_saddlepoint_only

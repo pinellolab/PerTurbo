@@ -110,7 +110,7 @@ def fit_from_path(
     batch_covariate: str | None = None,
     size_factor_key: str | None = None,
     library_size_key: str | None = None,
-    size_factor_mode: str = "infer",
+    size_factor_mode: str | None = None,
     gene_name_key: str | None = None,
     clip_gene_expression_percentile: float = 100.0,
     gene_outlier_action: str = "none",
@@ -153,8 +153,8 @@ def fit_from_path(
     crt_gene_chunk_size: int = 500,
     crt_max_gather_gib: float = 8.0,
     crt_tail_families: list[str] | tuple[str, ...] | None = None,
-    crt_mechanism: str = "permutation",
-    crt_saddlepoint_only: bool = False,
+    crt_mechanism: str | None = None,
+    crt_saddlepoint_only: bool | None = None,
     crt_screen_p_value: float = 0.05,
     crt_two_sided: str = "equal-tail",
     crt_min_informative_cells: float | None = None,
@@ -162,7 +162,7 @@ def fit_from_path(
     crt_all_cells_batch_support: bool = True,
     crt_baseline_step_tolerance: float | None = None,
     crt_allow_unconverged_baseline: bool = False,
-    crt_polish_baseline: bool = False,
+    crt_polish_baseline: bool | None = None,
     crt_pool: str | None = None,
     crt_only: bool = False,
 ) -> PerTurboModel | None:
@@ -178,8 +178,7 @@ def fit_from_path(
     in the effects table. Choose ``output_format="bundle"`` for Parquet results.
     The testing methods build on SCEPTRE and spaCRT; see :mod:`perturbo.crt`
     for references. PerTurbo does not introduce these statistical methods.
-    ``crt_tail_families=None`` keeps the CLI default (the moment-fitted
-    families); pass ``("saddlepoint",)`` with ``crt_mechanism="propensity"`` and
+    ``crt_tail_families=None`` keeps the CLI default; pass ``("saddlepoint",)`` with ``crt_mechanism="propensity"`` and
     ``crt_saddlepoint_only=True`` for a saddlepoint tail approximation without
     resampling. An empty tuple switches the continuous tails off. ``crt_pool``
     selects the resampling pool (``'control-anchored'`` for low MOI,
@@ -268,8 +267,11 @@ def fit_from_path(
         argv.append("--no-save-model-params")
     if crt is False:
         argv.append("--no-crt")
-    if crt:
+    if crt_only and crt is False:
+        raise ValueError("crt_only=True requires testing.")
+    if crt is True or crt_only:
         argv.append("--crt")
+    if crt is not False:
         _append_cli_arg(argv, "--crt-num-resamples", crt_num_resamples)
         _append_cli_arg(argv, "--crt-seed", crt_seed)
         _append_cli_arg(argv, "--crt-gene-chunk-size", crt_gene_chunk_size)
@@ -279,8 +281,8 @@ def fit_from_path(
             argv.append("--crt-tail-families")
             argv.extend(str(family) for family in crt_tail_families)
         _append_cli_arg(argv, "--crt-mechanism", crt_mechanism)
-        if crt_saddlepoint_only:
-            argv.append("--crt-saddlepoint-only")
+        if crt_saddlepoint_only is not None:
+            argv.append("--crt-saddlepoint-only" if crt_saddlepoint_only else "--no-crt-saddlepoint-only")
         _append_cli_arg(argv, "--crt-screen-p-value", crt_screen_p_value)
         _append_cli_arg(argv, "--crt-two-sided", crt_two_sided)
         if report_low_information:
@@ -294,8 +296,8 @@ def fit_from_path(
         _append_cli_arg(argv, "--crt-baseline-step-tolerance", crt_baseline_step_tolerance)
         if crt_allow_unconverged_baseline:
             argv.append("--crt-allow-unconverged-baseline")
-        if crt_polish_baseline:
-            argv.append("--crt-polish-baseline")
+        if crt_polish_baseline is not None:
+            argv.append("--crt-polish-baseline" if crt_polish_baseline else "--no-crt-polish-baseline")
         if crt_pool is not None:
             _append_cli_arg(argv, "--crt-pool", crt_pool)
         if crt_only:

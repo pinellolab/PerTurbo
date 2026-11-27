@@ -589,8 +589,9 @@ def main(argv: list[str] | None = None) -> None:
         description="Run PerTurbo end-to-end on an AnnData/MuData file.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    parser.add_argument("--input", required=True, help="Path to .h5ad or .h5mu file")
-    parser.add_argument(
+    data = parser.add_argument_group("Input and screen design")
+    data.add_argument("--input", required=True, help="Path to .h5ad or .h5mu file")
+    data.add_argument(
         "--pairs-to-test",
         default=None,
         help=(
@@ -601,29 +602,29 @@ def main(argv: list[str] | None = None) -> None:
             "retain their original families."
         ),
     )
-    parser.add_argument(
+    data.add_argument(
         "--cis-pairs", metavar="FILE",
         help="CSV/TSV/Parquet of candidate element,gene pairs. Apply one BH correction "
         "over finite tests in this set and include q_cis in the main effect table.",
     )
-    parser.add_argument("--out-dir", required=True, help="Directory to write outputs")
-    parser.add_argument("--modality-key", default=None, help="MuData modality key (e.g., rna)")
-    parser.add_argument(
+    data.add_argument("--out-dir", required=True, help="Directory to write outputs")
+    data.add_argument("--modality-key", default=None, help="MuData modality key (e.g., rna)")
+    data.add_argument(
         "--perturbation-key",
         default=None,
         help="Obs field for perturbation labels (required for low-MOI inputs).",
     )
-    parser.add_argument(
+    data.add_argument(
         "--perturbation-modality-key",
         default=None,
         help="MuData modality key containing the perturbation matrix (high-MOI inputs).",
     )
-    parser.add_argument(
+    data.add_argument(
         "--perturbation-layer",
         default=None,
         help="Layer in the perturbation modality containing the binarized matrix (defaults to .X).",
     )
-    parser.add_argument(
+    data.add_argument(
         "--perturbation-element-varm-key",
         default=None,
         help=(
@@ -631,7 +632,7 @@ def main(argv: list[str] | None = None) -> None:
             "binary map. When set, beta effects are fit at element level."
         ),
     )
-    parser.add_argument(
+    data.add_argument(
         "--perturbation-element-names-uns-key",
         default=None,
         help=(
@@ -639,29 +640,29 @@ def main(argv: list[str] | None = None) -> None:
             "Required when --perturbation-element-varm-key has no column labels."
         ),
     )
-    parser.add_argument(
+    data.add_argument(
         "--control-substring",
         default=None,
         help="Substring identifying controls (required for low-MOI inputs).",
     )
-    parser.add_argument(
+    data.add_argument(
         "--max-control-cells",
         type=int,
         default=10000,
         help="Maximum number of control cells to use (randomly subsampled).",
     )
-    parser.add_argument(
+    data.add_argument(
         "--continuous-covariates",
         nargs="+",
         default=None,
         help="Continuous obs covariates to regress (auto log1p+zscore for count-like, otherwise zscore).",
     )
-    parser.add_argument(
+    data.add_argument(
         "--batch-covariate",
         default=None,
         help="Optional categorical obs covariate (one-hot with most-frequent reference dropped).",
     )
-    parser.add_argument(
+    data.add_argument(
         "--size-factor-key",
         default=None,
         help=(
@@ -669,7 +670,7 @@ def main(argv: list[str] | None = None) -> None:
             "Must not be raw count/library-size data."
         ),
     )
-    parser.add_argument(
+    data.add_argument(
         "--library-size-key",
         default=None,
         help=(
@@ -677,7 +678,7 @@ def main(argv: list[str] | None = None) -> None:
             "This is transformed internally to centered log size factors."
         ),
     )
-    parser.add_argument(
+    data.add_argument(
         "--size-factor-mode",
         default="observed",
         choices=VALID_CLI_SIZE_FACTOR_MODES,
@@ -688,7 +689,8 @@ def main(argv: list[str] | None = None) -> None:
             "conditional randomization test), or fix them to zero (none)."
         ),
     )
-    parser.add_argument(
+    testing = parser.add_argument_group("Association tests and reporting")
+    testing.add_argument(
         "--crt",
         action=argparse.BooleanOptionalAction,
         default=None,
@@ -702,9 +704,9 @@ def main(argv: list[str] | None = None) -> None:
             "is unsupported, while an explicit --crt reports the problem and stops."
         ),
     )
-    parser.add_argument("--crt-num-resamples", type=int, default=999)
-    parser.add_argument("--crt-seed", type=int, default=0)
-    parser.add_argument(
+    testing.add_argument("--crt-num-resamples", type=int, default=999)
+    testing.add_argument("--crt-seed", type=int, default=0)
+    testing.add_argument(
         "--crt-gene-chunk-size",
         type=int,
         default=500,
@@ -713,8 +715,8 @@ def main(argv: list[str] | None = None) -> None:
             "target times the resample block, so it is the main memory knob."
         ),
     )
-    parser.add_argument("--crt-max-gather-gib", type=float, default=8.0)
-    parser.add_argument(
+    testing.add_argument("--crt-max-gather-gib", type=float, default=8.0)
+    testing.add_argument(
         "--crt-tail-families",
         nargs="*",
         default=["saddlepoint"],
@@ -726,7 +728,7 @@ def main(argv: list[str] | None = None) -> None:
             "from resampled moments and need resamples. Pass with no values to skip them."
         ),
     )
-    parser.add_argument(
+    testing.add_argument(
         "--crt-only",
         action="store_true",
         help=(
@@ -735,7 +737,7 @@ def main(argv: list[str] | None = None) -> None:
             "only the test is wanted (power calculations, calibration checks)."
         ),
     )
-    parser.add_argument(
+    testing.add_argument(
         "--crt-auto-moi-threshold",
         type=float,
         default=3.0,
@@ -746,7 +748,7 @@ def main(argv: list[str] | None = None) -> None:
             "at a true high MOI (tens of guides per cell) does not."
         ),
     )
-    parser.add_argument(
+    testing.add_argument(
         "--crt-min-control-cells",
         type=int,
         default=1000,
@@ -756,7 +758,7 @@ def main(argv: list[str] | None = None) -> None:
             "the control-anchored null noisy and the all-cells null uninformative. Default 1000."
         ),
     )
-    parser.add_argument(
+    testing.add_argument(
         "--crt-test-control-elements",
         action="store_true",
         help=(
@@ -767,7 +769,7 @@ def main(argv: list[str] | None = None) -> None:
             "diagnostic; a clean calibration needs controls held out of the pool."
         ),
     )
-    parser.add_argument(
+    testing.add_argument(
         "--crt-pool",
         choices=("auto", "control-anchored", "all-cells"),
         default="auto",
@@ -777,11 +779,11 @@ def main(argv: list[str] | None = None) -> None:
             "(high MOI) tests each element as a marginal association over every analysed cell, with "
             "the null fit on all cells; it needs the guide-to-element map "
             "(--perturbation-element-varm-key) and no control cells, and uses a "
-            "Bernoulli-sum saddlepoint tail approximation with no resamples. 'auto' picks all-cells when the element "
-            "map is given, control-anchored otherwise."
+            "Bernoulli-sum saddlepoint tail approximation with no resamples. 'auto' selects the pool from the median guides per cell "
+            "and --crt-auto-moi-threshold. Specify the pool when analyzing a guide subset."
         ),
     )
-    parser.add_argument(
+    testing.add_argument(
         "--crt-mechanism",
         choices=list(CRT_MECHANISMS),
         default="propensity",
@@ -791,7 +793,7 @@ def main(argv: list[str] | None = None) -> None:
             "cell's fitted selection probability (propensity)."
         ),
     )
-    parser.add_argument(
+    testing.add_argument(
         "--crt-saddlepoint-only",
         action=argparse.BooleanOptionalAction,
         default=None,
@@ -803,11 +805,11 @@ def main(argv: list[str] | None = None) -> None:
             "crt_p_value stays missing without resamples."
         ),
     )
-    parser.add_argument(
+    testing.add_argument(
         "--report-low-information", action="store_true",
         help="Include observed_nonzero, expected_nonzero and low_information in the per-pair output.",
     )
-    parser.add_argument(
+    testing.add_argument(
         "--crt-min-informative-cells",
         type=float,
         default=None,
@@ -819,13 +821,13 @@ def main(argv: list[str] | None = None) -> None:
             "columns and flags nothing."
         ),
     )
-    parser.add_argument(
+    testing.add_argument(
         "--crt-screen-p-value",
         type=float,
         default=0.05,
         help="Evaluate the saddlepoint only where the Pearson III screen is at or below this p-value.",
     )
-    parser.add_argument(
+    testing.add_argument(
         "--crt-two-sided",
         choices=["symmetric", "equal-tail"],
         default="equal-tail",
@@ -834,7 +836,7 @@ def main(argv: list[str] | None = None) -> None:
             "'equal-tail' is twice the tail on the observed side, which rejects each tail equally under a skewed null."
         ),
     )
-    parser.add_argument(
+    testing.add_argument(
         "--crt-all-cells-batch-support",
         dest="crt_all_cells_batch_support",
         action=argparse.BooleanOptionalAction,
@@ -848,7 +850,7 @@ def main(argv: list[str] | None = None) -> None:
             "unaffected; --no-crt-all-cells-batch-support restores the pre-2.0.0rc9 behaviour."
         ),
     )
-    parser.add_argument(
+    testing.add_argument(
         "--crt-baseline-step-tolerance",
         type=float,
         default=DEFAULT_NEWTON_STEP_TOLERANCE,
@@ -858,7 +860,7 @@ def main(argv: list[str] | None = None) -> None:
             "check that it is fit well enough for the score test to mean what it says."
         ),
     )
-    parser.add_argument(
+    testing.add_argument(
         "--crt-allow-unconverged-baseline",
         action=argparse.BooleanOptionalAction,
         default=False,
@@ -867,7 +869,7 @@ def main(argv: list[str] | None = None) -> None:
             "By default, withhold their CRT p-values and continue testing other genes."
         ),
     )
-    parser.add_argument(
+    testing.add_argument(
         "--crt-polish-baseline",
         action=argparse.BooleanOptionalAction,
         default=True,
@@ -877,8 +879,9 @@ def main(argv: list[str] | None = None) -> None:
             "the stage-one coefficients as they came out of SVI."
         ),
     )
-    parser.add_argument("--gene-name-key", default=None, help="Var field for gene names")
-    parser.add_argument(
+    data.add_argument("--gene-name-key", default=None, help="Var field for gene names")
+    filtering = parser.add_argument_group("Expression filters")
+    filtering.add_argument(
         "--clip-gene-expression-percentile",
         type=float,
         default=100.0,
@@ -890,7 +893,7 @@ def main(argv: list[str] | None = None) -> None:
             "--likelihood=censored_nb requires a value strictly below 100."
         ),
     )
-    parser.add_argument(
+    filtering.add_argument(
         "--gene-outlier-action",
         default="none",
         choices=("none", "filter_cells"),
@@ -898,18 +901,18 @@ def main(argv: list[str] | None = None) -> None:
             "How to apply the gene-wise outlier thresholds: do nothing, or drop cells with many outlier genes."
         ),
     )
-    parser.add_argument(
+    filtering.add_argument(
         "--gene-outlier-threshold-floor",
         type=int,
         default=2,
         help="Minimum per-gene outlier threshold after percentile estimation.",
     )
-    parser.add_argument(
+    filtering.add_argument(
         "--winsorize-gene-expression-outliers",
         action="store_true",
         help="Winsorize remaining gene counts down to their per-gene outlier thresholds after optional cell filtering.",
     )
-    parser.add_argument(
+    filtering.add_argument(
         "--outlier-cell-min-genes",
         type=int,
         default=0,
@@ -918,31 +921,32 @@ def main(argv: list[str] | None = None) -> None:
             "outlier genes. Set >0 to enable a burden-based cell filter."
         ),
     )
-    parser.add_argument(
+    model = parser.add_argument_group("Model and device")
+    model.add_argument(
         "--device",
         default=None,
         help="JAX device spec: platform ('cpu'/'gpu') or indexed device ('gpu:1').",
     )
-    parser.add_argument("--prior", default="normal", help="Prior for beta (normal or cauchy)")
-    parser.add_argument(
+    model.add_argument("--prior", default="normal", help="Prior for beta (normal or cauchy)")
+    model.add_argument(
         "--likelihood",
         default="negbin",
         choices=("nb", "negbin", "censored_nb", "lognormal_nb", "mixture_nb"),
         help="Observation model (nb/negbin, censored_nb, lognormal_nb, or mixture_nb)",
     )
-    parser.add_argument(
+    model.add_argument(
         "--guide-effect-strategy",
         default="shared",
         choices=("shared", "relative", "scaled"),
         help="Stage-two guide effects. The legacy spelling scaled selects relative efficiency.",
     )
-    parser.add_argument(
+    model.add_argument(
         "--guide-activity-mode",
         default="always_on",
         choices=("always_on", "absolute"),
         help="Guide activity model for stage-2 fitting.",
     )
-    parser.add_argument(
+    model.add_argument(
         "--guide-random-effects",
         action="store_true",
         help=(
@@ -950,7 +954,7 @@ def main(argv: list[str] | None = None) -> None:
             "and carry that calibration into stage-2."
         ),
     )
-    parser.add_argument(
+    model.add_argument(
         "--fit-perturbation-dispersion",
         action="store_true",
         help=(
@@ -958,63 +962,65 @@ def main(argv: list[str] | None = None) -> None:
             "Currently supported for low-MOI negative-binomial fits only."
         ),
     )
-    parser.add_argument(
+    model.add_argument(
         "--perturbation-dispersion-prior-rate",
         type=float,
         default=10.0,
         help="Rate of the exponential prior on stage-2 excess inverse dispersion.",
     )
-    parser.add_argument("--output-format", choices=("h5mu", "bundle", "legacy"), default="h5mu",
+    outputs = parser.add_argument_group("Output files")
+    outputs.add_argument("--output-format", choices=("h5mu", "bundle", "legacy"), default="h5mu",
                         help="Save fitted.h5mu (default), a source-linked compact bundle, or the rc12 directory.")
-    parser.add_argument(
+    outputs.add_argument(
         "--save-model-params",
         action=argparse.BooleanOptionalAction,
         default=True,
         help="Save a reloadable fit in the selected format (default: on).",
     )
-    parser.add_argument(
+    numerics = parser.add_argument_group("Optimization and memory")
+    numerics.add_argument(
         "--num-steps",
         type=int,
         default=None,
         help="Shared raw SVI step count for both control and perturbation-effect fits.",
     )
-    parser.add_argument(
+    numerics.add_argument(
         "--num-epochs",
         type=int,
         default=None,
         help="Shared dataset passes for both control and perturbation-effect fits.",
     )
-    parser.add_argument(
+    numerics.add_argument(
         "--num-steps-control",
         type=int,
         default=None,
         help="Stage-specific raw SVI step count for the control fit.",
     )
-    parser.add_argument(
+    numerics.add_argument(
         "--num-epochs-control",
         type=int,
         default=None,
         help="Stage-specific dataset passes for the control fit.",
     )
-    parser.add_argument(
+    numerics.add_argument(
         "--num-steps-betas",
         type=int,
         default=None,
         help="Stage-specific raw SVI step count for perturbation-effect fitting.",
     )
-    parser.add_argument(
+    numerics.add_argument(
         "--num-epochs-betas",
         type=int,
         default=None,
         help="Stage-specific dataset passes for perturbation-effect fitting.",
     )
-    parser.add_argument(
+    numerics.add_argument(
         "--num-particles",
         type=int,
         default=1,
         help="Number of ELBO particles for Monte Carlo integration.",
     )
-    parser.add_argument(
+    numerics.add_argument(
         "--step-size",
         type=float,
         default=0.01,
@@ -1024,13 +1030,13 @@ def main(argv: list[str] | None = None) -> None:
             "simulated effects as well as 0.003 with 2,500, and 0.003 with 300 under-converges."
         ),
     )
-    parser.add_argument(
+    numerics.add_argument(
         "--num-factors",
         type=int,
         default=0,
         help="If >0, fit this many latent factors (shared across controls and betas)",
     )
-    parser.add_argument(
+    numerics.add_argument(
         "--minibatch-size",
         type=int,
         default=0,
@@ -1039,19 +1045,19 @@ def main(argv: list[str] | None = None) -> None:
             "(applies to control and beta fits unless overridden)."
         ),
     )
-    parser.add_argument(
+    numerics.add_argument(
         "--minibatch-size-control",
         type=int,
         default=0,
         help="If >0, subsample cells per step for control minibatch SVI",
     )
-    parser.add_argument(
+    numerics.add_argument(
         "--minibatch-size-betas",
         type=int,
         default=0,
         help="If >0, subsample cells per step for beta minibatch SVI",
     )
-    parser.add_argument(
+    numerics.add_argument(
         "--gene-chunk-size",
         type=int,
         default=0,
@@ -1063,7 +1069,7 @@ def main(argv: list[str] | None = None) -> None:
             "Control fitting remains capped by --max-control-cells."
         ),
     )
-    parser.add_argument(
+    numerics.add_argument(
         "--perturbation-chunk-size",
         type=int,
         default=0,
@@ -1073,18 +1079,18 @@ def main(argv: list[str] | None = None) -> None:
             "Co-occurring assignments use gene blocks to retain the joint model."
         ),
     )
-    parser.add_argument(
+    numerics.add_argument(
         "--max-chunk-size",
         type=int,
         default=50000,
         help="Maximum number of cells per perturbation chunk",
     )
-    parser.add_argument(
+    numerics.add_argument(
         "--backed",
         action="store_true",
         help="Enable disk-backed reads for AnnData/MuData inputs",
     )
-    parser.add_argument(
+    numerics.add_argument(
         "--use-observed-size-factors",
         action="store_true",
         help=(
@@ -1092,7 +1098,7 @@ def main(argv: list[str] | None = None) -> None:
             "Backward-compatible alias for --size-factor-mode=observed."
         ),
     )
-    parser.add_argument(
+    numerics.add_argument(
         "--propagate-baseline-uncertainty",
         action="store_true",
         help=(
@@ -1100,20 +1106,20 @@ def main(argv: list[str] | None = None) -> None:
             "for beta_0 and theta instead of conditioning on their point estimates."
         ),
     )
-    parser.add_argument(
+    numerics.add_argument(
         "--no-progress-bar",
         action="store_false",
         dest="progress",
         help="Disable tqdm progress bar during SVI",
     )
     parser.set_defaults(progress=True)
-    parser.add_argument(
+    numerics.add_argument(
         "--progress-chunk-size",
         type=int,
         default=100,
         help="Number of SVI steps per progress bar update",
     )
-    parser.add_argument("--single-frame", action="store_true", help="Output long dataframe")
+    numerics.add_argument("--single-frame", action="store_true", help="Output long dataframe")
     args = parser.parse_args(argv)
     if args.crt_min_informative_cells is None:
         args.crt_min_informative_cells = DEFAULT_CRT_MIN_INFORMATIVE_CELLS

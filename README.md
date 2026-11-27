@@ -21,13 +21,7 @@ python -m pip install .
 perturbo --help
 ```
 
-Use Python 3.11 or 3.12. For NVIDIA CUDA 12 support, install `".[cuda]"` in place of `.`. The published reference version for these tutorials is [v2.0.0rc12](https://github.com/pinellolab/PerTurbo/releases/tag/v2.0.0rc12). To install that specific version:
-
-```bash
-python -m pip install "perturbo @ git+https://github.com/pinellolab/PerTurbo.git@v2.0.0rc12"
-```
-
-The named FDR columns, fitted MuData export, and relative-mode gene blocking described below are available in this development checkout. The tutorial commands for running a screen also work with rc12. [Container and contributor setup](docs/contributing.md)
+Use Python 3.11 or 3.12. For NVIDIA CUDA 12 support, install `".[cuda]"` in place of `.`. Use the tutorials shipped with the same checkout as the installed package. [Container and contributor setup](docs/contributing.md)
 
 ## Run a screen
 

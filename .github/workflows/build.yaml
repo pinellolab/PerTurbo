@@ -33,14 +33,16 @@ jobs:
           python - <<'PY'
           import json
           from pathlib import Path
+          import mudata
+          from perturbo import PerTurboModel
           for screen in ("gasperini", "replogle"):
               notebook = json.loads(Path(f"docs/tutorials/{screen}.ipynb").read_text())
               outputs = [out for cell in notebook["cells"] for out in cell.get("outputs", [])]
               assert any("image/png" in out.get("data", {}) for out in outputs), screen
+              fitted = Path(f"docs/tutorials/runs/{screen}/fitted.h5mu")
+              model = PerTurboModel.load(fitted)
+              assert model.gene_names
+              effects = mudata.read_h5mu(fitted).uns["_perturbo"]["effects"]
+              assert effects["q_global"].between(0, 1).any(), screen
           PY
-          for screen in gasperini replogle; do
-            bundle="docs/tutorials/runs/$screen"
-            python -m perturbo.fitted_export "$bundle" "$RUNNER_TEMP/export-$screen"
-            python -m perturbo.fitted_restore "$RUNNER_TEMP/export-$screen/fitted.h5mu" --reference-bundle "$bundle"
-          done
           sphinx-build -W --keep-going -b html docs docs/_build/html
