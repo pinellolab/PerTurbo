@@ -306,6 +306,8 @@ def save_light_fit_bundle(
     guide_efficacy: np.ndarray | None = None,
     size_factors: np.ndarray | None = None,
     cell_keep_indices: np.ndarray | None = None,
+    baseline_cell_indices: np.ndarray | None = None,
+    source_cell_count: int | None = None,
 ) -> Path:
     bundle_dir = Path(out_dir)
     bundle_dir.mkdir(parents=True, exist_ok=True)
@@ -313,6 +315,17 @@ def save_light_fit_bundle(
     payload["producer"] = "perturbo"
     payload["bundle_format"] = "light_model_params"
     payload["bundle_version"] = 2
+    if baseline_cell_indices is not None:
+        rows = np.asarray(baseline_cell_indices, dtype=np.int64)
+        path = bundle_dir / "baseline_cell_indices.npy"
+        payload["n_baseline_cells"] = len(rows)
+        if source_cell_count is not None and np.array_equal(rows, np.arange(source_cell_count)):
+            payload["baseline_cell_mapping"] = "all_cells"
+            path.unlink(missing_ok=True)
+        else:
+            np.save(path, rows)
+            payload["baseline_cell_indices_file"] = path.name
+            payload["baseline_cell_mapping"] = "verified_indices"
     if cell_keep_indices is not None:
         keep = np.asarray(cell_keep_indices, dtype=np.int64).reshape(-1)
         np.save(bundle_dir / "cell_keep_indices.npy", keep)

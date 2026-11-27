@@ -859,10 +859,10 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument(
         "--crt-allow-unconverged-baseline",
         action=argparse.BooleanOptionalAction,
-        default=True,
+        default=False,
         help=(
-            "Test genes whose stage-one baseline fails the null-mode check, with a warning "
-            "(default). Disable to withhold their CRT p-values and continue testing other genes."
+            "Test genes whose baseline fails the null-mode check, with a warning. "
+            "By default, withhold their CRT p-values and continue testing other genes."
         ),
     )
     parser.add_argument(
@@ -2796,6 +2796,8 @@ def main(argv: list[str] | None = None) -> None:
             out_dir,
             metadata=metadata,
             control_arrays=control_fit_arrays(control_fit),
+            baseline_cell_indices=getattr(controls, "baseline_cell_indices", None),
+            source_cell_count=n_analysis_cells,
             beta_arrays=_beta_fit_arrays(beta_fit),
             guide_posteriors=guide_posteriors or None,
             guide_efficacy=guide_efficacy,

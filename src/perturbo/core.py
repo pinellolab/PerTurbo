@@ -96,6 +96,7 @@ class PerTurboData:
     categorical_batch_codes: jnp.ndarray | None = None
     categorical_batch_names: list[str] | None = None
     _analysis_design_token: object | None = None
+    baseline_cell_indices: np.ndarray | None = None
 
 
 @dataclass(frozen=True)
@@ -2251,6 +2252,7 @@ def load_controls(
     pert_id_arr = np.asarray(_to_dense(pert_id))
     pert_dtype = jnp.bool_ if pert_id_arr.ndim == 2 else None
     out = PerTurboData(
+        baseline_cell_indices=obs_idx,
         counts=counts_jax,
         pert_id=_to_jax(pert_id_arr, device_obj, dtype=pert_dtype),
         pert_names=pert_names,

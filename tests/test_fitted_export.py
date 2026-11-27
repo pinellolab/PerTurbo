@@ -8,6 +8,24 @@ import pandas as pd
 import pytest
 
 from perturbo.fitted_export import export
+from perturbo.io import save_light_fit_bundle
+
+
+def test_writer_records_exact_baseline_order_and_elides_identity(tmp_path):
+    for rows in ([2, 0], [0, 1, 2]):
+        save_light_fit_bundle(
+            tmp_path, metadata={}, control_arrays={}, beta_arrays={},
+            baseline_cell_indices=np.array(rows), source_cell_count=3,
+        )
+        metadata = json.loads((tmp_path / "metadata.json").read_text())
+        assert metadata["n_baseline_cells"] == len(rows)
+        path = tmp_path / "baseline_cell_indices.npy"
+        if len(rows) == 2:
+            assert metadata["baseline_cell_mapping"] == "verified_indices"
+            np.testing.assert_array_equal(np.load(path), rows)
+        else:
+            assert metadata["baseline_cell_mapping"] == "all_cells"
+            assert not path.exists()
 
 
 def bundle(path, strategy):
