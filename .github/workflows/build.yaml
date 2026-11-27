@@ -29,16 +29,20 @@ jobs:
           wheel=(dist/*.whl)
           uv pip install --python /tmp/perturbo-wheel/bin/python "${wheel[0]}[docs]"
           export PATH="/tmp/perturbo-wheel/bin:$PATH"
-          jupyter execute --inplace --timeout=600 docs/tutorials/gasperini.ipynb docs/tutorials/replogle.ipynb
+          for screen in gasperini replogle; do
+            jupyter execute --inplace --timeout=1800 "docs/tutorials/$screen.ipynb"
+            PERTURBO_TUTORIAL_QUICK=1 jupyter execute --inplace --timeout=1800 "docs/tutorials/${screen}_power.ipynb"
+          done
           python - <<'PY'
           import json
           from pathlib import Path
           import mudata
           from perturbo import PerTurboModel
           for screen in ("gasperini", "replogle"):
-              notebook = json.loads(Path(f"docs/tutorials/{screen}.ipynb").read_text())
-              outputs = [out for cell in notebook["cells"] for out in cell.get("outputs", [])]
-              assert any("image/png" in out.get("data", {}) for out in outputs), screen
+              for name in (screen, f"{screen}_power"):
+                  notebook = json.loads(Path(f"docs/tutorials/{name}.ipynb").read_text())
+                  outputs = [out for cell in notebook["cells"] for out in cell.get("outputs", [])]
+                  assert any("image/png" in out.get("data", {}) for out in outputs), name
               fitted = Path(f"docs/tutorials/runs/{screen}/fitted.h5mu")
               model = PerTurboModel.load(fitted)
               assert model.gene_names

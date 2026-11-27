@@ -10,7 +10,7 @@ PerTurbo estimates how CRISPR perturbations change gene expression in single cel
 | RNA counts and multiple guide assignments per cell | [Gasperini high-MOI notebook](docs/tutorials/gasperini.ipynb). Map guides to elements, estimate their relative efficiencies, and test associations across all cells. |
 | RNA and guide sequencing reads | [CRISPR_Pipeline input and samplesheet guide](https://github.com/pinellolab/CRISPR_Pipeline/blob/8061b88d871b8fa2720c8484906de9b6d9cd7330/README.md). Start with preprocessing and guide assignment. The pipeline has its own configuration for downstream inference. |
 
-Both notebooks include small real datasets, complete commands, and plotted results. [Tutorial inputs and setup](docs/tutorials/index.md)
+Each analysis notebook fits an observed screen of 100 elements or targeting constructs and 256 genes. Its companion notebook uses the saved baseline to simulate the effects of changing coverage and effect size. [Gasperini cis power](docs/tutorials/gasperini_power.ipynb) · [Replogle regulon power](docs/tutorials/replogle_power.ipynb) · [Tutorial inputs and setup](docs/tutorials/index.md)
 
 ## Install
 
@@ -34,19 +34,20 @@ perturbo --input docs/tutorials/inputs/replogle.h5ad --out-dir runs/replogle \
   --perturbation-key gene_transcript --control-substring non-targeting \
   --gene-name-key gene_name --library-size-key UMI_count --batch-covariate gem_group \
   --crt-pool control-anchored --guide-effect-strategy shared \
-  --num-steps-control 2500 --num-steps-betas 1000 --step-size 0.01
+  --num-steps-control 500 --num-steps-betas 500 --step-size 0.01
 ```
 
 **Multiple guides per cell.** The Gasperini input stores binary assignments in the `guide` modality. Its guide-by-element matrix identifies guides aimed at the same element, and its ordered element names identify the matrix columns. The relative fit estimates an element effect and a guide multiplier for each response gene.
 
 ```bash
 perturbo --input docs/tutorials/inputs/gasperini.h5mu --out-dir runs/gasperini \
-  --modality-key gene --perturbation-modality-key guide --gene-name-key symbol \
+  --modality-key gene --perturbation-modality-key guide \
   --perturbation-element-varm-key guide_intended_target_pairs \
   --perturbation-element-names-uns-key intended_targets \
   --library-size-key total_umis --continuous-covariates total_umis percent_mito \
+  --cis-pairs examples/manuscript/gasperini-cis-candidates.parquet \
   --batch-covariate prep_batch --crt-pool all-cells --guide-effect-strategy relative \
-  --num-steps-control 2500 --num-steps-betas 1000 --step-size 0.01
+  --num-steps-control 500 --num-steps-betas 500 --step-size 0.01
 ```
 
 For a large fit, `--gene-chunk-size` can limit the number of response genes fitted together in stage two. See `perturbo --help` for supported modes and memory controls.
