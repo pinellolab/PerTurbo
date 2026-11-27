@@ -35,6 +35,18 @@ A shared fit stores its strategy and omits the fixed-efficiency table. Relative 
 
 The reference Gasperini subset has 12,988 cells, 9 genes and 18 guides. Its relative-effect run yielded 81 element–gene rows, 162 guide–gene rows and three transformed covariates. The fit had 10,000 baseline offsets. Native modality IDs and counts and all baseline arrays were independently compared with the original files. This input has no primary significance test. Tests exercise missing and finite p/q-values including 1e-200, cis family alignment, reversed guide/gene table ordering and failure handling.
 
+## Diagnostic fields
+
+| Directory bundle | Fitted MuData |
+| --- | --- |
+| Primary p-value and named BH families | In `_perturbo/effects` as `p_value`, `q_global`, `q_element` and optional `q_cis` |
+| Detected-cell annotations | In the same table when present in the bundle. New fits opt in with `--report-low-information`. Older prefixed names map to `observed_nonzero`, `expected_nonzero` and `low_information`. |
+| Element posterior z, normal-tail `posterior_prob`, and empirical p-value | Omitted as columns. The saved posterior mean and scale determine the posterior z. The empirical p-value uses additional null information. |
+| Test z-score, method-specific p/q columns and log p-values | Omitted as separate columns. Retain the original bundle for the log p-value or a secondary testing method. |
+| Per-pair tail validity, failure reason, fallback indicators, root residual and fitted null moments | Available in the original test table for the applicable testing method. |
+| Guide-effect z-score | Recomputed from the saved guide-effect mean and scale when restoring the relative fit. |
+| Control and effect fitting losses, covariate and test metadata | Stored under `_perturbo` when available. This includes the run-wide detection summaries and the lists of genes withheld in strict mode. |
+
 ## Restore a fitted model
 
 `PerTurboModel.load("fitted.h5mu")` restores the shared or relative stage-two fit and its saved control baseline. The reader streams native result-table columns into dense posterior arrays. It opens the RNA counts backed and reconstructs a low-MOI construct design from the original per-cell treatment labels. A source-cell filter combined with saved offsets or a gene-name override currently materializes the retained RNA slice. Budget memory for the fitted matrices themselves. The converter above still reads its inputs into RAM.

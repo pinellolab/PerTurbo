@@ -10,6 +10,8 @@ and this project adheres to [Semantic Versioning][].
 
 ## Unreleased
 
+- Baseline polishing retries failed genes in float64. Strict testing withholds results for unresolved and zero-baseline-count genes and records their names in run metadata.
+
 - With `--report-low-information` or an explicit `--crt-min-informative-cells` threshold, `observed_nonzero`, `expected_nonzero` and `low_information` replace their `crt_`-prefixed names. Fitted MuData exports preserve these columns from new and older bundles when available.
 
 - The main effect table records one primary p-value and BH adjustments across the screen, within each element, and across an optional prespecified cis list. Use `--cis-pairs` to supply the cis family. The existing method-specific columns remain available.
