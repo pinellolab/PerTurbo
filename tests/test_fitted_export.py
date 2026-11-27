@@ -347,3 +347,19 @@ def test_writer_preserves_large_assay_attributes(tmp_path):
         for obj in (h, h["mod/rna"], h["mod/rna/X"]):
             np.testing.assert_array_equal(obj.attrs["large"], attribute)
         np.testing.assert_array_equal(h["mod/rna/X"][:], np.arange(3))
+
+
+def test_repack_chunked_assay_preserves_tiles_and_edge_values(tmp_path):
+    from perturbo.fitted_output import _assay_file
+
+    values = np.arange(137 * 19, dtype=np.uint16).reshape(137, 19)
+    with h5py.File(tmp_path / "source.h5mu", "w") as h:
+        h.create_group("mod").create_group("rna").create_dataset(
+            "X", data=values, chunks=(32, 4), compression="lzf"
+        )
+    _assay_file(tmp_path / "source.h5mu", tmp_path / "copy.h5mu", "rna")
+    with h5py.File(tmp_path / "copy.h5mu") as h:
+        out = h["mod/rna/X"]
+        assert out.chunks == (32, 4)
+        assert out.compression == "gzip" and out.shuffle
+        np.testing.assert_array_equal(out[:], values)

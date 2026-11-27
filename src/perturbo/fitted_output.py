@@ -63,12 +63,24 @@ def _copy_assays(src, dst, *, skip_results=False):
             and value.dtype.kind in "biufc"
             and (value.compression != "gzip" or value.external or value.is_virtual)
         ):
-            out = dst.create_dataset(key, shape=value.shape, dtype=value.dtype, track_order=True, **COMPRESSION)
+            chunks = value.chunks
+            copy_by_chunk = chunks is not None and all(
+                c <= size for c, size in zip(chunks, value.shape)
+            ) and int(np.prod(chunks)) * value.dtype.itemsize <= (8 << 20)
+            out = dst.create_dataset(
+                key, shape=value.shape, dtype=value.dtype, track_order=True,
+                chunks=chunks if copy_by_chunk else True, **COMPRESSION,
+            )
             out.attrs.update(value.attrs)
-            row_bytes = int(np.prod(value.shape[1:])) * value.dtype.itemsize
-            block = max(1, (8 << 20) // row_bytes)
-            for start in range(0, value.shape[0], block):
-                out[start : start + block] = value[start : start + block]
+            if copy_by_chunk:
+                # Tall RNA chunks can span many row batches. Read and compress each once.
+                for tile in value.iter_chunks():
+                    out[tile] = value[tile]
+            else:
+                row_bytes = int(np.prod(value.shape[1:])) * value.dtype.itemsize
+                block = max(1, (8 << 20) // row_bytes)
+                for start in range(0, value.shape[0], block):
+                    out[start : start + block] = value[start : start + block]
         else:
             src.copy(value, dst, name=key)
 
