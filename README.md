@@ -51,6 +51,8 @@ perturbo --input docs/tutorials/inputs/gasperini.h5mu --out-dir runs/gasperini \
 
 For a large fit, `--gene-chunk-size` can limit the number of response genes fitted together in stage two. See `perturbo --help` for supported modes and memory controls.
 
+Full-screen commands for the six experimental datasets, including the Gasperini baseline settings and K562 genome-wide blocking, are in [Manuscript examples](examples/manuscript/README.md).
+
 ## Read the results
 
 ```python
