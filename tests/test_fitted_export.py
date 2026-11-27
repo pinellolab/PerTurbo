@@ -329,3 +329,21 @@ def test_rc13_artifacts_after_relocation(tmp_path, strategy):
         out.write(b"changed")
     with pytest.raises(ValueError, match="checksum"):
         PerTurboModel.load(compact, source_path=moved)
+
+
+def test_writer_preserves_large_assay_attributes(tmp_path):
+    from perturbo.fitted_output import _assay_file
+
+    source = tmp_path / "source.h5mu"
+    dest = tmp_path / "copy.h5mu"
+    attribute = np.arange(20_000, dtype=np.int64)
+    with h5py.File(source, "w", track_order=True) as h:
+        group = h.create_group("mod").create_group("rna", track_order=True)
+        array = group.create_dataset("X", data=np.arange(3), track_order=True)
+        for obj in (h, group, array):
+            obj.attrs["large"] = attribute
+    _assay_file(source, dest, "rna")
+    with h5py.File(dest) as h:
+        for obj in (h, h["mod/rna"], h["mod/rna/X"]):
+            np.testing.assert_array_equal(obj.attrs["large"], attribute)
+        np.testing.assert_array_equal(h["mod/rna/X"][:], np.arange(3))

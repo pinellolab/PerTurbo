@@ -49,19 +49,21 @@ def source_hash(path):
 
 def _copy_assays(src, dst, *, skip_results=False):
     """Losslessly repack ordinary numeric assay arrays with bounded memory."""
+    # Creation-order tracking on destination objects allows HDF5 to store
+    # large attributes, including column names for wide AnnData tables.
     dst.attrs.update(src.attrs)
     for key, value in src.items():
         if skip_results and value.name == "/uns/_perturbo":
             continue
         if isinstance(value, h5py.Group):
-            _copy_assays(value, dst.create_group(key), skip_results=skip_results)
+            _copy_assays(value, dst.create_group(key, track_order=True), skip_results=skip_results)
         elif (
             value.ndim
             and value.size
             and value.dtype.kind in "biufc"
             and (value.compression != "gzip" or value.external or value.is_virtual)
         ):
-            out = dst.create_dataset(key, shape=value.shape, dtype=value.dtype, **COMPRESSION)
+            out = dst.create_dataset(key, shape=value.shape, dtype=value.dtype, track_order=True, **COMPRESSION)
             out.attrs.update(value.attrs)
             row_bytes = int(np.prod(value.shape[1:])) * value.dtype.itemsize
             block = max(1, (8 << 20) // row_bytes)
@@ -76,7 +78,7 @@ def _assay_file(source, path, rna_key, *, skip_results=False):
         if "mod" in src:
             if "uns/_perturbo" in src and not skip_results:
                 raise ValueError("Source already contains PerTurbo results")
-            with h5py.File(path, "w", userblock_size=src.userblock_size) as dst:
+            with h5py.File(path, "w", userblock_size=src.userblock_size, track_order=True) as dst:
                 _copy_assays(src, dst, skip_results=skip_results)
             if src.userblock_size:
                 with open(source, "rb") as inp, open(path, "r+b") as out:
@@ -90,7 +92,7 @@ def _assay_file(source, path, rna_key, *, skip_results=False):
             md.MuData({rna_key: ad.AnnData(**axes)}).write_h5mu(path)
             with h5py.File(path, "r+") as dst:
                 del dst["mod"][rna_key]
-                _copy_assays(src, dst["mod"].create_group(rna_key))
+                _copy_assays(src, dst["mod"].create_group(rna_key, track_order=True))
 
 
 def _frames(root, key, metadata, beta, guides):
