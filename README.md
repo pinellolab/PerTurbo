@@ -60,14 +60,15 @@ For a large fit, `--gene-chunk-size` can limit the number of response genes fitt
 ## Read the results
 
 ```python
-import pandas as pd
+import mudata
 
-effects = pd.read_parquet("runs/gasperini/element_effects.parquet")
+fit = mudata.read_h5mu("runs/gasperini/fitted.h5mu")
+effects = fit.uns["_perturbo"]["effects"]
 hits = effects.loc[effects["q_global"] < 0.1, ["element", "gene", "posterior_mean", "q_global"]]
 print(hits.sort_values("q_global").head())
 ```
 
-A `posterior_mean` of −0.69 corresponds to roughly half the expression. In relative mode it is the parent element effect. The separate `guide_efficiency.parquet` table reports the guide multiplier in its `posterior_mean` column. Match the tables by **both element and response gene** to see the guides for a hit. Shared mode fixes the multiplier to one.
+A `posterior_mean` of −0.69 corresponds to roughly half the expression. In relative mode it is the parent element effect. The `efficiency` table reports the guide multiplier in `guide_relative_efficiency_mean`. Match the tables by **both element and response gene** to see the guides for a hit. Shared mode fixes the multiplier to one.
 
 With `--report-low-information`, the effects table also reports how many assigned cells expressed the gene (`observed_nonzero`) and how many the null model expected (`expected_nonzero`). For tested pairs, `low_information` is true when both counts fall below the threshold (5 by default). This annotation leaves the p-value and BH correction unchanged.
 
@@ -81,7 +82,7 @@ Choose the correction family that matches the question. All three use Benjamini�
 
 To request `q_cis`, supply the complete candidate set with `--cis-pairs cis.tsv` (`element` and `gene` columns, using the fitted IDs). Other rows have missing `q_cis`. The column is omitted when no candidate has a finite test. The metadata records the primary test and family sizes. Filtering a result table preserves its named q-values. In rc12 saddlepoint-only runs, use `crt_saddlepoint_q_value` for screen-wide correction.
 
-The default output is a directory bundle. For a single file containing assays, results and fit parameters, see [exporting and reloading fitted MuData](docs/fitted_export_pilot.md).
+The default output is a self-contained `fitted.h5mu`. Use `--output-format bundle` for a compact directory linked to the original assays. See [loading a fit and relocating its input](docs/fitted_export_pilot.md).
 
 ## License
 

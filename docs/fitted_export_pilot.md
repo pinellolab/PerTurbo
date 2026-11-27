@@ -1,4 +1,21 @@
-# Export and reload a fitted MuData file
+# Fitted outputs
+
+By default, `perturbo --input screen.h5mu --out-dir run` writes `run/fitted.h5mu` with the input assays, annotations, and results. The file can move independently of the input. Inspect `mdata.uns["_perturbo"]["effects"]` for element–gene results and `efficiency` for fitted guide efficiencies. The same default applies to `fit_from_path` and `PerTurboModel.save`.
+
+Use `--output-format bundle` to write `run/bundle/` with `metadata.json`, `fit_arrays.npz`, and result Parquets. When applicable it includes `guide_efficiency.parquet` and `cell_covariates.parquet`. A CLI bundle references the exact input by relative path, original path and SHA-256. When saving a model trained on in-memory assays, its compact bundle includes `source.h5mu`.
+
+```python
+from perturbo import PerTurboModel
+
+model = PerTurboModel.load("run/fitted.h5mu")
+model = PerTurboModel.load("run/bundle", source_path="/new/location/screen.h5mu")
+```
+
+Explicit `--pairs-to-test` results travel in `_perturbo["requested_pairs"]` or in the compact bundle’s `element_effects_requested_pairs.parquet`.
+
+The relocated input must be the same file, including its original bytes. Rewriting or repacking the assay changes its checksum. For scripts expecting the rc12 sidecars, select `--output-format legacy`.
+
+## Converting an existing rc12 bundle
 
 A fitted MuData file keeps the original assays, fit settings, effects, and test results together. The converter reads the directory bundle into memory, so the input and result tables must fit in RAM. The command below uses the named FDR columns and recorded primary test from a new fit.
 
@@ -59,4 +76,4 @@ python -m perturbo.fitted_restore fitted.h5mu --reference-bundle /path/to/rc12_b
 
 This checks the saved posterior means and scales, baseline parameters, size factors and fitted identifier axes. The reader recomputes derived z-values from their saved operands. The comparison allows three machine epsilons of relative error for CPU/GPU division. Repeated, missing or unknown pair identifiers fail restoration. Relative recovery on the real 9-gene subset passed these checks.
 
-The fit CLI continues writing rc12 bundles. Restoration currently covers complete shared and relative effect tables without fitted perturbation dispersion. The manuscript tables omit legacy posterior diagnostics outside this scope. Authenticate replacement source files separately, since matching gene IDs and shapes alone cannot establish input identity.
+The legacy converter reads rc12 bundles. Restoration currently covers complete shared and relative effect tables without fitted perturbation dispersion. The manuscript tables omit legacy posterior diagnostics outside this scope. Authenticate replacement source files separately, since matching gene IDs and shapes alone cannot establish input identity.

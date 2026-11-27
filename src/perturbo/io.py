@@ -503,8 +503,19 @@ def _load_light_bundle_mdata(root: Path, metadata: dict[str, Any], source_data: 
     return mdata
 
 
-def load_fit_bundle(bundle_dir: str | Path, *, source_data: Any | None = None) -> dict[str, Any]:
+def load_fit_bundle(bundle_dir: str | Path, *, source_data: Any | None = None, source_path: str | Path | None = None) -> dict[str, Any]:
     root = Path(bundle_dir)
+    if (root / "fit_arrays.npz").exists():
+        from .fitted_output import load_compact
+
+        if source_data is not None:
+            raise ValueError("Pass source_path= for a checksum-verified compact bundle input")
+        loaded = load_compact(root, source_path)
+        loaded["element_effects"] = _read_element_effects(root)
+        loaded["guide_efficacy"] = loaded["guide_posteriors"].get("guide_relative_efficiency_mean")
+        return loaded
+    if source_path is not None:
+        raise ValueError("source_path applies to source-linked compact bundles")
     metadata = read_json(root / "metadata.json")
     mdata_path = root / "mdata.h5mu"
     if mdata_path.exists():

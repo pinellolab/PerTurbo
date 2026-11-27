@@ -328,6 +328,7 @@ def write_standard_element_effects_parquet(
     requested_pairs: pd.DataFrame | None = None,
     fdr: FdrFamilies | None = None,
     row_block_size: int = 250_000,
+    output_columns: tuple[str, ...] | None = None,
     **kwargs,
 ) -> pd.DataFrame | None:
     """Write row-major blocks and optionally retain only requested rows."""
@@ -351,7 +352,8 @@ def write_standard_element_effects_parquet(
                     frame[name] = values
             if empty is None:
                 empty = frame.iloc[:0].copy()
-            table = pa.Table.from_pandas(frame, preserve_index=False)
+            stored = frame if output_columns is None else frame.loc[:, [c for c in output_columns if c in frame]]
+            table = pa.Table.from_pandas(stored, preserve_index=False)
             if writer is None:
                 writer = pq.ParquetWriter(path, table.schema)
             writer.write_table(table)

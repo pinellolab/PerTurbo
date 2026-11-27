@@ -423,7 +423,7 @@ def test_fit_bundle_roundtrip_preserves_effects_and_sidecars(tmp_path) -> None:
     )
     model.train(steps=1, batch_size=2, accelerator="cpu")
 
-    bundle_dir = model.save(tmp_path / "bundle", overwrite=True)
+    bundle_dir = model.save(tmp_path / "bundle", overwrite=True, output_format="legacy")
     assert (bundle_dir / "mdata.h5mu").exists()
     assert (bundle_dir / "metadata.json").exists()
     assert (bundle_dir / "element_effects.parquet").exists()
@@ -725,7 +725,7 @@ def test_relative_guide_sharing_roundtrip_preserves_guide_outputs(tmp_path) -> N
     medians = model.posterior_medians()
     assert "guide_relative_efficiency" in medians
 
-    bundle_dir = model.save(tmp_path / "relative_bundle", overwrite=True)
+    bundle_dir = model.save(tmp_path / "relative_bundle", overwrite=True, output_format="legacy")
     assert not (bundle_dir / "guide_effects.parquet").exists()
     assert (bundle_dir / "guide_posteriors.npz").exists()
 
@@ -758,7 +758,7 @@ def test_relative_bundle_without_guide_posteriors_loads_with_warning(tmp_path) -
         guide_effect_strategy="relative",
     )
     model.train(steps=1, batch_size=2, accelerator="cpu")
-    bundle_dir = model.save(tmp_path / "legacy_bundle", overwrite=True)
+    bundle_dir = model.save(tmp_path / "legacy_bundle", overwrite=True, output_format="legacy")
     # A legacy bundle has neither the guide posteriors nor the derived efficacy sidecar.
     (bundle_dir / "guide_posteriors.npz").unlink()
     (bundle_dir / "guide_efficacy.npy").unlink(missing_ok=True)

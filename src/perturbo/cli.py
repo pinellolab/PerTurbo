@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import asdict, replace
 import json
 import warnings
+import shutil
+import tempfile
 from pathlib import Path
 import time
 from typing import Any
@@ -962,14 +964,13 @@ def main(argv: list[str] | None = None) -> None:
         default=10.0,
         help="Rate of the exponential prior on stage-2 excess inverse dispersion.",
     )
+    parser.add_argument("--output-format", choices=("h5mu", "bundle", "legacy"), default="h5mu",
+                        help="Save fitted.h5mu (default), a source-linked compact bundle, or the rc12 directory.")
     parser.add_argument(
         "--save-model-params",
         action=argparse.BooleanOptionalAction,
         default=True,
-        help=(
-            "Write a light, simulation-ready fitted model parameter bundle into --out-dir by default. "
-            "The bundle can be loaded with PERTURBO.load(--out-dir) while the original input data remain available."
-        ),
+        help="Save a reloadable fit in the selected format (default: on).",
     )
     parser.add_argument(
         "--num-steps",
@@ -1155,7 +1156,14 @@ def main(argv: list[str] | None = None) -> None:
     )
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    print(f"[perturbo] Outputs will be written to: {out_dir}")
+    final_dir = out_dir
+    modern = args.save_model_params and args.output_format != "legacy"
+    if modern:
+        artifact = final_dir / ("fitted.h5mu" if args.output_format == "h5mu" else "bundle")
+        if artifact.exists():
+            raise FileExistsError(artifact)
+        out_dir = Path(tempfile.mkdtemp(prefix=".fit-work-", dir=final_dir))
+    print(f"[perturbo] Fit workspace: {out_dir}")
 
     continuous_covariates = _dedupe_preserve_order(args.continuous_covariates)
     batch_covariate = None if args.batch_covariate in (None, "", "None") else str(args.batch_covariate)
@@ -1624,12 +1632,13 @@ def main(argv: list[str] | None = None) -> None:
         progress_chunk_size=args.progress_chunk_size,
         guide_random_effects=args.guide_random_effects,
     )
-    _save_loss_plot(
-        control_fit.losses,
-        out_dir / "control_loss_curve.png",
-        title="Control loss curve",
-    )
-    print(f"[perturbo] Wrote {out_dir / 'control_loss_curve.png'}")
+    if not modern:
+        _save_loss_plot(
+            control_fit.losses,
+            out_dir / "control_loss_curve.png",
+            title="Control loss curve",
+        )
+        print(f"[perturbo] Wrote {out_dir / 'control_loss_curve.png'}")
     control_fit_path = out_dir / "control_fit.npz"
     save_array_bundle(control_fit_path, control_fit_arrays(control_fit))
     print(f"[perturbo] Wrote {control_fit_path}")
@@ -2577,6 +2586,8 @@ def main(argv: list[str] | None = None) -> None:
             )
     requested_pairs = load_pairs_to_test(args.pairs_to_test) if args.pairs_to_test is not None else None
     element_effects_path = out_dir / "element_effects.parquet"
+    from .fitted_output import EFFECT_COLUMNS
+
     restricted = write_standard_element_effects_parquet(
         element_effects_path,
         method="perturbo",
@@ -2587,6 +2598,7 @@ def main(argv: list[str] | None = None) -> None:
         null_z_values=null_z_values,
         extra_columns=crt_columns,
         requested_pairs=requested_pairs,
+        output_columns=EFFECT_COLUMNS if modern else None,
         fdr=fdr,
     )
     print(f"[perturbo] Wrote {element_effects_path}")
@@ -2658,7 +2670,7 @@ def main(argv: list[str] | None = None) -> None:
         covariate_metadata_path.write_text(json.dumps(metadata, indent=2))
         print(f"[perturbo] Wrote {covariate_metadata_path}")
 
-    if (chunks is not None or gene_chunk_size is not None) and chunk_losses:
+    if not modern and (chunks is not None or gene_chunk_size is not None) and chunk_losses:
         _save_multi_loss_plot(
             chunk_losses,
             out_dir / "beta_loss_curve.png",
@@ -2666,14 +2678,14 @@ def main(argv: list[str] | None = None) -> None:
             labels=[f"chunk {i + 1}" for i in range(len(chunk_losses))],
         )
         print(f"[perturbo] Wrote {out_dir / 'beta_loss_curve.png'}")
-    elif beta_fit.losses.size > 0:
+    elif not modern and beta_fit.losses.size > 0:
         _save_loss_plot(
             beta_fit.losses,
             out_dir / "beta_loss_curve.png",
             title="Beta loss curve",
         )
         print(f"[perturbo] Wrote {out_dir / 'beta_loss_curve.png'}")
-    else:
+    elif not modern:
         print("[perturbo] Skipping beta loss plot (no losses recorded).")
 
     if args.save_model_params:
@@ -2724,6 +2736,7 @@ def main(argv: list[str] | None = None) -> None:
             winsorize_gene_expression=apply_winsorize,
         )
         metadata = {
+            "stage2_fitted": not args.crt_only,
             "likelihood": args.likelihood,
             "effect_prior_dist": args.prior,
             "efficiency_mode": guide_effect_strategy,
@@ -2792,18 +2805,42 @@ def main(argv: list[str] | None = None) -> None:
                 "gene_chunk_size": gene_chunk_size,
             },
         }
-        save_light_fit_bundle(
-            out_dir,
+        saved_params = dict(
             metadata=metadata,
             control_arrays=control_fit_arrays(control_fit),
-            baseline_cell_indices=getattr(controls, "baseline_cell_indices", None),
-            source_cell_count=n_analysis_cells,
             beta_arrays=_beta_fit_arrays(beta_fit),
             guide_posteriors=guide_posteriors or None,
             guide_efficacy=guide_efficacy,
             size_factors=saved_size_factors,
+            baseline_cell_indices=controls.baseline_cell_indices,
+            source_cell_count=n_analysis_cells,
             cell_keep_indices=np.flatnonzero(cell_keep_mask) if cell_keep_mask is not None else None,
         )
+        if modern:
+            from .fitted_output import publish
+
+            try:
+                publish(
+                    out_dir,
+                    artifact,
+                    args.output_format,
+                    metadata=metadata,
+                    control=saved_params["control_arrays"],
+                    beta=saved_params["beta_arrays"],
+                    guides=guide_posteriors,
+                    offsets=saved_size_factors,
+                    keep=saved_params["cell_keep_indices"],
+                    baseline=controls.baseline_cell_indices,
+                    n_cells=n_analysis_cells,
+                    obs=analysis_adata.obs,
+                )
+            except Exception as error:
+                save_light_fit_bundle(out_dir, **saved_params)
+                raise RuntimeError(f"Output export failed. A reloadable fit is saved in {out_dir}") from error
+            shutil.rmtree(out_dir)
+            print(f"[perturbo] Wrote fitted output to {artifact}")
+            return
+        save_light_fit_bundle(out_dir, **saved_params)
         print(f"[perturbo] Wrote simulation-ready model parameter bundle to {out_dir}")
 
 

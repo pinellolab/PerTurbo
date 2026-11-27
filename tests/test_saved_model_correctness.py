@@ -167,6 +167,7 @@ def test_chunked_cli_bundle_preserves_global_guide_arrays_and_derived_offsets(mo
 
     api.main(
         [
+            "--output-format", "bundle",
             "--input",
             str(source),
             "--out-dir",
@@ -187,10 +188,9 @@ def test_chunked_cli_bundle_preserves_global_guide_arrays_and_derived_offsets(mo
         ]
     )
 
-    # guide_efficacy.npy holds the fitted (n_guides, n_genes) efficiencies under
-    # "relative". It used to hold their mean over genes, which on a real screen is
-    # dominated by the null genes sitting at the prior.
-    on_disk = np.load(out / "guide_efficacy.npy")
+    # Compact output retains every guide × response-gene efficiency.
+    efficiency = pd.read_parquet(out / "bundle" / "guide_efficiency.parquet")
+    on_disk = efficiency["guide_relative_efficiency_mean"].to_numpy().reshape(3, 2)
     assert on_disk.shape == (3, 2)
     np.testing.assert_allclose(
         on_disk, [[0.2, 0.25], [0.3, 0.35], [0.4, 0.45]], rtol=1e-6, atol=1e-6
@@ -212,10 +212,11 @@ def test_chunked_cli_bundle_preserves_global_guide_arrays_and_derived_offsets(mo
     fitted_offsets = np.concatenate(captured, axis=0)
     simulated_offsets = _resolve_size_factors(loaded, np.arange(6), 1.0)
     np.testing.assert_allclose(simulated_offsets, fitted_offsets)
-    metadata = json.loads((out / "metadata.json").read_text())
+    metadata = json.loads((out / "bundle" / "metadata.json").read_text())
     assert metadata["size_factor_mode"] == "observed"
     assert metadata["size_factor_provenance"] == "analyzed_count_total"
-    assert metadata["size_factors_file"] == "size_factors.npy"
+    with np.load(out / "bundle" / "fit_arrays.npz") as arrays:
+        np.testing.assert_array_equal(arrays["size_factors"].reshape(-1), fitted_offsets.reshape(-1))
 
 
 def test_cli_bundle_keeps_explicit_none_offsets_zero(monkeypatch, tmp_path) -> None:
@@ -227,6 +228,7 @@ def test_cli_bundle_keeps_explicit_none_offsets_zero(monkeypatch, tmp_path) -> N
 
     api.main(
         [
+            "--output-format", "bundle",
             "--input",
             str(source),
             "--out-dir",
@@ -253,7 +255,7 @@ def test_cli_bundle_keeps_explicit_none_offsets_zero(monkeypatch, tmp_path) -> N
         _resolve_size_factors(loaded, np.arange(6), 1.0),
         np.zeros((6, 1), dtype=np.float32),
     )
-    metadata = json.loads((out / "metadata.json").read_text())
+    metadata = json.loads((out / "bundle" / "metadata.json").read_text())
     assert metadata["size_factor_mode"] == "none"
     assert metadata["size_factor_provenance"] == "fixed_zero"
 

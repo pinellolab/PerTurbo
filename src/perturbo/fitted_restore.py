@@ -111,7 +111,11 @@ def _restore_matrix(table, axes, fields):
 def _prepare_assays(path, metadata, setup, keep, offsets):
     # Read the source modalities backed individually. Generic read_h5mu(backed='r')
     # would materialize the entire result DataFrame from the root .uns during open.
-    rna = md.read_h5ad(path, mod=setup.rna_modality, backed="r")
+    if Path(path).suffix == ".h5ad":
+        import anndata as ad
+        rna = ad.read_h5ad(path, backed="r")
+    else:
+        rna = md.read_h5ad(path, mod=setup.rna_modality, backed="r")
     if keep is not None:
         if (
             keep.ndim != 1
@@ -149,7 +153,7 @@ def _prepare_assays(path, metadata, setup, keep, offsets):
         mdata = _low_moi_source_to_mudata(rna, metadata, setup)
     else:
         pert = md.read_h5ad(path, mod=setup.perturbation_modality, backed="r")
-        if keep is not None:
+        if keep is not None or not pert.obs_names.equals(rna.obs_names):
             pert = pert[rna.obs_names]
         if not np.array_equal(pert.obs_names.to_numpy(), rna.obs_names.to_numpy()):
             raise ValueError("RNA and guide cell axes differ")
@@ -175,10 +179,6 @@ def load_native_fit(path):
     with h5py.File(path, "r") as h:
         pt = h["uns/_perturbo"]
         metadata = _plain(read_elem(pt["metadata"]))
-        if metadata.get("guide_effect_strategy") not in ("shared", "relative") or metadata.get(
-            "fit_perturbation_dispersion"
-        ):
-            raise ValueError("Pilot supports shared or relative fits without fitted perturbation dispersion")
         if "effects" not in pt:
             raise ValueError("A stage-two fitted model requires an effects table")
         control = read_elem(pt["control_fit"])
@@ -190,13 +190,13 @@ def load_native_fit(path):
         )
         with np.errstate(divide="ignore", invalid="ignore"):
             effects["z_values"] = effects["posterior_mean"] / effects["posterior_scale"]
-        if "beta_fit" in pt and "losses" in pt["beta_fit"]:
-            effects["losses"] = pt["beta_fit/losses"][:]
-        guides = {}
-        if metadata["guide_effect_strategy"] == "relative":
-            guides = _restore_matrix(
+        if "beta_fit" in pt:
+            effects.update(read_elem(pt["beta_fit"]))
+        guides = read_elem(pt["guide_fit"]) if "guide_fit" in pt else {}
+        if "efficiency" in pt:
+            guides.update(_restore_matrix(
                 pt["efficiency"], (("guide", pd.Index(metadata["guide_names"])), genes), GUIDE_FIELDS
-            )
+            ))
             with np.errstate(divide="ignore", invalid="ignore"):
                 guides["guide_effect_z_values"] = guides["guide_effect_mean"] / guides["guide_effect_scale"]
         keep = pt["cell_keep_indices"][:] if "cell_keep_indices" in pt else None

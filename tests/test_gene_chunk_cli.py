@@ -196,6 +196,7 @@ def test_backed_gene_blocks_keep_the_joint_design_offsets_and_combined_posterior
 
     api.main(
         [
+            "--output-format", "legacy",
             "--input",
             str(source),
             "--out-dir",
@@ -332,6 +333,7 @@ def test_gene_block_crt_only_has_the_same_screen_wide_p_and_q_values(tmp_path, m
 
     def run(out: Path, *, chunked: bool, crt_only: bool = True) -> pd.DataFrame:
         argv = [
+            "--output-format", "legacy",
             "--input",
             str(source),
             "--out-dir",

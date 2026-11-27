@@ -8,7 +8,7 @@ import pandas as pd
 import pytest
 
 from perturbo.fitted_export import export
-from perturbo.io import save_light_fit_bundle
+from perturbo.io import control_fit_arrays, save_light_fit_bundle
 
 
 def test_writer_records_exact_baseline_order_and_elides_identity(tmp_path):
@@ -254,3 +254,78 @@ def test_export_preserves_declared_fdr_families(tmp_path):
     assert pt["crt_metadata"]["cis_family"]["finite_p"] == 1
     with pytest.raises(ValueError, match="Primary test"):
         export(root, tmp_path / "mismatch", primary="resampling")
+
+
+@pytest.mark.parametrize("strategy", ["shared", "relative"])
+def test_rc13_artifacts_after_relocation(tmp_path, strategy):
+    from perturbo.fitted_output import publish
+    from perturbo.inference import PerTurboModel
+
+    root = bundle(tmp_path / "work", strategy)
+    source = root / "mdata.h5mu"
+    screen = md.read_h5mu(source)
+    screen["grna"].layers["guide_assignment"] = screen["grna"].X.astype(bool)
+    screen.write_h5mu(source)
+    meta = json.loads((root / "metadata.json").read_text())
+    meta["source"] = {"path": str(source)}
+    effects = pd.read_parquet(root / "element_effects.parquet")
+    effects["p_value"] = effects["crt_saddlepoint_p_value"]
+    effects["q_global"] = effects["crt_saddlepoint_q_value"]
+    effects.to_parquet(root / "element_effects.parquet")
+    with np.load(root / "control_fit.npz") as z:
+        controls = dict(z)
+    guides = {}
+    if strategy == "relative":
+        with np.load(root / "guide_posteriors.npz") as z:
+            guides = dict(z)
+    native, compact = tmp_path / "fitted.h5mu", tmp_path / "compact"
+    for fmt, dest in [("h5mu", native), ("bundle", compact)]:
+        publish(
+            root,
+            dest,
+            fmt,
+            metadata=meta,
+            control=controls,
+            beta={"losses": np.array([2.0, 1.0])},
+            guides=guides,
+            offsets=np.array([5.0, 4.0]),
+            keep=np.array([0, 2]),
+            baseline=np.array([2, 0]),
+            n_cells=3,
+            obs=screen["rna"].obs,
+        )
+    moved = source.rename(tmp_path / "relocated.h5mu")
+    standalone = PerTurboModel.load(native)
+    with pytest.raises(FileNotFoundError, match="source_path"):
+        PerTurboModel.load(compact)
+    linked = PerTurboModel.load(compact, source_path=moved)
+    result = md.read_h5mu(native)
+    np.testing.assert_array_equal(result["grna"].layers["guide_assignment"], screen["grna"].layers["guide_assignment"])
+    for name, file in [("effects", "element_effects.parquet"), ("efficiency", "guide_efficiency.parquet")]:
+        if name == "efficiency" and strategy == "shared":
+            assert not (compact / file).exists()
+            continue
+        pd.testing.assert_frame_equal(
+            result.uns["_perturbo"][name].reset_index(drop=True), pd.read_parquet(compact / file), check_exact=True
+        )
+    for model in (standalone, linked):
+        np.testing.assert_array_equal(model.beta_fit.posterior_mean, [[3, 1], [2, 4]])
+        for name, value in controls.items():
+            np.testing.assert_array_equal(control_fit_arrays(model.control_fit)[name], value)
+        for field, values in guides.items():
+            np.testing.assert_array_equal(getattr(model.beta_fit, field), values)
+    # Re-saving a restored analysis must preserve tests and the original unfiltered assays.
+    written = linked.save(tmp_path / "resaved")
+    checked = md.read_h5mu(written)
+    pd.testing.assert_frame_equal(
+        checked.uns["_perturbo"]["effects"], result.uns["_perturbo"]["effects"], check_exact=True
+    )
+    assert checked["rna"].n_obs == 3
+    from_native = standalone.save(tmp_path / "linked_again", output_format="bundle")
+    np.testing.assert_array_equal(
+        PerTurboModel.load(from_native).beta_fit.posterior_mean, linked.beta_fit.posterior_mean
+    )
+    with open(moved, "ab") as out:
+        out.write(b"changed")
+    with pytest.raises(ValueError, match="checksum"):
+        PerTurboModel.load(compact, source_path=moved)

@@ -132,3 +132,39 @@ def test_auto_chunked_crt_only_runs_the_all_cells_crt_once(tmp_path, monkeypatch
     frame = _run(tmp_path, "--max-chunk-size", "700", "--crt-only")
     assert len(calls) == 1
     assert frame["crt_saddlepoint_p_value"].notna().any()
+
+
+@pytest.mark.parametrize("strategy", ["relative", "shared"])
+def test_fitted_output_roundtrip_after_moving_high_moi_input(tmp_path, strategy):
+    from perturbo.inference import PerTurboModel
+
+    screen = tmp_path / "screen.h5mu"
+    _write_high_moi_screen(screen, n_cells=125, n_genes=5, n_elements=5)
+    cis = tmp_path / "cis.tsv"
+    cis.write_text("element\tgene\nelem_0\tgene_1\nelem_1\tgene_2\n")
+    for fmt in ("h5mu", "bundle"):
+        cli_main([
+            "--input", str(screen), "--out-dir", str(tmp_path / fmt),
+            "--modality-key", "gene", "--perturbation-modality-key", "guide",
+            "--perturbation-element-varm-key", "guide_intended_target_pairs",
+            "--perturbation-element-names-uns-key", "intended_targets",
+            "--library-size-key", "total_umis", "--size-factor-mode", "observed",
+            "--num-steps-control", "3", "--num-steps-betas", "3", "--no-progress-bar",
+            "--guide-effect-strategy", strategy, "--device", "cpu",
+            "--crt-pool", "all-cells", "--crt-mechanism", "propensity", "--crt-tail-families",
+            "saddlepoint", "--crt-saddlepoint-only", "--cis-pairs", str(cis), "--report-low-information",
+            *(["--output-format", "bundle"] if fmt == "bundle" else []),
+        ])
+    moved = screen.rename(tmp_path / "relocated.h5mu")
+    results = md.read_h5mu(tmp_path / "h5mu" / "fitted.h5mu").uns["_perturbo"]["effects"]
+    table = pd.read_parquet(tmp_path / "bundle" / "bundle" / "element_effects.parquet")
+    assert {"p_value", "q_global", "q_element", "low_information"} <= set(results)
+    if "q_cis" in results:
+        assert results["q_cis"].notna().sum() <= 2
+    pd.testing.assert_frame_equal(results.reset_index(drop=True), table, check_exact=True)
+    a = PerTurboModel.load(tmp_path / "h5mu")
+    b = PerTurboModel.load(tmp_path / "bundle" / "bundle", source_path=moved)
+    np.testing.assert_array_equal(a.control_fit.beta_0, b.control_fit.beta_0)
+    np.testing.assert_array_equal(a.beta_fit.posterior_mean, b.beta_fit.posterior_mean)
+    if strategy == "relative":
+        np.testing.assert_array_equal(a.beta_fit.guide_relative_efficiency_mean, b.beta_fit.guide_relative_efficiency_mean)

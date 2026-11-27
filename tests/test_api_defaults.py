@@ -4,7 +4,6 @@ import argparse
 import pytest
 
 from perturbo import api, cli
-from perturbo.crt import DEFAULT_CRT_MIN_INFORMATIVE_CELLS
 
 
 def _parsed(monkeypatch, argv):
@@ -42,7 +41,8 @@ def test_api_crt_defaults_and_overrides_reach_cli(monkeypatch, options):
     if not options:
         assert actual.step_size == 0.01
         assert actual.crt_gene_chunk_size == 500
-        assert actual.crt_min_informative_cells == DEFAULT_CRT_MIN_INFORMATIVE_CELLS
+        assert actual.crt_min_informative_cells is None
+        assert not actual.report_low_information
         assert actual.crt_all_cells_batch_support is True
 
 

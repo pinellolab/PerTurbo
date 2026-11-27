@@ -6,7 +6,6 @@ from pathlib import Path
 from typing import Any
 
 from . import cli, core
-from .crt import DEFAULT_CRT_MIN_INFORMATIVE_CELLS
 from .inference import PerTurboModel, PERTURBO
 from .io import MuDataSetup, get_mudata_setup, load_fit_bundle, save_fit_bundle, setup_mudata
 from .preprocessing import compute_gene_clip_thresholds, count_gene_outliers_per_cell
@@ -146,6 +145,7 @@ def fit_from_path(
     progress_chunk_size: int = 100,
     single_frame: bool = False,
     save_model_params: bool = True,
+    output_format: str = "h5mu",
     return_model: bool = False,
     crt: bool | None = None,
     crt_num_resamples: int = 999,
@@ -157,7 +157,8 @@ def fit_from_path(
     crt_saddlepoint_only: bool = False,
     crt_screen_p_value: float = 0.05,
     crt_two_sided: str = "equal-tail",
-    crt_min_informative_cells: float = DEFAULT_CRT_MIN_INFORMATIVE_CELLS,
+    crt_min_informative_cells: float | None = None,
+    report_low_information: bool = False,
     crt_all_cells_batch_support: bool = True,
     crt_baseline_step_tolerance: float | None = None,
     crt_allow_unconverged_baseline: bool = False,
@@ -169,12 +170,12 @@ def fit_from_path(
 
     Keyword names are snake_case versions of the CLI flags. The implementation
     delegates to ``perturbo.api.main`` so Python and CLI fits share the same
-    validation, loading, chunking, fitting, output, and light-bundle behavior.
+    validation, loading, chunking, fitting and output formats.
 
     Leave ``crt=None`` for the CLI default or pass ``crt=False`` for an effects-only fit.
     ``crt=True`` also runs the conditional randomization test against the
     stage-one baseline and writes primary p-values and named BH corrections
-    alongside the diagnostic ``crt_*`` columns in ``element_effects.parquet``.
+    in the effects table. Choose ``output_format="bundle"`` for Parquet results.
     The testing methods build on SCEPTRE and spaCRT; see :mod:`perturbo.crt`
     for references. PerTurbo does not introduce these statistical methods.
     ``crt_tail_families=None`` keeps the CLI default (the moment-fitted
@@ -197,8 +198,8 @@ def fit_from_path(
 
     ``pairs_to_test`` names a two-column ``element,gene`` table. It does not
     change the run: every pair is still fitted and tested. A second effect
-    table restricted to those pairs is written beside the transcriptome-wide
-    one, with Benjamini-Hochberg recomputed within that smaller family, so a
+    table restricted to those pairs is saved as requested_pairs in MuData or
+    a second Parquet in the bundle, with legacy q-values corrected within that family, so a
     single run yields both a restricted comparison and the full analysis.
     Use ``cis_pairs`` to declare the candidate cis pairs for a single BH
     correction in the main table. Testing always supplies global and
@@ -260,6 +261,7 @@ def fit_from_path(
     _append_cli_arg(argv, "--progress-chunk-size", progress_chunk_size)
     if single_frame:
         argv.append("--single-frame")
+    _append_cli_arg(argv, "--output-format", output_format)
     if save_model_params:
         argv.append("--save-model-params")
     else:
@@ -281,6 +283,8 @@ def fit_from_path(
             argv.append("--crt-saddlepoint-only")
         _append_cli_arg(argv, "--crt-screen-p-value", crt_screen_p_value)
         _append_cli_arg(argv, "--crt-two-sided", crt_two_sided)
+        if report_low_information:
+            argv.append("--report-low-information")
         _append_cli_arg(argv, "--crt-min-informative-cells", crt_min_informative_cells)
         argv.append(
             "--crt-all-cells-batch-support"
@@ -301,6 +305,10 @@ def fit_from_path(
     if return_model:
         if not save_model_params:
             raise ValueError("return_model=True requires save_model_params=True.")
+        if output_format == "h5mu":
+            return PerTurboModel.load(Path(out_dir) / "fitted.h5mu")
+        if output_format == "bundle":
+            return PerTurboModel.load(Path(out_dir) / "bundle")
         return PerTurboModel.load(out_dir)
     return None
 

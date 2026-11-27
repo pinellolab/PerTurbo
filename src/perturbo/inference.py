@@ -336,6 +336,7 @@ class PerTurboModel:
         self.beta_fit: core.BetaFit | None = None
         self.covariate_transform_state: core.CovariateTransformState | None = None
         self.history: dict[str, pd.DataFrame] = {}
+        self._saved_source = None
         self._guide_efficacy: np.ndarray | None = None
         self.module = _ModuleCompat(self)
 
@@ -344,15 +345,33 @@ class PerTurboModel:
         return setup_mudata(mdata, **kwargs)
 
     @classmethod
-    def load(cls, bundle_dir: str | Path, adata=None) -> "PerTurboModel":
+    def load(cls, bundle_dir: str | Path, adata=None, *, source_path: str | Path | None = None) -> "PerTurboModel":
         bundle_path = Path(bundle_dir)
+        if bundle_path.is_dir():
+            candidates = [p for p in (bundle_path / "fitted.h5mu", bundle_path / "bundle") if p.exists()]
+            if len(candidates) == 1 and not (bundle_path / "metadata.json").exists():
+                bundle_path = candidates[0]
+            elif candidates:
+                raise ValueError("Multiple fitted outputs. Pass the specific artifact path.")
+        if (bundle_path / "fit_arrays.npz").is_file():
+            from .fitted_output import load_compact
+            if adata is not None:
+                raise ValueError("Pass source_path= for a checksum-verified compact bundle input")
+            loaded = load_compact(bundle_path, source_path)
+            model = cls._from_saved_arrays(loaded, loaded["mdata"])
+            model._saved_source = (bundle_path.resolve(), loaded.get("source_file", bundle_path.resolve()))
+            return model
+        if source_path is not None:
+            raise ValueError("source_path applies to source-linked compact bundles")
         if bundle_path.is_file() and bundle_path.suffix == ".h5mu":
             if adata is not None:
                 raise ValueError("A fitted MuData file already contains its source assays")
             from .fitted_restore import load_native_fit
 
             loaded = load_native_fit(bundle_path)
-            return cls._from_saved_arrays(loaded, loaded["mdata"])
+            model = cls._from_saved_arrays(loaded, loaded["mdata"])
+            model._saved_source = (bundle_path.resolve(), loaded.get("source_file", bundle_path.resolve()))
+            return model
         is_light_bundle = not (bundle_path / "mdata.h5mu").exists()
         loaded = load_fit_bundle(bundle_path, source_data=adata if is_light_bundle else None)
         mdata = loaded["mdata"] if (adata is None or is_light_bundle) else adata
@@ -553,6 +572,9 @@ class PerTurboModel:
             retain_guide_structure=self.setup.guide_by_element_key is not None,
             library_size_center_log_mean=control_data.library_size_center_log_mean,
         )
+        self._saved_source = None
+        self._baseline_rows = control_data.baseline_cell_indices
+        self._screen_offsets = analysis_data.size_factors
         minibatch_size = batch_size if batch_size not in (None, 0) else None
         schedule = resolve_training_schedule(
             shared_steps=steps,
@@ -728,11 +750,15 @@ class PerTurboModel:
         out_dir: str | Path,
         *,
         save_anndata: bool = True,
+        output_format: str = "h5mu",
         overwrite: bool = False,
     ) -> Path:
         self._require_fit()
         out_path = Path(out_dir)
-        if out_path.exists() and any(out_path.iterdir()) and not overwrite:
+        direct_file = out_path if output_format == "h5mu" and out_path.suffix == ".h5mu" else None
+        if direct_file is not None:
+            out_path = direct_file.parent
+        if direct_file is None and out_path.exists() and any(out_path.iterdir()) and not overwrite:
             raise FileExistsError(f"Bundle directory already exists: {out_path}")
         out_path.mkdir(parents=True, exist_ok=True)
         control_fit, beta_fit = self._require_fit()
@@ -760,6 +786,64 @@ class PerTurboModel:
             "save_anndata": save_anndata,
         }
         guide_posteriors = {k: v for k, v in _guide_posterior_arrays(beta_fit).items() if v is not None}
+        if output_format not in ("h5mu", "bundle", "legacy"):
+            raise ValueError("output_format must be h5mu, bundle or legacy")
+        if output_format != "legacy":
+            import tempfile
+            from .fitted_output import publish, resave
+            from .results import write_standard_element_effects_parquet
+
+            metadata.update(
+                gene_names=self.gene_names,
+                perturbation_names=self.element_names,
+                guide_names=self.guide_names,
+                input_mode="high_moi",
+            )
+            with tempfile.TemporaryDirectory(dir=out_path) as tmp:
+                work = Path(tmp)
+                dest = direct_file or out_path / ("fitted.h5mu" if output_format == "h5mu" else "bundle")
+                if self._saved_source is not None:
+                    resave(
+                        *self._saved_source,
+                        work,
+                        dest,
+                        output_format,
+                        control_fit_arrays(control_fit),
+                        _beta_arrays(beta_fit),
+                        guide_posteriors,
+                        overwrite,
+                    )
+                    return dest
+                write_standard_element_effects_parquet(
+                    work / "element_effects.parquet",
+                    method="perturbo",
+                    element_names=self.element_names,
+                    gene_names=self.gene_names,
+                    effect_loc=beta_fit.posterior_mean,
+                    effect_scale=beta_fit.posterior_scale,
+                )
+                if self.guide_effect_strategy == "relative" and beta_fit.guide_relative_efficiency_mean is not None:
+                    self.get_guide_effects()[["guide", "element", "gene"]].to_parquet(
+                        work / "guide_efficiency.parquet", index=False
+                    )
+                rna = self.adata[self.setup.rna_modality]
+                publish(
+                    work,
+                    dest,
+                    output_format,
+                    metadata=metadata,
+                    control=control_fit_arrays(control_fit),
+                    beta=_beta_arrays(beta_fit),
+                    guides=guide_posteriors,
+                    offsets=getattr(self, "_screen_offsets", None),
+                    keep=None,
+                    baseline=getattr(self, "_baseline_rows", None),
+                    n_cells=rna.n_obs,
+                    obs=rna.obs,
+                    assays=self.adata,
+                    overwrite=overwrite,
+                )
+                return dest
         return save_fit_bundle(
             out_path,
             metadata=metadata,
