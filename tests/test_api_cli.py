@@ -131,6 +131,7 @@ def test_main_wires_uncertainty_flags(monkeypatch, tmp_path) -> None:
 
     api.main(
         [
+            "--output-format", "legacy",
             "--input",
             "dummy.h5ad",
             "--out-dir",
@@ -271,6 +272,7 @@ def test_main_wires_guide_random_effects_flag(monkeypatch, tmp_path) -> None:
 
     api.main(
         [
+            "--output-format", "legacy",
             "--input",
             "dummy.h5ad",
             "--out-dir",
@@ -436,6 +438,7 @@ def test_main_wires_guide_strategy_flags(monkeypatch, tmp_path) -> None:
 
     api.main(
         [
+            "--output-format", "legacy",
             "--input",
             "dummy.h5mu",
             "--out-dir",
@@ -548,6 +551,7 @@ def test_main_chunking_path_passes_membership_argument(monkeypatch, tmp_path) ->
 
     api.main(
         [
+            "--output-format", "legacy",
             "--input",
             "dummy.h5ad",
             "--out-dir",
@@ -614,6 +618,7 @@ def test_main_converts_shared_epochs_to_stage_steps(monkeypatch, tmp_path) -> No
 
     api.main(
         [
+            "--output-format", "legacy",
             "--input",
             "dummy.h5ad",
             "--out-dir",
@@ -679,6 +684,7 @@ def test_main_uses_shared_step_flag_for_both_stages(monkeypatch, tmp_path) -> No
 
     api.main(
         [
+            "--output-format", "legacy",
             "--input",
             "dummy.h5ad",
             "--out-dir",
@@ -802,6 +808,7 @@ def test_main_resolves_chunked_beta_epochs_per_chunk(monkeypatch, tmp_path) -> N
 
     api.main(
         [
+            "--output-format", "legacy",
             "--input",
             "dummy.h5ad",
             "--out-dir",
@@ -1041,6 +1048,7 @@ def test_main_size_factor_mode_none_uses_fixed_zero_size_factors(monkeypatch, tm
 
     api.main(
         [
+            "--output-format", "legacy",
             "--input",
             "dummy.h5ad",
             "--out-dir",
@@ -1167,6 +1175,7 @@ def test_main_accepts_mixture_nb_likelihood(monkeypatch, tmp_path) -> None:
 
     api.main(
         [
+            "--output-format", "legacy",
             "--input",
             "dummy.h5ad",
             "--out-dir",
@@ -1230,6 +1239,7 @@ def test_main_accepts_nb_alias_for_negbin(monkeypatch, tmp_path) -> None:
 
     api.main(
         [
+            "--output-format", "legacy",
             "--input",
             "dummy.h5ad",
             "--out-dir",
@@ -1293,6 +1303,7 @@ def test_main_threads_censored_percentile_from_clip_flag(monkeypatch, tmp_path) 
 
     api.main(
         [
+            "--output-format", "legacy",
             "--input",
             "dummy.h5ad",
             "--out-dir",
@@ -1437,6 +1448,7 @@ def test_main_covariate_flags_threaded_and_transform_reused_for_chunks(monkeypat
 
     api.main(
         [
+            "--output-format", "legacy",
             "--input",
             "dummy.h5ad",
             "--out-dir",
@@ -1548,6 +1560,7 @@ def test_main_default_outlier_handling_is_noop(monkeypatch, tmp_path) -> None:
 
     api.main(
         [
+            "--output-format", "legacy",
             "--input",
             "dummy.h5ad",
             "--out-dir",
@@ -1670,6 +1683,7 @@ def test_main_filter_cells_mode_reuses_cell_mask_and_filtered_chunking(monkeypat
 
     api.main(
         [
+            "--output-format", "legacy",
             "--input",
             "dummy.h5ad",
             "--out-dir",
@@ -1803,6 +1817,7 @@ def test_main_filter_cells_and_winsorize_reuses_mask_and_thresholds(monkeypatch,
 
     api.main(
         [
+            "--output-format", "legacy",
             "--input",
             "dummy.h5ad",
             "--out-dir",
@@ -1854,6 +1869,7 @@ def test_fit_from_path_maps_the_crt_keywords_onto_the_flags(monkeypatch) -> None
         perturbation_element_names_uns_key="intended_targets",
         crt=True,
         crt_only=True,
+        cis_pairs="candidates.tsv",
         crt_pool="all-cells",
         crt_mechanism="propensity",
         crt_tail_families=("saddlepoint",),
@@ -1862,6 +1878,7 @@ def test_fit_from_path_maps_the_crt_keywords_onto_the_flags(monkeypatch) -> None
         crt_polish_baseline=True,
     )
     argv = captured["argv"]
+    assert argv[argv.index("--cis-pairs") + 1] == "candidates.tsv"
     for flag in ("--crt", "--crt-only", "--crt-saddlepoint-only", "--crt-allow-unconverged-baseline", "--crt-polish-baseline"):
         assert flag in argv
     for flag, value in (("--crt-pool", "all-cells"), ("--crt-mechanism", "propensity"), ("--crt-tail-families", "saddlepoint")):

@@ -25,6 +25,7 @@ _SAVED_SIZE_FACTOR_KEY = "_perturbo_saved_size_factor"
 
 @dataclass
 class MuDataSetup:
+    """Registered modality names and annotation keys used to interpret a screen."""
     rna_modality: str = "rna"
     perturbation_modality: str = "grna"
     perturbation_layer: str | None = None
@@ -136,7 +137,7 @@ def setup_mudata(
     """Register MuData metadata for perturbo workflows.
 
     This mutates the in-memory object to ensure basic fields exist and stores the
-    registration payload in ``mdata.uns["_cortado_setup"]``.
+    registration payload in ``mdata.uns["_perturbo_setup"]``.
     """
     if modalities is None:
         raise ValueError("modalities must be provided.")
@@ -189,6 +190,7 @@ def setup_mudata(
 
 
 def get_mudata_setup(mdata: md.MuData) -> MuDataSetup:
+    """Read the previously registered assay and annotation keys from a MuData object."""
     if _SETUP_UNS_KEY in mdata.uns:
         payload = mdata.uns[_SETUP_UNS_KEY]
         mdata.uns.pop(_LEGACY_SETUP_UNS_KEY, None)
@@ -275,6 +277,7 @@ def save_fit_bundle(
     guide_posteriors: dict[str, Any] | None = None,
     guide_efficacy: np.ndarray | None = None,
 ) -> Path:
+    """Write the legacy directory layout from explicit fit arrays, metadata and input assays."""
     bundle_dir = Path(out_dir)
     bundle_dir.mkdir(parents=True, exist_ok=True)
     mdata.write_h5mu(bundle_dir / "mdata.h5mu")
@@ -306,6 +309,8 @@ def save_light_fit_bundle(
     guide_efficacy: np.ndarray | None = None,
     size_factors: np.ndarray | None = None,
     cell_keep_indices: np.ndarray | None = None,
+    baseline_cell_indices: np.ndarray | None = None,
+    source_cell_count: int | None = None,
 ) -> Path:
     bundle_dir = Path(out_dir)
     bundle_dir.mkdir(parents=True, exist_ok=True)
@@ -313,6 +318,17 @@ def save_light_fit_bundle(
     payload["producer"] = "perturbo"
     payload["bundle_format"] = "light_model_params"
     payload["bundle_version"] = 2
+    if baseline_cell_indices is not None:
+        rows = np.asarray(baseline_cell_indices, dtype=np.int64)
+        path = bundle_dir / "baseline_cell_indices.npy"
+        payload["n_baseline_cells"] = len(rows)
+        if source_cell_count is not None and np.array_equal(rows, np.arange(source_cell_count)):
+            payload["baseline_cell_mapping"] = "all_cells"
+            path.unlink(missing_ok=True)
+        else:
+            np.save(path, rows)
+            payload["baseline_cell_indices_file"] = path.name
+            payload["baseline_cell_mapping"] = "verified_indices"
     if cell_keep_indices is not None:
         keep = np.asarray(cell_keep_indices, dtype=np.int64).reshape(-1)
         np.save(bundle_dir / "cell_keep_indices.npy", keep)
@@ -490,8 +506,20 @@ def _load_light_bundle_mdata(root: Path, metadata: dict[str, Any], source_data: 
     return mdata
 
 
-def load_fit_bundle(bundle_dir: str | Path, *, source_data: Any | None = None) -> dict[str, Any]:
+def load_fit_bundle(bundle_dir: str | Path, *, source_data: Any | None = None, source_path: str | Path | None = None) -> dict[str, Any]:
+    """Read compact or legacy directory outputs into a dictionary of fit arrays, metadata and available tables."""
     root = Path(bundle_dir)
+    if (root / "fit_arrays.npz").exists():
+        from .fitted_output import load_compact
+
+        if source_data is not None:
+            raise ValueError("Pass source_path= for a checksum-verified compact bundle input")
+        loaded = load_compact(root, source_path)
+        loaded["element_effects"] = _read_element_effects(root)
+        loaded["guide_efficacy"] = loaded["guide_posteriors"].get("guide_relative_efficiency_mean")
+        return loaded
+    if source_path is not None:
+        raise ValueError("source_path applies to source-linked compact bundles")
     metadata = read_json(root / "metadata.json")
     mdata_path = root / "mdata.h5mu"
     if mdata_path.exists():

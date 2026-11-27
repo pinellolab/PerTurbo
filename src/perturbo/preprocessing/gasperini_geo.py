@@ -14,6 +14,7 @@ from scipy.io import mmread
 
 @dataclass(frozen=True)
 class GasperiniGeoSpec:
+    """File names and dataset identifiers used to read one Gasperini GEO screen."""
     dataset: str
     prefix: str
     pheno_columns: tuple[str, ...]
@@ -119,6 +120,7 @@ _GUIDE_METADATA_RENAME = {
 
 
 def summarize_gasperini_geo_inputs(data_dir: str | Path, dataset: str) -> dict[str, Any]:
+    """Read the deposited metadata and summarize the screen before building its assays."""
     spec = _get_spec(dataset)
     data_dir = Path(data_dir).expanduser()
 
@@ -158,6 +160,7 @@ def build_gasperini_geo_mudata(
     *,
     gene_id_subset: list[str] | pd.Index | pd.Series | None = None,
 ) -> md.MuData:
+    """Build aligned RNA and guide modalities from the deposited expression, cell and guide files."""
     spec = _get_spec(dataset)
     data_dir = Path(data_dir).expanduser()
 
@@ -209,6 +212,7 @@ def write_gasperini_geo_h5mu(
     *,
     gene_id_subset: list[str] | pd.Index | pd.Series | None = None,
 ) -> Path:
+    """Build the GEO screen, write its MuData file and return the output path."""
     spec = _get_spec(dataset)
     data_dir = Path(data_dir).expanduser()
     output_path = Path(output_path).expanduser() if output_path is not None else data_dir / spec.output_filename

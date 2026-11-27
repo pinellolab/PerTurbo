@@ -130,6 +130,7 @@ def sample_stratified_indices(
     return np.concatenate(blocks, axis=1)
 
 
+@jax.default_matmul_precision("highest")
 @partial(jax.jit, static_argnames=("max_iterations",))
 def _logistic_irls_orthonormal(
     indicators: jnp.ndarray,
@@ -141,6 +142,7 @@ def _logistic_irls_orthonormal(
 ) -> jnp.ndarray:
     """IRLS for a batch of logistic fits sharing one orthonormal design basis.
 
+    Full float32 products keep rare assignments accurate on tensor-core GPUs.
     Returns coefficients in that basis rather than fitted probabilities.
     """
 
@@ -168,6 +170,7 @@ def _logistic_irls_orthonormal(
     return coef
 
 
+@jax.default_matmul_precision("highest")
 @partial(jax.jit, static_argnames=("max_iterations",))
 def _logistic_irls_masked_orthonormal(
     indicators: jnp.ndarray,
@@ -207,6 +210,7 @@ class BorderedPropensityContext(NamedTuple):
     gram_info: BorderedInfo
 
 
+@jax.default_matmul_precision("highest")
 def prepare_bordered_propensity(
     design: BorderedDesign,
     basis: np.ndarray | jnp.ndarray,
@@ -242,6 +246,8 @@ def prepare_bordered_propensity(
     )
 
 
+@jax.enable_x64()
+@jax.default_matmul_precision("highest")
 @partial(jax.jit, static_argnames=("max_iterations",))
 def _logistic_irls_bordered(
     indicators: jnp.ndarray,
@@ -265,7 +271,12 @@ def _logistic_irls_bordered(
         # eps I in Q coordinates is eps Z'Z here, including all global
         # design rows even when a model's likelihood uses only a subset.
         information = BorderedInfo(*(block + damp for block, damp in zip(information, damping)))
-        return coef + solve(design, information, gradient), None
+        # Eliminating batch indicators subtracts nearly equal curvature terms
+        # when a level has very few assignments. Widen only the small system;
+        # cell arrays, fitted coefficients and the returned basis stay float32.
+        small_system = jax.tree.map(lambda block: block.astype(jnp.float64), information)
+        update = solve(design, small_system, gradient.astype(jnp.float64))
+        return coef + update.astype(coef.dtype), None
 
     coef, _ = jax.lax.scan(
         step,
@@ -601,7 +612,7 @@ def propensity_logits_from_coefficients(
 
     coefficients = jnp.atleast_2d(jnp.asarray(coefficients))
     basis = jnp.asarray(basis, dtype=coefficients.dtype)
-    return jnp.clip(coefficients @ basis.T, -eta_clip, eta_clip)
+    return jnp.clip(jnp.matmul(coefficients, basis.T, precision=jax.lax.Precision.HIGHEST), -eta_clip, eta_clip)
 
 
 WIDTH_BUCKET = 64

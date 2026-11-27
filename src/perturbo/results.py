@@ -16,6 +16,7 @@ from ._statistics import (
     empirical_pvals_from_tnull_fixed0,
     z_to_two_sided_pvalues,
 )
+from .fdr import FdrFamilies
 
 
 @dataclass(frozen=True)
@@ -42,6 +43,7 @@ class PosteriorMedians(Mapping[str, np.ndarray]):
         return len(self._values)
 
     def to_dict(self) -> dict[str, np.ndarray]:
+        """Return fitted parameter arrays in a dictionary keyed by parameter name."""
         return {key: np.asarray(value) for key, value in self._values.items()}
 
 
@@ -85,6 +87,7 @@ def build_guide_effects_df(
     guide_parent_elements: list[str],
     gene_names: list[str],
 ) -> pd.DataFrame:
+    """Convert guide-by-gene effect means and scales into a table keyed by guide, parent element and gene."""
     loc = np.asarray(effect_loc, dtype=float)
     scale = np.clip(np.asarray(effect_scale, dtype=float), a_min=1e-6, a_max=None)
     if loc.shape != scale.shape:
@@ -113,7 +116,7 @@ def build_guide_effects_df(
     )
 
 
-def load_pairs_to_test(path) -> pd.DataFrame:
+def load_pairs_to_test(path, *, option="pairs-to-test") -> pd.DataFrame:
     """Read a two-column ``element,gene`` restriction table.
 
     The contract is the one the IGVF CRISPR pipeline's PerTurbo adapter already
@@ -125,31 +128,27 @@ def load_pairs_to_test(path) -> pd.DataFrame:
 
     pair_path = Path(path)
     if not pair_path.exists():
-        raise FileNotFoundError(f"pairs-to-test file not found: {pair_path}")
+        raise FileNotFoundError(f"{option} file not found: {pair_path}")
     if pair_path.suffix.lower() in {".parquet", ".pq"}:
         frame = pd.read_parquet(pair_path)
     else:
-        frame = pd.read_csv(pair_path, sep=None, engine="python")
+        frame = pd.read_csv(pair_path, sep=None, engine="python", dtype=str, keep_default_na=False, na_values=[""])
     missing = {"element", "gene"}.difference(frame.columns)
     if missing:
-        raise ValueError(f"pairs-to-test requires columns named 'element' and 'gene'; missing {sorted(missing)}.")
+        raise ValueError(f"{option} requires columns named 'element' and 'gene'; missing {sorted(missing)}.")
     if frame[["element", "gene"]].isna().any().any():
-        raise ValueError("pairs-to-test contains missing element or gene names.")
+        raise ValueError(f"{option} contains missing element or gene names.")
     frame = frame.loc[:, ["element", "gene"]].astype(str).drop_duplicates(ignore_index=True)
     if frame.empty:
-        raise ValueError("pairs-to-test must contain at least one pair.")
+        raise ValueError(f"{option} must contain at least one pair.")
     return frame
 
 
 def restrict_effects_to_pairs(effects: pd.DataFrame, pairs: pd.DataFrame) -> pd.DataFrame:
-    """The rows of ``effects`` named by ``pairs``, with every q-value recorrected.
+    """Select pairs and recorrect legacy method-specific q-values within them.
 
-    A restricted table is not a filtered copy of the transcriptome-wide one: the
-    Benjamini-Hochberg family is the restricted set, so the same pair carries a
-    different q-value in each. Everything else, including the effect estimates
-    and the p-values, is identical, because one fit and one test produced both.
-    That is the whole point of emitting the two tables from a single run rather
-    than running the analysis twice over different pair sets.
+    Named q_global, q_element and q_cis retain their declared families.
+    Legacy *_q_value columns use BH over the finite tests in this selection.
     """
     for column in ("element", "gene"):
         if column not in effects.columns:
@@ -202,8 +201,8 @@ def build_standard_element_effects_df(
 
 NON_FLOAT_EXTRA_COLUMNS = frozenset(
     {
-        "crt_observed_nonzero",
-        "crt_low_information",
+        "observed_nonzero",
+        "low_information",
         "crt_tail_failure_reason",
         "crt_used_chernoff",
         "crt_used_conservative_one",
@@ -213,7 +212,7 @@ NON_FLOAT_EXTRA_COLUMNS = frozenset(
 
 Every other extra column is a probability or a statistic and float64 is the
 right container for it. A cell count is an integer and a flag is a boolean, and
-a consumer that has to compare ``crt_low_information == 1.0`` to read a yes/no
+a consumer that has to compare ``low_information == 1.0`` to read a yes/no
 is being handed the wrong type. Named explicitly rather than inferred from the
 array's dtype, so that adding a boolean column elsewhere cannot silently change
 the parquet schema of a column that already ships as a double (the tail
@@ -329,6 +328,9 @@ def write_standard_element_effects_parquet(
     path: str | Path,
     *,
     requested_pairs: pd.DataFrame | None = None,
+    fdr: FdrFamilies | None = None,
+    row_block_size: int = 250_000,
+    output_columns: tuple[str, ...] | None = None,
     **kwargs,
 ) -> pd.DataFrame | None:
     """Write row-major blocks and optionally retain only requested rows."""
@@ -345,10 +347,15 @@ def write_standard_element_effects_parquet(
         else pd.MultiIndex.from_frame(requested_pairs[["element", "gene"]].astype(str))
     )
     try:
-        for frame in iter_standard_element_effects_frames(**kwargs):
+        family_blocks = fdr.blocks(row_block_size) if fdr is not None else None
+        for frame in iter_standard_element_effects_frames(row_block_size=row_block_size, **kwargs):
+            if family_blocks is not None:
+                for name, values in next(family_blocks).items():
+                    frame[name] = values
             if empty is None:
                 empty = frame.iloc[:0].copy()
-            table = pa.Table.from_pandas(frame, preserve_index=False)
+            stored = frame if output_columns is None else frame.loc[:, [c for c in output_columns if c in frame]]
+            table = pa.Table.from_pandas(stored, preserve_index=False)
             if writer is None:
                 writer = pq.ParquetWriter(path, table.schema)
             writer.write_table(table)

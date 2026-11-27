@@ -1,6 +1,7 @@
 name: Check build
 
 on:
+  workflow_dispatch:
   push:
     branches: [main, v2-port]
   pull_request:
@@ -20,3 +21,32 @@ jobs:
       - run: uv venv /tmp/perturbo-wheel
       - run: uv pip install --python /tmp/perturbo-wheel/bin/python dist/*.whl
       - run: /tmp/perturbo-wheel/bin/perturbo --help
+      - name: Run tutorials and build docs using the installed wheel
+        env:
+          JAX_PLATFORM_NAME: cpu
+          MPLBACKEND: Agg
+        run: |
+          wheel=(dist/*.whl)
+          uv pip install --python /tmp/perturbo-wheel/bin/python "${wheel[0]}[docs]"
+          export PATH="/tmp/perturbo-wheel/bin:$PATH"
+          for screen in gasperini replogle; do
+            jupyter execute --inplace --timeout=1800 "docs/tutorials/$screen.ipynb"
+            PERTURBO_TUTORIAL_QUICK=1 jupyter execute --inplace --timeout=1800 "docs/tutorials/${screen}_power.ipynb"
+          done
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          import mudata
+          from perturbo import PerTurboModel
+          for screen in ("gasperini", "replogle"):
+              for name in (screen, f"{screen}_power"):
+                  notebook = json.loads(Path(f"docs/tutorials/{name}.ipynb").read_text())
+                  outputs = [out for cell in notebook["cells"] for out in cell.get("outputs", [])]
+                  assert any("image/png" in out.get("data", {}) for out in outputs), name
+              fitted = Path(f"docs/tutorials/runs/{screen}/fitted.h5mu")
+              model = PerTurboModel.load(fitted)
+              assert model.gene_names
+              effects = mudata.read_h5mu(fitted).uns["_perturbo"]["effects"]
+              assert effects["q_global"].between(0, 1).any(), screen
+          PY
+          sphinx-build -W --keep-going -b html docs docs/_build/html

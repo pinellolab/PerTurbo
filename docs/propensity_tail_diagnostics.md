@@ -37,7 +37,7 @@ refer to the equal-tail policy, not the stratified or permutation approximations
 Screened-out or untested pairs have reason -1, false fallback flags, and NaN
 residuals. The existing `crt_saddlepoint_used_screen` keeps its meaning: it
 indicates retention of the cheaper screening approximation, not a Chernoff
-fallback. `crt_low_information` remains a detection-count annotation and does
+fallback. `low_information` remains a detection-count annotation and does
 not determine the tail policy or filter the multiple-testing family.
 
 | Bit | Failure |

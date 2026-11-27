@@ -10,6 +10,7 @@ import jax.numpy as jnp
 import mudata as md
 import numpy as np
 import pandas as pd
+import pytest
 import scipy.sparse as sp
 
 import perturbo.api as api
@@ -20,7 +21,8 @@ from perturbo.sparse_design import IndexedDesignMatrix, indexed_design_to_dense
 
 
 GENES = [f"gene_{index}" for index in range(5)]
-GUIDES = ["ctrl", "guide_a", "guide_b"]
+GUIDES = ["ctrl", "guide_a", "guide_b", "guide_a2"]
+GUIDE_PARENT_INDICES = [0, 1, 2, 1]
 ELEMENTS = ["ctrl", "element_a", "element_b"]
 
 
@@ -45,7 +47,7 @@ def test_all_cells_crt_width_keeps_requested_width_when_it_fits() -> None:
     assert width == 64
 
 
-def _write_cooccurring_screen(path: Path) -> tuple[np.ndarray, np.ndarray]:
+def _write_cooccurring_screen(path: Path, *, sparse_mapping: bool = False) -> tuple[np.ndarray, np.ndarray]:
     counts = np.array(
         [
             [1, 2, 3, 4, 5],
@@ -78,16 +80,20 @@ def _write_cooccurring_screen(path: Path) -> tuple[np.ndarray, np.ndarray]:
         obs=obs.copy(),
         var=pd.DataFrame(index=GENES),
     )
+    guide_assignments = np.column_stack((assignments, np.zeros(len(obs), dtype=np.float32)))
+    # Keep the element assignments unchanged while giving a second guide to
+    # element_a. Cell 5 now carries guide_a2 and guide_b.
+    guide_assignments[5, [1, 3]] = [0, 1]
     guides = ad.AnnData(
-        X=sp.csr_matrix(assignments),
+        X=sp.csr_matrix(guide_assignments),
         obs=obs.copy(),
         var=pd.DataFrame(index=GUIDES),
     )
-    guides.varm["mapping"] = pd.DataFrame(
-        np.eye(len(GUIDES), dtype=np.float32),
-        index=GUIDES,
-        columns=ELEMENTS,
-    )
+    mapping = np.eye(len(ELEMENTS), dtype=np.float32)[GUIDE_PARENT_INDICES]
+    guides.varm["mapping"] = pd.DataFrame(mapping, index=GUIDES, columns=ELEMENTS)
+    if sparse_mapping:
+        guides.varm["mapping"] = sp.csr_matrix(mapping)
+        guides.uns["elements"] = ELEMENTS
     md.MuData({"rna": rna, "grna": guides}).write_h5mu(path)
     return counts, assignments
 
@@ -115,12 +121,14 @@ def _gene_values(row_count: int, gene_names: list[str], *, base: float) -> np.nd
     return base + 100.0 * row_ids + gene_ids[None, :]
 
 
+@pytest.mark.parametrize("spelling", ["shared", "relative", "scaled"])
 def test_backed_gene_blocks_keep_the_joint_design_offsets_and_combined_posterior(
-    tmp_path, monkeypatch
+    tmp_path, monkeypatch, spelling
 ) -> None:
+    strategy = "relative" if spelling == "scaled" else spelling
     source = tmp_path / "screen.h5mu"
     out = tmp_path / "out"
-    counts, assignments = _write_cooccurring_screen(source)
+    counts, assignments = _write_cooccurring_screen(source, sparse_mapping=strategy == "relative")
 
     original_load = api.load_analysis_cells
     requested_gene_indices: list[slice | None] = []
@@ -131,13 +139,20 @@ def test_backed_gene_blocks_keep_the_joint_design_offsets_and_combined_posterior
         return original_load(*args, **kwargs)
 
     def beta_fit(data, control, **kwargs):
-        del kwargs
+        assert kwargs["guide_effect_strategy"] == strategy
         assert isinstance(data.pert_id, IndexedDesignMatrix)
         dense_elements = np.asarray(indexed_design_to_dense(data.pert_id))
         np.testing.assert_array_equal(dense_elements, assignments)
         # Shared guide effects need only the grouped element design. Avoiding a
         # second indexed guide matrix is part of the memory-bounded path.
-        assert data.guide_matrix is None
+        if strategy == "shared":
+            assert data.guide_matrix is None
+        else:
+            guide_design = np.asarray(indexed_design_to_dense(data.guide_matrix))
+            assert list(data.guide_names) == GUIDES
+            np.testing.assert_array_equal(guide_design[:, 3], np.arange(len(assignments)) == 5)
+            np.testing.assert_array_equal(data.guide_to_element, np.eye(len(ELEMENTS))[GUIDE_PARENT_INDICES])
+            np.testing.assert_array_equal(guide_design @ data.guide_to_element, assignments)
 
         names = list(data.gene_names)
         gene_ids = np.array([GENES.index(name) for name in names])
@@ -157,6 +172,18 @@ def test_backed_gene_blocks_keep_the_joint_design_offsets_and_combined_posterior
             posterior_mean=jnp.asarray(_gene_values(n_elements, names, base=0.0)),
             posterior_scale=jnp.asarray(_gene_values(n_elements, names, base=1_000.0)),
             z_values=jnp.asarray(_gene_values(n_elements, names, base=2_000.0)),
+            guide_relative_efficiency_mean=(
+                _gene_values(len(GUIDES), names, base=1.0) / 300 if strategy == "relative" else None
+            ),
+            guide_relative_efficiency_scale=(
+                _gene_values(len(GUIDES), names, base=2.0) if strategy == "relative" else None
+            ),
+            guide_effect_mean=(
+                _gene_values(len(GUIDES), names, base=3.0) if strategy == "relative" else None
+            ),
+            guide_effect_scale=(
+                _gene_values(len(GUIDES), names, base=4.0) if strategy == "relative" else None
+            ),
             losses=jnp.array([], dtype=jnp.float32),
             svi_result=None,
         )
@@ -169,6 +196,7 @@ def test_backed_gene_blocks_keep_the_joint_design_offsets_and_combined_posterior
 
     api.main(
         [
+            "--output-format", "legacy",
             "--input",
             str(source),
             "--out-dir",
@@ -183,6 +211,9 @@ def test_backed_gene_blocks_keep_the_joint_design_offsets_and_combined_posterior
             "ctrl",
             "--likelihood",
             "negbin",
+            *(["--perturbation-element-names-uns-key", "elements"] if strategy == "relative" else []),
+            "--guide-effect-strategy",
+            spelling,
             "--gene-chunk-size",
             "2",
             "--num-steps-control",
@@ -214,7 +245,23 @@ def test_backed_gene_blocks_keep_the_joint_design_offsets_and_combined_posterior
         bundle["beta_arrays"]["posterior_scale"],
         _gene_values(len(ELEMENTS), GENES, base=1_000.0),
     )
-    assert bundle["guide_posteriors"] == {}
+    if strategy == "shared":
+        assert bundle["guide_posteriors"] == {}
+    else:
+        expected = _gene_values(len(GUIDES), GENES, base=1.0) / 300
+        np.testing.assert_array_equal(bundle["guide_posteriors"]["guide_relative_efficiency_mean"], expected)
+        np.testing.assert_array_equal(bundle["guide_efficacy"], expected)
+        exported = pd.read_parquet(out / "guide_efficiency.parquet")
+        np.testing.assert_array_equal(exported["posterior_mean"], expected.ravel())
+        np.testing.assert_array_equal(exported["guide"], np.repeat(GUIDES, len(GENES)))
+        parents = np.array(ELEMENTS)[GUIDE_PARENT_INDICES]
+        np.testing.assert_array_equal(exported["element"], np.repeat(parents, len(GENES)))
+        for key, base in [
+            ("guide_relative_efficiency_scale", 2.0),
+            ("guide_effect_mean", 3.0),
+            ("guide_effect_scale", 4.0),
+        ]:
+            np.testing.assert_array_equal(bundle["guide_posteriors"][key], _gene_values(len(GUIDES), GENES, base=base))
 
     effects = pd.read_parquet(out / "element_effects.parquet")
     np.testing.assert_array_equal(effects["element"], np.repeat(ELEMENTS, len(GENES)))
@@ -286,6 +333,7 @@ def test_gene_block_crt_only_has_the_same_screen_wide_p_and_q_values(tmp_path, m
 
     def run(out: Path, *, chunked: bool, crt_only: bool = True) -> pd.DataFrame:
         argv = [
+            "--output-format", "legacy",
             "--input",
             str(source),
             "--out-dir",

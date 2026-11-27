@@ -73,6 +73,7 @@ def _normalize_likelihood_name(likelihood: str) -> str:
 
 @dataclass
 class SVIConfig:
+    """Settings for variational fitting, including the learning rate and number of samples per optimization step."""
     elbo: str = "meanfield"  # "trace" or "meanfield"
     num_particles: int = 1
     vectorize_particles: bool = True
@@ -81,6 +82,7 @@ class SVIConfig:
 
 @dataclass
 class PerTurboData:
+    """Counts and perturbation design for the same cells, with ordered perturbation and gene IDs."""
     counts: jnp.ndarray
     pert_id: jnp.ndarray | IndexedDesignMatrix
     pert_names: list[str]
@@ -96,6 +98,7 @@ class PerTurboData:
     categorical_batch_codes: jnp.ndarray | None = None
     categorical_batch_names: list[str] | None = None
     _analysis_design_token: object | None = None
+    baseline_cell_indices: np.ndarray | None = None
 
 
 @dataclass(frozen=True)
@@ -125,6 +128,7 @@ class _AnalysisDesignCache:
 
 @dataclass
 class BaselinePosteriorSummary:
+    """Per-gene locations and scales for the baseline log expression and log dispersion parameters."""
     beta_0_loc: jnp.ndarray
     beta_0_scale: jnp.ndarray
     theta_log_loc: jnp.ndarray
@@ -133,6 +137,7 @@ class BaselinePosteriorSummary:
 
 @dataclass
 class ControlFit:
+    """Baseline fit containing per-gene expression and dispersion, cell size factors, and training losses."""
     beta_0: jnp.ndarray
     theta: jnp.ndarray
     noise_scale: jnp.ndarray
@@ -156,6 +161,7 @@ class ControlFit:
 
 @dataclass
 class BetaFit:
+    """Element-by-gene effect estimates and posterior standard deviations, with guide-level arrays when fitted."""
     posterior_mean: jnp.ndarray
     posterior_scale: jnp.ndarray
     z_values: jnp.ndarray
@@ -197,6 +203,8 @@ class _PerturbationChunk:
 
 @dataclass
 class CovariateTransformState:
+    """The fitted transformations and batch levels used to align cell covariates across stages."""
+
     continuous_covariates: list[str]
     batch_covariate: str | None
     continuous_medians: dict[str, float]
@@ -2251,6 +2259,7 @@ def load_controls(
     pert_id_arr = np.asarray(_to_dense(pert_id))
     pert_dtype = jnp.bool_ if pert_id_arr.ndim == 2 else None
     out = PerTurboData(
+        baseline_cell_indices=obs_idx,
         counts=counts_jax,
         pert_id=_to_jax(pert_id_arr, device_obj, dtype=pert_dtype),
         pert_names=pert_names,
@@ -2296,6 +2305,11 @@ def load_analysis_cells(
     _design_cache: _AnalysisDesignCache | None = None,
     _return_design_cache: bool = False,
 ) -> PerTurboData | tuple[PerTurboData, _AnalysisDesignCache]:
+    """Build the stage-two cell-by-gene counts and matching perturbation design.
+
+    Specify a per-cell perturbation label or a guide modality. For grouped
+    guides, supply the guide-to-element map and its ordered element names.
+    Reuse the baseline covariate transform if covariates were fitted."""
     subset_suffix = " for selected perturbations" if selected_perturbations is not None else ""
     print(f"[perturbo] Loading analysis cells{subset_suffix}...")
     adata = _resolve_adata(data, modality_key)
@@ -2604,6 +2618,11 @@ def fit_control(
     progress_chunk_size: int = 100,
     guide_random_effects: bool = False,
 ) -> ControlFit:
+    """Fit baseline gene expression and dispersion on the cells in ``data``.
+
+    Supply the output of ``load_controls``. The returned ``ControlFit``
+    carries the gene parameters, fitted offsets and training history used
+    when estimating perturbation effects."""
     print("[perturbo] Fitting control model...")
     counts = data.counts
     pert_id = data.pert_id
@@ -2960,6 +2979,12 @@ def fit_perturbation_effects(
     perturbation_dispersion_prior_rate: float = 10.0,
     _runner_cache: dict[str, _ReusableSVIRunner] | None = None,
 ) -> BetaFit:
+    """Estimate perturbation effects conditional on a fitted baseline.
+
+    Supply analysis cells with the same gene order as ``control_fit``.
+    Shared fits estimate an element effect for each response gene. Relative
+    fits additionally estimate guide multipliers using the guide-to-element
+    mapping. The returned ``BetaFit`` stores effect means and uncertainty."""
     print("[perturbo] Fitting perturbation effects...")
     counts = data.counts
     pert_id = data.pert_id
@@ -3293,6 +3318,7 @@ def summarize_betas(
     gene_names: list[str],
     single_frame: bool = False,
 ) -> dict[str, pd.DataFrame] | pd.DataFrame:
+    """Label the posterior arrays by perturbation and gene. Set ``single_frame=True`` for a long-form table."""
     print("[perturbo] Summarizing posterior estimates...")
     mean = beta_fit.posterior_mean
     scale = beta_fit.posterior_scale

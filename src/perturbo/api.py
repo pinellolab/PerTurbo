@@ -6,7 +6,6 @@ from pathlib import Path
 from typing import Any
 
 from . import cli, core
-from .crt import DEFAULT_CRT_MIN_INFORMATIVE_CELLS
 from .inference import PerTurboModel, PERTURBO
 from .io import MuDataSetup, get_mudata_setup, load_fit_bundle, save_fit_bundle, setup_mudata
 from .preprocessing import compute_gene_clip_thresholds, count_gene_outliers_per_cell
@@ -98,6 +97,7 @@ def fit_from_path(
     out_dir: str | Path,
     *,
     pairs_to_test: str | Path | None = None,
+    cis_pairs: str | Path | None = None,
     modality_key: str | None = None,
     perturbation_key: str | None = None,
     perturbation_modality_key: str | None = None,
@@ -110,7 +110,7 @@ def fit_from_path(
     batch_covariate: str | None = None,
     size_factor_key: str | None = None,
     library_size_key: str | None = None,
-    size_factor_mode: str = "infer",
+    size_factor_mode: str | None = None,
     gene_name_key: str | None = None,
     clip_gene_expression_percentile: float = 100.0,
     gene_outlier_action: str = "none",
@@ -135,6 +135,7 @@ def fit_from_path(
     minibatch_size: int = 0,
     minibatch_size_control: int = 0,
     minibatch_size_betas: int = 0,
+    gene_chunk_size: int = 0,
     perturbation_chunk_size: int = 0,
     max_chunk_size: int = 50000,
     backed: bool = False,
@@ -144,22 +145,24 @@ def fit_from_path(
     progress_chunk_size: int = 100,
     single_frame: bool = False,
     save_model_params: bool = True,
+    output_format: str = "h5mu",
     return_model: bool = False,
-    crt: bool = False,
+    crt: bool | None = None,
     crt_num_resamples: int = 999,
     crt_seed: int = 0,
     crt_gene_chunk_size: int = 500,
     crt_max_gather_gib: float = 8.0,
     crt_tail_families: list[str] | tuple[str, ...] | None = None,
-    crt_mechanism: str = "permutation",
-    crt_saddlepoint_only: bool = False,
+    crt_mechanism: str | None = None,
+    crt_saddlepoint_only: bool | None = None,
     crt_screen_p_value: float = 0.05,
     crt_two_sided: str = "equal-tail",
-    crt_min_informative_cells: float = DEFAULT_CRT_MIN_INFORMATIVE_CELLS,
+    crt_min_informative_cells: float | None = None,
+    report_low_information: bool = False,
     crt_all_cells_batch_support: bool = True,
     crt_baseline_step_tolerance: float | None = None,
     crt_allow_unconverged_baseline: bool = False,
-    crt_polish_baseline: bool = False,
+    crt_polish_baseline: bool | None = None,
     crt_pool: str | None = None,
     crt_only: bool = False,
 ) -> PerTurboModel | None:
@@ -167,14 +170,15 @@ def fit_from_path(
 
     Keyword names are snake_case versions of the CLI flags. The implementation
     delegates to ``perturbo.api.main`` so Python and CLI fits share the same
-    validation, loading, chunking, fitting, output, and light-bundle behavior.
+    validation, loading, chunking, fitting and output formats.
 
+    Leave ``crt=None`` for the CLI default or pass ``crt=False`` for an effects-only fit.
     ``crt=True`` also runs the conditional randomization test against the
-    stage-one baseline and adds ``crt_*`` columns to ``element_effects.parquet``.
-    The testing methods build on SCEPTRE and spaCRT; see :mod:`perturbo.crt`
+    stage-one baseline and writes primary p-values and named BH corrections
+    in the effects table. Choose ``output_format="bundle"`` for Parquet results.
+    The testing methods build on SCEPTRE and spaCRT; see ``perturbo.crt``
     for references. PerTurbo does not introduce these statistical methods.
-    ``crt_tail_families=None`` keeps the CLI default (the moment-fitted
-    families); pass ``("saddlepoint",)`` with ``crt_mechanism="propensity"`` and
+    ``crt_tail_families=None`` keeps the CLI default; pass ``("saddlepoint",)`` with ``crt_mechanism="propensity"`` and
     ``crt_saddlepoint_only=True`` for a saddlepoint tail approximation without
     resampling. An empty tuple switches the continuous tails off. ``crt_pool``
     selects the resampling pool (``'control-anchored'`` for low MOI,
@@ -193,12 +197,16 @@ def fit_from_path(
 
     ``pairs_to_test`` names a two-column ``element,gene`` table. It does not
     change the run: every pair is still fitted and tested. A second effect
-    table restricted to those pairs is written beside the transcriptome-wide
-    one, with Benjamini-Hochberg recomputed within that smaller family, so a
-    single run yields both a cis-scale comparison and the full analysis.
+    table restricted to those pairs is saved as requested_pairs in MuData or
+    a second Parquet in the bundle, with legacy q-values corrected within that family, so a
+    single run yields both a restricted comparison and the full analysis.
+    Use ``cis_pairs`` to declare the candidate cis pairs for a single BH
+    correction in the main table. Testing always supplies global and
+    within-element BH corrections.
     """
     argv = ["--input", str(input_path), "--out-dir", str(out_dir)]
     _append_cli_arg(argv, "--pairs-to-test", pairs_to_test)
+    _append_cli_arg(argv, "--cis-pairs", cis_pairs)
     _append_cli_arg(argv, "--modality-key", modality_key)
     _append_cli_arg(argv, "--perturbation-key", perturbation_key)
     _append_cli_arg(argv, "--perturbation-modality-key", perturbation_modality_key)
@@ -238,6 +246,7 @@ def fit_from_path(
     _append_cli_arg(argv, "--minibatch-size", minibatch_size)
     _append_cli_arg(argv, "--minibatch-size-control", minibatch_size_control)
     _append_cli_arg(argv, "--minibatch-size-betas", minibatch_size_betas)
+    _append_cli_arg(argv, "--gene-chunk-size", gene_chunk_size)
     _append_cli_arg(argv, "--perturbation-chunk-size", perturbation_chunk_size)
     _append_cli_arg(argv, "--max-chunk-size", max_chunk_size)
     if backed:
@@ -251,12 +260,18 @@ def fit_from_path(
     _append_cli_arg(argv, "--progress-chunk-size", progress_chunk_size)
     if single_frame:
         argv.append("--single-frame")
+    _append_cli_arg(argv, "--output-format", output_format)
     if save_model_params:
         argv.append("--save-model-params")
     else:
         argv.append("--no-save-model-params")
-    if crt:
+    if crt is False:
+        argv.append("--no-crt")
+    if crt_only and crt is False:
+        raise ValueError("crt_only=True requires testing.")
+    if crt is True or crt_only:
         argv.append("--crt")
+    if crt is not False:
         _append_cli_arg(argv, "--crt-num-resamples", crt_num_resamples)
         _append_cli_arg(argv, "--crt-seed", crt_seed)
         _append_cli_arg(argv, "--crt-gene-chunk-size", crt_gene_chunk_size)
@@ -266,10 +281,12 @@ def fit_from_path(
             argv.append("--crt-tail-families")
             argv.extend(str(family) for family in crt_tail_families)
         _append_cli_arg(argv, "--crt-mechanism", crt_mechanism)
-        if crt_saddlepoint_only:
-            argv.append("--crt-saddlepoint-only")
+        if crt_saddlepoint_only is not None:
+            argv.append("--crt-saddlepoint-only" if crt_saddlepoint_only else "--no-crt-saddlepoint-only")
         _append_cli_arg(argv, "--crt-screen-p-value", crt_screen_p_value)
         _append_cli_arg(argv, "--crt-two-sided", crt_two_sided)
+        if report_low_information:
+            argv.append("--report-low-information")
         _append_cli_arg(argv, "--crt-min-informative-cells", crt_min_informative_cells)
         argv.append(
             "--crt-all-cells-batch-support"
@@ -279,8 +296,8 @@ def fit_from_path(
         _append_cli_arg(argv, "--crt-baseline-step-tolerance", crt_baseline_step_tolerance)
         if crt_allow_unconverged_baseline:
             argv.append("--crt-allow-unconverged-baseline")
-        if crt_polish_baseline:
-            argv.append("--crt-polish-baseline")
+        if crt_polish_baseline is not None:
+            argv.append("--crt-polish-baseline" if crt_polish_baseline else "--no-crt-polish-baseline")
         if crt_pool is not None:
             _append_cli_arg(argv, "--crt-pool", crt_pool)
         if crt_only:
@@ -290,6 +307,10 @@ def fit_from_path(
     if return_model:
         if not save_model_params:
             raise ValueError("return_model=True requires save_model_params=True.")
+        if output_format == "h5mu":
+            return PerTurboModel.load(Path(out_dir) / "fitted.h5mu")
+        if output_format == "bundle":
+            return PerTurboModel.load(Path(out_dir) / "bundle")
         return PerTurboModel.load(out_dir)
     return None
 

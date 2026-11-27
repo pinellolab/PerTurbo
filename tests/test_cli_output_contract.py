@@ -77,6 +77,7 @@ def test_cli_writes_standard_outputs_relative(monkeypatch, tmp_path) -> None:
         [
             # stubbed loader: the fabricated data cannot carry the test
             "--no-crt",
+            "--output-format", "legacy",
             "--input",
             "dummy.h5mu",
             "--out-dir",
@@ -181,6 +182,7 @@ def test_cli_empirical_p_values_use_inferred_high_moi_control_elements(monkeypat
 
     api.main(
         [
+            "--output-format", "legacy",
             "--input",
             "dummy.h5mu",
             "--out-dir",
@@ -234,6 +236,7 @@ def test_cli_does_not_write_guide_efficiency_for_shared(monkeypatch, tmp_path) -
 
     api.main(
         [
+            "--output-format", "legacy",
             "--input",
             "dummy.h5ad",
             "--out-dir",
@@ -291,6 +294,7 @@ def test_cli_saves_model_params_by_default_and_supports_opt_out(monkeypatch, tmp
 
     api.main(
         [
+            "--output-format", "legacy",
             "--input",
             "dummy.h5ad",
             "--out-dir",
@@ -333,6 +337,7 @@ def test_cli_saves_model_params_by_default_and_supports_opt_out(monkeypatch, tmp
     opt_out_dir = tmp_path / "opt_out"
     api.main(
         [
+            "--output-format", "legacy",
             "--input",
             "dummy.h5ad",
             "--out-dir",

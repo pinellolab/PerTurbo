@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import asdict, replace
 import json
 import warnings
+import shutil
+import tempfile
 from pathlib import Path
 import time
 from typing import Any
@@ -13,6 +15,7 @@ import jax as _jax
 import jax.numpy as jnp
 import numpy as np
 import pandas as pd
+from scipy import sparse
 
 from .core import *  # noqa: F403 - CLI delegates to the fitting workflow namespace.
 from .core import (
@@ -77,6 +80,7 @@ from .crt import (
     validate_crt_config,
 )
 from .core import control_cell_mask, measure_realized_moi
+from .fdr import FdrFamilies
 from .results import (
     build_guide_efficiency_df,
     load_pairs_to_test,
@@ -359,8 +363,8 @@ def _gene_chunk_configuration_problem(args, size_factor_mode: str) -> str | None
         return "gene chunking requires observed or fixed-zero size factors"
     if args.num_factors or args.guide_random_effects or args.propagate_baseline_uncertainty:
         return "gene chunking requires zero latent factors and no guide random effects or baseline uncertainty propagation"
-    if args.guide_effect_strategy != "shared" or args.guide_activity_mode != "always_on":
-        return "gene chunking currently requires shared, always-on guide effects"
+    if args.guide_effect_strategy not in {"shared", "relative"} or args.guide_activity_mode != "always_on":
+        return "gene chunking currently requires shared or relative, always-on guide effects"
     if args.fit_perturbation_dispersion:
         return "gene chunking currently requires fixed perturbation dispersion"
     return None
@@ -585,36 +589,42 @@ def main(argv: list[str] | None = None) -> None:
         description="Run PerTurbo end-to-end on an AnnData/MuData file.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    parser.add_argument("--input", required=True, help="Path to .h5ad or .h5mu file")
-    parser.add_argument(
+    data = parser.add_argument_group("Input and screen design")
+    data.add_argument("--input", required=True, help="Path to .h5ad or .h5mu file")
+    data.add_argument(
         "--pairs-to-test",
         default=None,
         help=(
             "Optional CSV/TSV/Parquet with columns element,gene. The run is unchanged - every "
             "pair is still fitted and tested - but a second effect table restricted to these "
-            "pairs is written beside the transcriptome-wide one, with Benjamini-Hochberg "
-            "recomputed within that family. Use it to obtain a cis-scale comparison and the "
-            "transcriptome-wide analysis from a single run."
+            "pairs is written beside the transcriptome-wide one. Legacy crt_*q_value fields "
+            "are recomputed over the requested set; named q_global, q_element and q_cis "
+            "retain their original families."
         ),
     )
-    parser.add_argument("--out-dir", required=True, help="Directory to write outputs")
-    parser.add_argument("--modality-key", default=None, help="MuData modality key (e.g., rna)")
-    parser.add_argument(
+    data.add_argument(
+        "--cis-pairs", metavar="FILE",
+        help="CSV/TSV/Parquet of candidate element,gene pairs. Apply one BH correction "
+        "over finite tests in this set and include q_cis in the main effect table.",
+    )
+    data.add_argument("--out-dir", required=True, help="Directory to write outputs")
+    data.add_argument("--modality-key", default=None, help="MuData modality key (e.g., rna)")
+    data.add_argument(
         "--perturbation-key",
         default=None,
         help="Obs field for perturbation labels (required for low-MOI inputs).",
     )
-    parser.add_argument(
+    data.add_argument(
         "--perturbation-modality-key",
         default=None,
         help="MuData modality key containing the perturbation matrix (high-MOI inputs).",
     )
-    parser.add_argument(
+    data.add_argument(
         "--perturbation-layer",
         default=None,
         help="Layer in the perturbation modality containing the binarized matrix (defaults to .X).",
     )
-    parser.add_argument(
+    data.add_argument(
         "--perturbation-element-varm-key",
         default=None,
         help=(
@@ -622,7 +632,7 @@ def main(argv: list[str] | None = None) -> None:
             "binary map. When set, beta effects are fit at element level."
         ),
     )
-    parser.add_argument(
+    data.add_argument(
         "--perturbation-element-names-uns-key",
         default=None,
         help=(
@@ -630,29 +640,29 @@ def main(argv: list[str] | None = None) -> None:
             "Required when --perturbation-element-varm-key has no column labels."
         ),
     )
-    parser.add_argument(
+    data.add_argument(
         "--control-substring",
         default=None,
         help="Substring identifying controls (required for low-MOI inputs).",
     )
-    parser.add_argument(
+    data.add_argument(
         "--max-control-cells",
         type=int,
         default=10000,
         help="Maximum number of control cells to use (randomly subsampled).",
     )
-    parser.add_argument(
+    data.add_argument(
         "--continuous-covariates",
         nargs="+",
         default=None,
         help="Continuous obs covariates to regress (auto log1p+zscore for count-like, otherwise zscore).",
     )
-    parser.add_argument(
+    data.add_argument(
         "--batch-covariate",
         default=None,
         help="Optional categorical obs covariate (one-hot with most-frequent reference dropped).",
     )
-    parser.add_argument(
+    data.add_argument(
         "--size-factor-key",
         default=None,
         help=(
@@ -660,7 +670,7 @@ def main(argv: list[str] | None = None) -> None:
             "Must not be raw count/library-size data."
         ),
     )
-    parser.add_argument(
+    data.add_argument(
         "--library-size-key",
         default=None,
         help=(
@@ -668,7 +678,7 @@ def main(argv: list[str] | None = None) -> None:
             "This is transformed internally to centered log size factors."
         ),
     )
-    parser.add_argument(
+    data.add_argument(
         "--size-factor-mode",
         default="observed",
         choices=VALID_CLI_SIZE_FACTOR_MODES,
@@ -679,23 +689,24 @@ def main(argv: list[str] | None = None) -> None:
             "conditional randomization test), or fix them to zero (none)."
         ),
     )
-    parser.add_argument(
+    testing = parser.add_argument_group("Association tests and reporting")
+    testing.add_argument(
         "--crt",
         action=argparse.BooleanOptionalAction,
         default=None,
         help=(
             "Run conditional randomization testing based on SCEPTRE and spaCRT, against "
             "the stage-1 baseline, adding "
-            "crt_p_value/crt_q_value/crt_z_value to element_effects.parquet. On by default; "
+            "p_value, q_global, q_element and optional q_cis to element_effects.parquet. On by default; "
             "--no-crt fits the effects alone. It needs --size-factor-mode observed (or none), "
             "--likelihood nb, --num-factors 0, no --guide-random-effects, and one perturbation "
             "per cell: left to the default it steps aside with a message when the configuration "
             "is unsupported, while an explicit --crt reports the problem and stops."
         ),
     )
-    parser.add_argument("--crt-num-resamples", type=int, default=999)
-    parser.add_argument("--crt-seed", type=int, default=0)
-    parser.add_argument(
+    testing.add_argument("--crt-num-resamples", type=int, default=999)
+    testing.add_argument("--crt-seed", type=int, default=0)
+    testing.add_argument(
         "--crt-gene-chunk-size",
         type=int,
         default=500,
@@ -704,8 +715,8 @@ def main(argv: list[str] | None = None) -> None:
             "target times the resample block, so it is the main memory knob."
         ),
     )
-    parser.add_argument("--crt-max-gather-gib", type=float, default=8.0)
-    parser.add_argument(
+    testing.add_argument("--crt-max-gather-gib", type=float, default=8.0)
+    testing.add_argument(
         "--crt-tail-families",
         nargs="*",
         default=["saddlepoint"],
@@ -717,7 +728,7 @@ def main(argv: list[str] | None = None) -> None:
             "from resampled moments and need resamples. Pass with no values to skip them."
         ),
     )
-    parser.add_argument(
+    testing.add_argument(
         "--crt-only",
         action="store_true",
         help=(
@@ -726,7 +737,7 @@ def main(argv: list[str] | None = None) -> None:
             "only the test is wanted (power calculations, calibration checks)."
         ),
     )
-    parser.add_argument(
+    testing.add_argument(
         "--crt-auto-moi-threshold",
         type=float,
         default=3.0,
@@ -737,7 +748,7 @@ def main(argv: list[str] | None = None) -> None:
             "at a true high MOI (tens of guides per cell) does not."
         ),
     )
-    parser.add_argument(
+    testing.add_argument(
         "--crt-min-control-cells",
         type=int,
         default=1000,
@@ -747,7 +758,7 @@ def main(argv: list[str] | None = None) -> None:
             "the control-anchored null noisy and the all-cells null uninformative. Default 1000."
         ),
     )
-    parser.add_argument(
+    testing.add_argument(
         "--crt-test-control-elements",
         action="store_true",
         help=(
@@ -758,7 +769,7 @@ def main(argv: list[str] | None = None) -> None:
             "diagnostic; a clean calibration needs controls held out of the pool."
         ),
     )
-    parser.add_argument(
+    testing.add_argument(
         "--crt-pool",
         choices=("auto", "control-anchored", "all-cells"),
         default="auto",
@@ -768,11 +779,11 @@ def main(argv: list[str] | None = None) -> None:
             "(high MOI) tests each element as a marginal association over every analysed cell, with "
             "the null fit on all cells; it needs the guide-to-element map "
             "(--perturbation-element-varm-key) and no control cells, and uses a "
-            "Bernoulli-sum saddlepoint tail approximation with no resamples. 'auto' picks all-cells when the element "
-            "map is given, control-anchored otherwise."
+            "Bernoulli-sum saddlepoint tail approximation with no resamples. 'auto' selects the pool from the median guides per cell "
+            "and --crt-auto-moi-threshold. Specify the pool when analyzing a guide subset."
         ),
     )
-    parser.add_argument(
+    testing.add_argument(
         "--crt-mechanism",
         choices=list(CRT_MECHANISMS),
         default="propensity",
@@ -782,7 +793,7 @@ def main(argv: list[str] | None = None) -> None:
             "cell's fitted selection probability (propensity)."
         ),
     )
-    parser.add_argument(
+    testing.add_argument(
         "--crt-saddlepoint-only",
         action=argparse.BooleanOptionalAction,
         default=None,
@@ -794,25 +805,29 @@ def main(argv: list[str] | None = None) -> None:
             "crt_p_value stays missing without resamples."
         ),
     )
-    parser.add_argument(
+    testing.add_argument(
+        "--report-low-information", action="store_true",
+        help="Include observed_nonzero, expected_nonzero and low_information in the per-pair output.",
+    )
+    testing.add_argument(
         "--crt-min-informative-cells",
         type=float,
-        default=DEFAULT_CRT_MIN_INFORMATIVE_CELLS,
+        default=None,
         help=(
-            "Flag a pair as low-information when neither the element's detected cells for the gene "
-            "(crt_observed_nonzero) nor the number the fitted null expected to detect "
-            "(crt_expected_nonzero) reaches this many. It is a flag and nothing else: p-values, "
+            "Also enables per-pair reporting. Default threshold: 5. Flag a pair as low-information when neither the element's detected cells for the gene "
+            "(observed_nonzero) nor the number the fitted null expected to detect "
+            "(expected_nonzero) reaches this many. It is a flag and nothing else: p-values, "
             "q-values and validity are identical with it set to any value. 0 keeps the two count "
             "columns and flags nothing."
         ),
     )
-    parser.add_argument(
+    testing.add_argument(
         "--crt-screen-p-value",
         type=float,
         default=0.05,
         help="Evaluate the saddlepoint only where the Pearson III screen is at or below this p-value.",
     )
-    parser.add_argument(
+    testing.add_argument(
         "--crt-two-sided",
         choices=["symmetric", "equal-tail"],
         default="equal-tail",
@@ -821,7 +836,7 @@ def main(argv: list[str] | None = None) -> None:
             "'equal-tail' is twice the tail on the observed side, which rejects each tail equally under a skewed null."
         ),
     )
-    parser.add_argument(
+    testing.add_argument(
         "--crt-all-cells-batch-support",
         dest="crt_all_cells_batch_support",
         action=argparse.BooleanOptionalAction,
@@ -835,7 +850,7 @@ def main(argv: list[str] | None = None) -> None:
             "unaffected; --no-crt-all-cells-batch-support restores the pre-2.0.0rc9 behaviour."
         ),
     )
-    parser.add_argument(
+    testing.add_argument(
         "--crt-baseline-step-tolerance",
         type=float,
         default=DEFAULT_NEWTON_STEP_TOLERANCE,
@@ -845,18 +860,16 @@ def main(argv: list[str] | None = None) -> None:
             "check that it is fit well enough for the score test to mean what it says."
         ),
     )
-    parser.add_argument(
+    testing.add_argument(
         "--crt-allow-unconverged-baseline",
         action=argparse.BooleanOptionalAction,
-        default=True,
+        default=False,
         help=(
-            "Warn instead of failing when the stage-1 baseline is not at the control-cell null mode. "
-            "On by default: after the polish the guard's percentile is dominated by genes with almost "
-            "no control counts, and every production run passes it. --no-crt-allow-unconverged-baseline "
-            "makes the guard fatal."
+            "Test genes whose baseline fails the null-mode check, with a warning. "
+            "By default, withhold their CRT p-values and continue testing other genes."
         ),
     )
-    parser.add_argument(
+    testing.add_argument(
         "--crt-polish-baseline",
         action=argparse.BooleanOptionalAction,
         default=True,
@@ -866,8 +879,9 @@ def main(argv: list[str] | None = None) -> None:
             "the stage-one coefficients as they came out of SVI."
         ),
     )
-    parser.add_argument("--gene-name-key", default=None, help="Var field for gene names")
-    parser.add_argument(
+    data.add_argument("--gene-name-key", default=None, help="Var field for gene names")
+    filtering = parser.add_argument_group("Expression filters")
+    filtering.add_argument(
         "--clip-gene-expression-percentile",
         type=float,
         default=100.0,
@@ -879,7 +893,7 @@ def main(argv: list[str] | None = None) -> None:
             "--likelihood=censored_nb requires a value strictly below 100."
         ),
     )
-    parser.add_argument(
+    filtering.add_argument(
         "--gene-outlier-action",
         default="none",
         choices=("none", "filter_cells"),
@@ -887,18 +901,18 @@ def main(argv: list[str] | None = None) -> None:
             "How to apply the gene-wise outlier thresholds: do nothing, or drop cells with many outlier genes."
         ),
     )
-    parser.add_argument(
+    filtering.add_argument(
         "--gene-outlier-threshold-floor",
         type=int,
         default=2,
         help="Minimum per-gene outlier threshold after percentile estimation.",
     )
-    parser.add_argument(
+    filtering.add_argument(
         "--winsorize-gene-expression-outliers",
         action="store_true",
         help="Winsorize remaining gene counts down to their per-gene outlier thresholds after optional cell filtering.",
     )
-    parser.add_argument(
+    filtering.add_argument(
         "--outlier-cell-min-genes",
         type=int,
         default=0,
@@ -907,31 +921,32 @@ def main(argv: list[str] | None = None) -> None:
             "outlier genes. Set >0 to enable a burden-based cell filter."
         ),
     )
-    parser.add_argument(
+    model = parser.add_argument_group("Model and device")
+    model.add_argument(
         "--device",
         default=None,
         help="JAX device spec: platform ('cpu'/'gpu') or indexed device ('gpu:1').",
     )
-    parser.add_argument("--prior", default="normal", help="Prior for beta (normal or cauchy)")
-    parser.add_argument(
+    model.add_argument("--prior", default="normal", help="Prior for beta (normal or cauchy)")
+    model.add_argument(
         "--likelihood",
         default="negbin",
         choices=("nb", "negbin", "censored_nb", "lognormal_nb", "mixture_nb"),
         help="Observation model (nb/negbin, censored_nb, lognormal_nb, or mixture_nb)",
     )
-    parser.add_argument(
+    model.add_argument(
         "--guide-effect-strategy",
         default="shared",
-        choices=("shared", "relative"),
-        help="How guides targeting the same element share information during stage-2 fitting.",
+        choices=("shared", "relative", "scaled"),
+        help="Stage-two guide effects. The legacy spelling scaled selects relative efficiency.",
     )
-    parser.add_argument(
+    model.add_argument(
         "--guide-activity-mode",
         default="always_on",
         choices=("always_on", "absolute"),
         help="Guide activity model for stage-2 fitting.",
     )
-    parser.add_argument(
+    model.add_argument(
         "--guide-random-effects",
         action="store_true",
         help=(
@@ -939,7 +954,7 @@ def main(argv: list[str] | None = None) -> None:
             "and carry that calibration into stage-2."
         ),
     )
-    parser.add_argument(
+    model.add_argument(
         "--fit-perturbation-dispersion",
         action="store_true",
         help=(
@@ -947,64 +962,65 @@ def main(argv: list[str] | None = None) -> None:
             "Currently supported for low-MOI negative-binomial fits only."
         ),
     )
-    parser.add_argument(
+    model.add_argument(
         "--perturbation-dispersion-prior-rate",
         type=float,
         default=10.0,
         help="Rate of the exponential prior on stage-2 excess inverse dispersion.",
     )
-    parser.add_argument(
+    outputs = parser.add_argument_group("Output files")
+    outputs.add_argument("--output-format", choices=("h5mu", "bundle", "legacy"), default="h5mu",
+                        help="Save fitted.h5mu (default), a source-linked compact bundle, or the rc12 directory.")
+    outputs.add_argument(
         "--save-model-params",
         action=argparse.BooleanOptionalAction,
         default=True,
-        help=(
-            "Write a light, simulation-ready fitted model parameter bundle into --out-dir by default. "
-            "The bundle can be loaded with PERTURBO.load(--out-dir) while the original input data remain available."
-        ),
+        help="Save a reloadable fit in the selected format (default: on).",
     )
-    parser.add_argument(
+    numerics = parser.add_argument_group("Optimization and memory")
+    numerics.add_argument(
         "--num-steps",
         type=int,
         default=None,
         help="Shared raw SVI step count for both control and perturbation-effect fits.",
     )
-    parser.add_argument(
+    numerics.add_argument(
         "--num-epochs",
         type=int,
         default=None,
         help="Shared dataset passes for both control and perturbation-effect fits.",
     )
-    parser.add_argument(
+    numerics.add_argument(
         "--num-steps-control",
         type=int,
         default=None,
         help="Stage-specific raw SVI step count for the control fit.",
     )
-    parser.add_argument(
+    numerics.add_argument(
         "--num-epochs-control",
         type=int,
         default=None,
         help="Stage-specific dataset passes for the control fit.",
     )
-    parser.add_argument(
+    numerics.add_argument(
         "--num-steps-betas",
         type=int,
         default=None,
         help="Stage-specific raw SVI step count for perturbation-effect fitting.",
     )
-    parser.add_argument(
+    numerics.add_argument(
         "--num-epochs-betas",
         type=int,
         default=None,
         help="Stage-specific dataset passes for perturbation-effect fitting.",
     )
-    parser.add_argument(
+    numerics.add_argument(
         "--num-particles",
         type=int,
         default=1,
         help="Number of ELBO particles for Monte Carlo integration.",
     )
-    parser.add_argument(
+    numerics.add_argument(
         "--step-size",
         type=float,
         default=0.01,
@@ -1014,13 +1030,13 @@ def main(argv: list[str] | None = None) -> None:
             "simulated effects as well as 0.003 with 2,500, and 0.003 with 300 under-converges."
         ),
     )
-    parser.add_argument(
+    numerics.add_argument(
         "--num-factors",
         type=int,
         default=0,
         help="If >0, fit this many latent factors (shared across controls and betas)",
     )
-    parser.add_argument(
+    numerics.add_argument(
         "--minibatch-size",
         type=int,
         default=0,
@@ -1029,19 +1045,19 @@ def main(argv: list[str] | None = None) -> None:
             "(applies to control and beta fits unless overridden)."
         ),
     )
-    parser.add_argument(
+    numerics.add_argument(
         "--minibatch-size-control",
         type=int,
         default=0,
         help="If >0, subsample cells per step for control minibatch SVI",
     )
-    parser.add_argument(
+    numerics.add_argument(
         "--minibatch-size-betas",
         type=int,
         default=0,
         help="If >0, subsample cells per step for beta minibatch SVI",
     )
-    parser.add_argument(
+    numerics.add_argument(
         "--gene-chunk-size",
         type=int,
         default=0,
@@ -1049,11 +1065,11 @@ def main(argv: list[str] | None = None) -> None:
             "Genes loaded and fit together in stage two; keeps every cell and perturbation predictor. "
             "0 uses perturbation chunks for mutually exclusive assignments and 256-gene blocks "
             "when co-occurring perturbations would otherwise be split. Requires plain NB with fixed "
-            "size factors, shared guide effects, and no latent factors or extra dispersion. "
+            "size factors, shared or relative guide effects, and no latent factors or extra dispersion. "
             "Control fitting remains capped by --max-control-cells."
         ),
     )
-    parser.add_argument(
+    numerics.add_argument(
         "--perturbation-chunk-size",
         type=int,
         default=0,
@@ -1063,18 +1079,18 @@ def main(argv: list[str] | None = None) -> None:
             "Co-occurring assignments use gene blocks to retain the joint model."
         ),
     )
-    parser.add_argument(
+    numerics.add_argument(
         "--max-chunk-size",
         type=int,
         default=50000,
         help="Maximum number of cells per perturbation chunk",
     )
-    parser.add_argument(
+    numerics.add_argument(
         "--backed",
         action="store_true",
         help="Enable disk-backed reads for AnnData/MuData inputs",
     )
-    parser.add_argument(
+    numerics.add_argument(
         "--use-observed-size-factors",
         action="store_true",
         help=(
@@ -1082,7 +1098,7 @@ def main(argv: list[str] | None = None) -> None:
             "Backward-compatible alias for --size-factor-mode=observed."
         ),
     )
-    parser.add_argument(
+    numerics.add_argument(
         "--propagate-baseline-uncertainty",
         action="store_true",
         help=(
@@ -1090,21 +1106,28 @@ def main(argv: list[str] | None = None) -> None:
             "for beta_0 and theta instead of conditioning on their point estimates."
         ),
     )
-    parser.add_argument(
+    numerics.add_argument(
         "--no-progress-bar",
         action="store_false",
         dest="progress",
         help="Disable tqdm progress bar during SVI",
     )
     parser.set_defaults(progress=True)
-    parser.add_argument(
+    numerics.add_argument(
         "--progress-chunk-size",
         type=int,
         default=100,
         help="Number of SVI steps per progress bar update",
     )
-    parser.add_argument("--single-frame", action="store_true", help="Output long dataframe")
+    numerics.add_argument("--single-frame", action="store_true", help="Output long dataframe")
     args = parser.parse_args(argv)
+    if args.crt_min_informative_cells is None:
+        args.crt_min_informative_cells = DEFAULT_CRT_MIN_INFORMATIVE_CELLS
+    else:
+        args.report_low_information = True
+    if args.cis_pairs is not None and args.crt is False:
+        raise ValueError("--cis-pairs requires significance testing.")
+    cis_pairs = load_pairs_to_test(args.cis_pairs, option="cis-pairs") if args.cis_pairs is not None else None
     args.likelihood = _normalize_likelihood_name(args.likelihood)
     size_factor_mode = _resolve_cli_size_factor_mode(
         size_factor_mode=args.size_factor_mode,
@@ -1139,7 +1162,14 @@ def main(argv: list[str] | None = None) -> None:
     )
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    print(f"[perturbo] Outputs will be written to: {out_dir}")
+    final_dir = out_dir
+    modern = args.save_model_params and args.output_format != "legacy"
+    if modern:
+        artifact = final_dir / ("fitted.h5mu" if args.output_format == "h5mu" else "bundle")
+        if artifact.exists():
+            raise FileExistsError(artifact)
+        out_dir = Path(tempfile.mkdtemp(prefix=".fit-work-", dir=final_dir))
+    print(f"[perturbo] Fit workspace: {out_dir}")
 
     continuous_covariates = _dedupe_preserve_order(args.continuous_covariates)
     batch_covariate = None if args.batch_covariate in (None, "", "None") else str(args.batch_covariate)
@@ -1161,6 +1191,8 @@ def main(argv: list[str] | None = None) -> None:
         raise ValueError(
             "--perturbation-element-names-uns-key requires --perturbation-element-varm-key."
         )
+    if args.guide_effect_strategy == "scaled":
+        args.guide_effect_strategy = "relative"
     guide_effect_strategy, guide_activity_mode = _validate_guide_strategy(
         args.guide_effect_strategy,
         args.guide_activity_mode,
@@ -1198,7 +1230,7 @@ def main(argv: list[str] | None = None) -> None:
             CRT_SADDLEPOINT_FAMILY
         ]
     crt_pool: str | None = None
-    crt_requested = args.crt is True or bool(args.crt_only)
+    crt_requested = args.crt is True or bool(args.crt_only) or cis_pairs is not None
     if args.crt is False:
         args.crt = False
     else:
@@ -1407,8 +1439,8 @@ def main(argv: list[str] | None = None) -> None:
         print(
             "[perturbo] --pairs-to-test given: the fit and the test still cover every "
             "perturbation and gene. The file selects the rows of a second table, "
-            "element_effects_requested_pairs.parquet, whose q-values are corrected "
-            "within that set alone."
+            "element_effects_requested_pairs.parquet. Its legacy crt_*q_value fields "
+            "use the requested set; named q-values keep their declared families."
         )
     if args.perturbation_chunk_size > 0:
         should_chunk = True
@@ -1434,6 +1466,8 @@ def main(argv: list[str] | None = None) -> None:
             pert_adata = pert_adata[analysis_adata_for_workflow.obs_names]
             all_guide_names = _extract_pert_names(pert_adata)
             pert_matrix = _get_layer_matrix(pert_adata, args.perturbation_layer)
+            active_guides = (np.asarray((pert_matrix > 0).sum(axis=1)).reshape(-1)
+                             if guide_effect_strategy == "relative" else None)
             if args.perturbation_element_varm_key is not None:
                 element_mapping, element_names = _load_perturbation_element_mapping(
                     data,
@@ -1459,7 +1493,7 @@ def main(argv: list[str] | None = None) -> None:
                     )
                 gene_chunk_size, block_reason = _auto_gene_block_size(
                     num_cells=int(pert_matrix.shape[0]),
-                    max_active=int(active_per_cell.max()),
+                    max_active=int(active_per_cell.max() if active_guides is None else active_guides.max()),
                     device_bytes=_device_memory_bytes(args.device),
                 )
                 print(
@@ -1604,12 +1638,13 @@ def main(argv: list[str] | None = None) -> None:
         progress_chunk_size=args.progress_chunk_size,
         guide_random_effects=args.guide_random_effects,
     )
-    _save_loss_plot(
-        control_fit.losses,
-        out_dir / "control_loss_curve.png",
-        title="Control loss curve",
-    )
-    print(f"[perturbo] Wrote {out_dir / 'control_loss_curve.png'}")
+    if not modern:
+        _save_loss_plot(
+            control_fit.losses,
+            out_dir / "control_loss_curve.png",
+            title="Control loss curve",
+        )
+        print(f"[perturbo] Wrote {out_dir / 'control_loss_curve.png'}")
     control_fit_path = out_dir / "control_fit.npz"
     save_array_bundle(control_fit_path, control_fit_arrays(control_fit))
     print(f"[perturbo] Wrote {control_fit_path}")
@@ -1870,6 +1905,7 @@ def main(argv: list[str] | None = None) -> None:
             covariate_transform_state=covariate_transform_state,
             retain_guide_structure=retain_guide_structure and (
                 gene_chunk_size is None
+                or guide_effect_strategy == "relative"
                 or (args.crt and crt_pool == "all-cells")
             ),
             library_size_center_log_mean=controls.library_size_center_log_mean,
@@ -1964,6 +2000,7 @@ def main(argv: list[str] | None = None) -> None:
             analysis_data = None
             print("[perturbo] --crt-only: stage two skipped; effect estimates are missing in the element table.")
         gene_posteriors: dict[str, np.ndarray] = {}
+        relative_parent_map = None
         for start in (() if stage_two_skipped else range(0, n_genes, gene_chunk_size)):
             stop = min(start + gene_chunk_size, n_genes)
             gene_slice = slice(start, stop)
@@ -2022,7 +2059,13 @@ def main(argv: list[str] | None = None) -> None:
                     analysis_data, crt_accumulator,
                     baseline_source=block_baseline, control_source=block_controls,
                 )
-            if analysis_data.guide_matrix is not None:
+            # The relative likelihood takes a dense guide-by-element map. Keep
+            # the much larger cell-by-guide design indexed across all blocks.
+            if guide_effect_strategy == "relative" and sparse.issparse(analysis_data.guide_to_element):
+                if relative_parent_map is None:
+                    relative_parent_map = jnp.asarray(analysis_data.guide_to_element.toarray(), dtype=jnp.float32)
+                analysis_data = replace(analysis_data, guide_to_element=relative_parent_map)
+            if guide_effect_strategy == "shared" and analysis_data.guide_matrix is not None:
                 analysis_data = replace(analysis_data, guide_matrix=None, guide_to_element=None)
             if args.crt_only:
                 block_fit = _nan_beta_fit(len(all_perturbation_names), stop - start)
@@ -2030,6 +2073,7 @@ def main(argv: list[str] | None = None) -> None:
                 block_fit = fit_perturbation_effects(
                     analysis_data,
                     block_control_fit,
+                    guide_effect_strategy=guide_effect_strategy,
                     num_steps=schedule.resolve_stage_steps(
                         stage="beta", num_cells=int(analysis_data.counts.shape[0]), minibatch_size=minibatch_betas,
                     ),
@@ -2394,10 +2438,9 @@ def main(argv: list[str] | None = None) -> None:
     else:
         null_z_values = null_z
     crt_columns = None
+    fdr = None
     if crt_accumulator is not None:
-        # Benjamini-Hochberg happens here and only here: it has to see every
-        # hypothesis at once, and each chunk was by construction only part of
-        # the family.
+        # Global BH uses the complete screen after all fit and gene chunks.
         crt_columns = crt_accumulator.finalize(streaming=True)
         if crt_accumulator.num_multi_assignment_cells_dropped:
             print(
@@ -2455,9 +2498,11 @@ def main(argv: list[str] | None = None) -> None:
         # four detected cells has a far tail the saddlepoint can describe but the
         # data cannot support, and that is where two runs of the same binary
         # disagree.
+        crt_metadata["genes_withheld_zero_baseline_counts"] = sorted(crt_accumulator.zero_baseline_genes)
+        crt_metadata["genes_withheld_unconverged_baseline"] = sorted(crt_accumulator.withheld_genes)
         crt_metadata["min_informative_cells"] = float(args.crt_min_informative_cells)
-        if "crt_low_information" in crt_columns:
-            flagged = np.asarray(crt_columns["crt_low_information"], dtype=bool)
+        if "low_information" in crt_columns:
+            flagged = np.asarray(crt_columns["low_information"], dtype=bool)
             primary_q = crt_columns[
                 f"crt_{CRT_SADDLEPOINT_FAMILY}_q_value"
                 if CRT_SADDLEPOINT_FAMILY in crt_accumulator.tail_families
@@ -2492,6 +2537,9 @@ def main(argv: list[str] | None = None) -> None:
                 f"q<0.05; {genes_all_flagged:,} of {len(analysis_gene_names):,} genes are flagged "
                 "for every element. Flag only; no p-value or q-value changed."
             )
+        if not args.report_low_information:
+            for name in ("observed_nonzero", "expected_nonzero", "low_information"):
+                crt_columns.pop(name, None)
         # How the control cells sit across the batch levels. Both pools are
         # interpreted differently when the controls are confined to one level, and
         # neither the p-values nor the effect sizes say so on their own.
@@ -2500,12 +2548,24 @@ def main(argv: list[str] | None = None) -> None:
         crt_metadata["perturbo_version"] = _version
         crt_metadata["perturbo_source"] = _source
         crt_metadata["perturbo_source_shadows_installed"] = _shadow_note is not None
+        fdr = FdrFamilies(
+            crt_columns,
+            primary="saddlepoint" if args.crt_saddlepoint_only else "resampling",
+            elements=all_perturbation_names,
+            genes=analysis_gene_names,
+            cis_pairs=cis_pairs,
+            cis_source=args.cis_pairs,
+        )
+        crt_metadata.update(fdr.metadata)
+        if cis_pairs is not None:
+            cis = fdr.metadata["cis_family"]
+            print(
+                f"[perturbo] Cis BH: {cis['declared_pairs']:,} declared pairs, "
+                f"{cis['matched_pairs']:,} on the fitted axes, {cis['finite_p']:,} with a p-value."
+            )
         (out_dir / "crt_metadata.json").write_text(json.dumps(crt_metadata, indent=2, default=str))
         tested = int(crt_accumulator.tested.sum())
-        primary = (
-            f"crt_{CRT_SADDLEPOINT_FAMILY}_p_value" if args.crt_saddlepoint_only else "crt_p_value"
-        )
-        finite = np.isfinite(crt_columns[primary])
+        finite = np.isfinite(fdr.p)
         print(
             f"[perturbo] CRT ({args.crt_mechanism}): {tested}/{len(all_perturbation_names)} elements "
             f"tested, {int(finite.sum())} pairs with a p-value."
@@ -2532,6 +2592,8 @@ def main(argv: list[str] | None = None) -> None:
             )
     requested_pairs = load_pairs_to_test(args.pairs_to_test) if args.pairs_to_test is not None else None
     element_effects_path = out_dir / "element_effects.parquet"
+    from .fitted_output import EFFECT_COLUMNS
+
     restricted = write_standard_element_effects_parquet(
         element_effects_path,
         method="perturbo",
@@ -2542,6 +2604,8 @@ def main(argv: list[str] | None = None) -> None:
         null_z_values=null_z_values,
         extra_columns=crt_columns,
         requested_pairs=requested_pairs,
+        output_columns=EFFECT_COLUMNS if modern else None,
+        fdr=fdr,
     )
     print(f"[perturbo] Wrote {element_effects_path}")
 
@@ -2555,7 +2619,7 @@ def main(argv: list[str] | None = None) -> None:
         print(
             f"[perturbo] Wrote {restricted_path}: {len(restricted):,} of {len(requested_pairs):,} requested pairs"
             + (f" ({missing:,} not present in the analysed grid)" if missing else "")
-            + "; q-values recomputed within this family."
+            + "; legacy test q-values recomputed within this family."
         )
 
     if guide_effect_strategy == "relative":
@@ -2612,7 +2676,7 @@ def main(argv: list[str] | None = None) -> None:
         covariate_metadata_path.write_text(json.dumps(metadata, indent=2))
         print(f"[perturbo] Wrote {covariate_metadata_path}")
 
-    if (chunks is not None or gene_chunk_size is not None) and chunk_losses:
+    if not modern and (chunks is not None or gene_chunk_size is not None) and chunk_losses:
         _save_multi_loss_plot(
             chunk_losses,
             out_dir / "beta_loss_curve.png",
@@ -2620,14 +2684,14 @@ def main(argv: list[str] | None = None) -> None:
             labels=[f"chunk {i + 1}" for i in range(len(chunk_losses))],
         )
         print(f"[perturbo] Wrote {out_dir / 'beta_loss_curve.png'}")
-    elif beta_fit.losses.size > 0:
+    elif not modern and beta_fit.losses.size > 0:
         _save_loss_plot(
             beta_fit.losses,
             out_dir / "beta_loss_curve.png",
             title="Beta loss curve",
         )
         print(f"[perturbo] Wrote {out_dir / 'beta_loss_curve.png'}")
-    else:
+    elif not modern:
         print("[perturbo] Skipping beta loss plot (no losses recorded).")
 
     if args.save_model_params:
@@ -2678,6 +2742,7 @@ def main(argv: list[str] | None = None) -> None:
             winsorize_gene_expression=apply_winsorize,
         )
         metadata = {
+            "stage2_fitted": not args.crt_only,
             "likelihood": args.likelihood,
             "effect_prior_dist": args.prior,
             "efficiency_mode": guide_effect_strategy,
@@ -2746,16 +2811,42 @@ def main(argv: list[str] | None = None) -> None:
                 "gene_chunk_size": gene_chunk_size,
             },
         }
-        save_light_fit_bundle(
-            out_dir,
+        saved_params = dict(
             metadata=metadata,
             control_arrays=control_fit_arrays(control_fit),
             beta_arrays=_beta_fit_arrays(beta_fit),
             guide_posteriors=guide_posteriors or None,
             guide_efficacy=guide_efficacy,
             size_factors=saved_size_factors,
+            baseline_cell_indices=controls.baseline_cell_indices,
+            source_cell_count=n_analysis_cells,
             cell_keep_indices=np.flatnonzero(cell_keep_mask) if cell_keep_mask is not None else None,
         )
+        if modern:
+            from .fitted_output import publish
+
+            try:
+                publish(
+                    out_dir,
+                    artifact,
+                    args.output_format,
+                    metadata=metadata,
+                    control=saved_params["control_arrays"],
+                    beta=saved_params["beta_arrays"],
+                    guides=guide_posteriors,
+                    offsets=saved_size_factors,
+                    keep=saved_params["cell_keep_indices"],
+                    baseline=controls.baseline_cell_indices,
+                    n_cells=n_analysis_cells,
+                    obs=analysis_adata.obs,
+                )
+            except Exception as error:
+                save_light_fit_bundle(out_dir, **saved_params)
+                raise RuntimeError(f"Output export failed. A reloadable fit is saved in {out_dir}") from error
+            shutil.rmtree(out_dir)
+            print(f"[perturbo] Wrote fitted output to {artifact}")
+            return
+        save_light_fit_bundle(out_dir, **saved_params)
         print(f"[perturbo] Wrote simulation-ready model parameter bundle to {out_dir}")
 
 

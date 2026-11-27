@@ -402,6 +402,7 @@ def simulate_data_from_trained_model(
 
 
 def save_simulated_mudata(mdata: md.MuData, path: str | Path) -> Path:
+    """Write the simulated assays to a MuData file and return its path."""
     out_path = Path(path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     mdata.write_h5mu(out_path)

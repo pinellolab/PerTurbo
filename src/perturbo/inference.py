@@ -273,8 +273,16 @@ class _ModuleCompat:
         )
 
 
+def _loss_history(control_fit, beta_fit) -> pd.DataFrame:
+    control = pd.Series(np.asarray(control_fit.losses).reshape(-1))
+    beta = pd.Series(np.asarray(beta_fit.losses).reshape(-1))
+    if control.empty and beta.empty:
+        return pd.DataFrame()
+    return pd.DataFrame({"control_loss": control, "beta_loss": beta})
+
+
 class PerTurboModel:
-    """Notebook-friendly fitted model with a PerTurbo-like public workflow surface."""
+    """Fit baseline expression and perturbation effects on registered MuData, or reload an existing fit."""
 
     def __init__(
         self,
@@ -336,19 +344,56 @@ class PerTurboModel:
         self.beta_fit: core.BetaFit | None = None
         self.covariate_transform_state: core.CovariateTransformState | None = None
         self.history: dict[str, pd.DataFrame] = {}
+        self._saved_source = None
         self._guide_efficacy: np.ndarray | None = None
         self.module = _ModuleCompat(self)
 
     @classmethod
     def setup_mudata(cls, mdata, **kwargs: Any) -> MuDataSetup:
+        """Register the expression and guide measurements for an in-memory fit."""
         return setup_mudata(mdata, **kwargs)
 
     @classmethod
-    def load(cls, bundle_dir: str | Path, adata=None) -> "PerTurboModel":
+    def load(cls, bundle_dir: str | Path, adata=None, *, source_path: str | Path | None = None) -> "PerTurboModel":
+        """Restore fitted parameters, assays and their axes from a saved run.
+
+        Pass the fitted .h5mu file, a bundle directory, or a run directory
+        containing a single output. For a compact bundle whose input has moved,
+        supply its new location in ``source_path``. The bytes must match the
+        source checksum recorded at fit time."""
         bundle_path = Path(bundle_dir)
+        if bundle_path.is_dir():
+            candidates = [p for p in (bundle_path / "fitted.h5mu", bundle_path / "bundle") if p.exists()]
+            if len(candidates) == 1 and not (bundle_path / "metadata.json").exists():
+                bundle_path = candidates[0]
+            elif candidates:
+                raise ValueError("Multiple fitted outputs. Pass the specific artifact path.")
+        if (bundle_path / "fit_arrays.npz").is_file():
+            from .fitted_output import load_compact
+            if adata is not None:
+                raise ValueError("Pass source_path= for a checksum-verified compact bundle input")
+            loaded = load_compact(bundle_path, source_path)
+            model = cls._from_saved_arrays(loaded, loaded["mdata"])
+            model._saved_source = (bundle_path.resolve(), loaded.get("source_file", bundle_path.resolve()))
+            return model
+        if source_path is not None:
+            raise ValueError("source_path applies to source-linked compact bundles")
+        if bundle_path.is_file() and bundle_path.suffix == ".h5mu":
+            if adata is not None:
+                raise ValueError("A fitted MuData file already contains its source assays")
+            from .fitted_restore import load_native_fit
+
+            loaded = load_native_fit(bundle_path)
+            model = cls._from_saved_arrays(loaded, loaded["mdata"])
+            model._saved_source = (bundle_path.resolve(), loaded.get("source_file", bundle_path.resolve()))
+            return model
         is_light_bundle = not (bundle_path / "mdata.h5mu").exists()
         loaded = load_fit_bundle(bundle_path, source_data=adata if is_light_bundle else None)
         mdata = loaded["mdata"] if (adata is None or is_light_bundle) else adata
+        return cls._from_saved_arrays(loaded, mdata)
+
+    @classmethod
+    def _from_saved_arrays(cls, loaded, mdata):
         setup = get_mudata_setup(mdata)
         metadata = loaded["metadata"]
         model = cls(
@@ -399,26 +444,19 @@ class PerTurboModel:
                     stacklevel=2,
                 )
                 model._guide_efficacy = None
-        control_loss = np.asarray(model.control_fit.losses).reshape(-1)
-        beta_loss = np.asarray(model.beta_fit.losses).reshape(-1)
-        history_len = max(len(control_loss), len(beta_loss))
-        history = {}
-        if history_len > 0:
-            history["control_loss"] = np.full(history_len, np.nan, dtype=float)
-            history["beta_loss"] = np.full(history_len, np.nan, dtype=float)
-            history["control_loss"][: len(control_loss)] = control_loss
-            history["beta_loss"][: len(beta_loss)] = beta_loss
-        model.history = {"elbo_train": pd.DataFrame(history)}
+        model.history = {"elbo_train": _loss_history(model.control_fit, model.beta_fit)}
         return model
 
     @property
     def gene_names(self) -> list[str]:
+        """Response gene IDs in the RNA feature order."""
         if self.beta_fit is not None:
             return list(self.adata[self.setup.rna_modality].var_names.astype(str))
         return list(self.adata[self.setup.rna_modality].var_names.astype(str))
 
     @property
     def element_names(self) -> list[str]:
+        """Element IDs in fitted order, taken from the registered guide map when present."""
         if self.setup.guide_by_element_key is None:
             return list(self.adata[self.setup.perturbation_modality].var_names.astype(str))
         return core._load_perturbation_element_mapping(
@@ -430,6 +468,7 @@ class PerTurboModel:
 
     @property
     def guide_names(self) -> list[str]:
+        """Guide IDs in the perturbation modality feature order."""
         return list(self.adata[self.setup.perturbation_modality].var_names.astype(str))
 
     def _guide_effect_payload(self) -> tuple[np.ndarray, np.ndarray, list[str], list[str]] | None:
@@ -461,6 +500,7 @@ class PerTurboModel:
         return effect_loc, effect_scale, guide_names, parent_elements
 
     def view_anndata_setup(self) -> dict[str, Any]:
+        """Print the registered input keys and return them as a dictionary."""
         payload = self.setup.to_json_dict()
         print(payload)
         return payload
@@ -542,6 +582,9 @@ class PerTurboModel:
             retain_guide_structure=self.setup.guide_by_element_key is not None,
             library_size_center_log_mean=control_data.library_size_center_log_mean,
         )
+        self._saved_source = None
+        self._baseline_rows = control_data.baseline_cell_indices
+        self._screen_offsets = analysis_data.size_factors
         minibatch_size = batch_size if batch_size not in (None, 0) else None
         schedule = resolve_training_schedule(
             shared_steps=steps,
@@ -594,14 +637,7 @@ class PerTurboModel:
             guide_effect_strategy=self.guide_effect_strategy,
             n_guides=_num_guides(self.adata, self.setup),
         )
-        self.history = {
-            "elbo_train": pd.DataFrame(
-                {
-                    "control_loss": np.asarray(self.control_fit.losses).reshape(-1),
-                    "beta_loss": np.asarray(self.beta_fit.losses).reshape(-1),
-                }
-            )
-        }
+        self.history = {"elbo_train": _loss_history(self.control_fit, self.beta_fit)}
         return self
 
     def _require_fit(self) -> tuple[core.ControlFit, core.BetaFit]:
@@ -610,6 +646,7 @@ class PerTurboModel:
         return self.control_fit, self.beta_fit
 
     def posterior_medians(self) -> PosteriorMedians:
+        """Return named baseline, element and available guide parameter arrays after fitting."""
         control_fit, beta_fit = self._require_fit()
         values = {
             "beta_0": np.asarray(control_fit.beta_0),
@@ -648,6 +685,7 @@ class PerTurboModel:
 
     @property
     def guide_efficacy(self) -> np.ndarray:
+        """Guide multipliers. Relative fits return a guide-by-gene array; shared fits return one per guide, fixed at 1."""
         if self._guide_efficacy is None:
             _control_fit, beta_fit = self._require_fit()
             self._guide_efficacy = _guide_efficacy_from_model(
@@ -658,6 +696,7 @@ class PerTurboModel:
         return np.asarray(self._guide_efficacy)
 
     def posterior_parameter_table(self):
+        """Return a dictionary grouping fitted values, locations and scales by parameter name."""
         control_fit, beta_fit = self._require_fit()
         params = {
             "beta_0": control_fit.beta_0,
@@ -691,6 +730,7 @@ class PerTurboModel:
         return extract_parameter_table(params)
 
     def get_element_effects(self) -> pd.DataFrame:
+        """Return one row per element and response gene with its fitted effect and posterior uncertainty."""
         _control_fit, beta_fit = self._require_fit()
         return build_element_effects_df(
             effect_loc=np.asarray(beta_fit.posterior_mean),
@@ -700,6 +740,7 @@ class PerTurboModel:
         )
 
     def get_guide_effects(self) -> pd.DataFrame:
+        """Return fitted guide–gene effects and parent element IDs using the registered guide-to-element map."""
         payload = self._guide_effect_payload()
         if payload is None:
             raise RuntimeError("Guide effects are unavailable because no guide-to-element mapping is registered.")
@@ -717,11 +758,20 @@ class PerTurboModel:
         out_dir: str | Path,
         *,
         save_anndata: bool = True,
+        output_format: str = "h5mu",
         overwrite: bool = False,
     ) -> Path:
+        """Write the trained model and return its output path.
+
+        The default writes a self-contained ``fitted.h5mu``; a direct .h5mu
+        filename is also accepted. Use ``output_format="bundle"`` for a
+        compact directory or ``"legacy"`` for the earlier file layout."""
         self._require_fit()
         out_path = Path(out_dir)
-        if out_path.exists() and any(out_path.iterdir()) and not overwrite:
+        direct_file = out_path if output_format == "h5mu" and out_path.suffix == ".h5mu" else None
+        if direct_file is not None:
+            out_path = direct_file.parent
+        if direct_file is None and out_path.exists() and any(out_path.iterdir()) and not overwrite:
             raise FileExistsError(f"Bundle directory already exists: {out_path}")
         out_path.mkdir(parents=True, exist_ok=True)
         control_fit, beta_fit = self._require_fit()
@@ -749,6 +799,64 @@ class PerTurboModel:
             "save_anndata": save_anndata,
         }
         guide_posteriors = {k: v for k, v in _guide_posterior_arrays(beta_fit).items() if v is not None}
+        if output_format not in ("h5mu", "bundle", "legacy"):
+            raise ValueError("output_format must be h5mu, bundle or legacy")
+        if output_format != "legacy":
+            import tempfile
+            from .fitted_output import publish, resave
+            from .results import write_standard_element_effects_parquet
+
+            metadata.update(
+                gene_names=self.gene_names,
+                perturbation_names=self.element_names,
+                guide_names=self.guide_names,
+                input_mode="high_moi",
+            )
+            with tempfile.TemporaryDirectory(dir=out_path) as tmp:
+                work = Path(tmp)
+                dest = direct_file or out_path / ("fitted.h5mu" if output_format == "h5mu" else "bundle")
+                if self._saved_source is not None:
+                    resave(
+                        *self._saved_source,
+                        work,
+                        dest,
+                        output_format,
+                        control_fit_arrays(control_fit),
+                        _beta_arrays(beta_fit),
+                        guide_posteriors,
+                        overwrite,
+                    )
+                    return dest
+                write_standard_element_effects_parquet(
+                    work / "element_effects.parquet",
+                    method="perturbo",
+                    element_names=self.element_names,
+                    gene_names=self.gene_names,
+                    effect_loc=beta_fit.posterior_mean,
+                    effect_scale=beta_fit.posterior_scale,
+                )
+                if self.guide_effect_strategy == "relative" and beta_fit.guide_relative_efficiency_mean is not None:
+                    self.get_guide_effects()[["guide", "element", "gene"]].to_parquet(
+                        work / "guide_efficiency.parquet", index=False
+                    )
+                rna = self.adata[self.setup.rna_modality]
+                publish(
+                    work,
+                    dest,
+                    output_format,
+                    metadata=metadata,
+                    control=control_fit_arrays(control_fit),
+                    beta=_beta_arrays(beta_fit),
+                    guides=guide_posteriors,
+                    offsets=getattr(self, "_screen_offsets", None),
+                    keep=None,
+                    baseline=getattr(self, "_baseline_rows", None),
+                    n_cells=rna.n_obs,
+                    obs=rna.obs,
+                    assays=self.adata,
+                    overwrite=overwrite,
+                )
+                return dest
         return save_fit_bundle(
             out_path,
             metadata=metadata,

@@ -62,7 +62,7 @@ def test_control_and_effect_likelihoods_and_parameters_are_float32(tmp_path, mon
     fit_from_path(
         str(screen), out_dir=str(out), perturbation_key="pert", control_substring="non-targeting",
         library_size_key="total_umis", size_factor_mode="observed", likelihood="nb",
-        num_steps_control=5, num_steps_betas=5, save_model_params=True,
+        num_steps_control=5, num_steps_betas=5, save_model_params=True, output_format="bundle",
     )
     npz_files = sorted(out.rglob("*.npz"))
     assert npz_files, "the run should save its stage-one fit and its model parameters"

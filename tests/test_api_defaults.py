@@ -4,7 +4,6 @@ import argparse
 import pytest
 
 from perturbo import api, cli
-from perturbo.crt import DEFAULT_CRT_MIN_INFORMATIVE_CELLS
 
 
 def _parsed(monkeypatch, argv):
@@ -42,7 +41,8 @@ def test_api_crt_defaults_and_overrides_reach_cli(monkeypatch, options):
     if not options:
         assert actual.step_size == 0.01
         assert actual.crt_gene_chunk_size == 500
-        assert actual.crt_min_informative_cells == DEFAULT_CRT_MIN_INFORMATIVE_CELLS
+        assert actual.crt_min_informative_cells is None
+        assert not actual.report_low_information
         assert actual.crt_all_cells_batch_support is True
 
 
@@ -51,6 +51,7 @@ def test_api_does_not_enable_crt_for_annotation_options(monkeypatch):
     monkeypatch.setattr(api, "main", lambda argv: calls.append(argv))
     api.fit_from_path("screen.h5mu", "out", crt=False, crt_min_informative_cells=12,
                       crt_all_cells_batch_support=False)
+    assert _parsed(monkeypatch, calls[0]).crt is False
     assert "--crt" not in calls[0]
     assert "--crt-min-informative-cells" not in calls[0]
     assert "--no-crt-all-cells-batch-support" not in calls[0]
@@ -58,7 +59,32 @@ def test_api_does_not_enable_crt_for_annotation_options(monkeypatch):
 
 def test_cli_guide_effect_strategy_default_is_shared(monkeypatch):
     """The CLI half of the API-default assertion in test_api_cli.py. Fitting a
-    per-guide relative efficacy needs guide-level inputs and blocks gene
-    chunking, so neither entry point may reach for it on its own."""
+    per-guide relative efficacy needs guide-level inputs, so neither entry
+    point may reach for it on its own."""
     parsed = _parsed(monkeypatch, ["--input", "screen.h5mu", "--out-dir", "out"])
     assert parsed.guide_effect_strategy == "shared"
+
+def test_fit_from_path_forwards_scaled_gene_blocks(monkeypatch):
+    calls = []
+    monkeypatch.setattr(api, "main", lambda argv: calls.append(argv))
+    api.fit_from_path("screen.h5mu", "out", guide_effect_strategy="scaled", gene_chunk_size=32)
+    argv, = calls
+    assert _parsed(monkeypatch, argv).crt is None
+    assert argv[argv.index("--gene-chunk-size") + 1] == "32"
+    assert argv[argv.index("--guide-effect-strategy") + 1] == "scaled"
+
+
+@pytest.mark.parametrize("pool", ["all-cells", "control-anchored"])
+def test_automatic_testing_uses_cli_defaults_and_respects_explicit_options(monkeypatch, pool):
+    calls = []
+    monkeypatch.setattr(api, "main", calls.append)
+    api.fit_from_path("screen.h5mu", "out", crt_only=True, crt_pool=pool,
+                      report_low_information=True, crt_polish_baseline=False)
+    actual = _parsed(monkeypatch, calls[0])
+    expected = _parsed(monkeypatch, ["--input", "screen.h5mu", "--out-dir", "out"])
+    assert actual.crt and actual.crt_only and actual.report_low_information
+    assert actual.crt_pool == pool
+    assert actual.crt_polish_baseline is False
+    assert actual.size_factor_mode == expected.size_factor_mode == "observed"
+    assert actual.crt_mechanism == expected.crt_mechanism == "propensity"
+    assert actual.crt_saddlepoint_only == expected.crt_saddlepoint_only

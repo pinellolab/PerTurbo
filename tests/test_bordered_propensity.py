@@ -184,8 +184,10 @@ def test_rare_assignments_preserve_fitted_counts_and_high_moi_spa_tails(monkeypa
             actual, _ = resampling.fit_propensity_coefficients(
                 indicators, design, basis=basis, bordered_design=context
             )
-        expected_probability = np.asarray(jax.nn.sigmoid(expected @ basis.T), dtype=np.float64)
-        actual_probability = np.asarray(jax.nn.sigmoid(actual @ basis.T), dtype=np.float64)
+        expected_logits = resampling.propensity_logits_from_coefficients(expected, basis)
+        expected_probability = np.asarray(jax.nn.sigmoid(expected_logits), dtype=np.float64)
+        actual_logits = resampling.propensity_logits_from_coefficients(actual, basis)
+        actual_probability = np.asarray(jax.nn.sigmoid(actual_logits), dtype=np.float64)
         probability_error = np.max(np.abs(actual_probability - expected_probability))
         fitted_count_error = np.max(np.abs(actual_probability.sum(1) - expected_probability.sum(1)))
         record_property("max_probability_error", float(probability_error))
@@ -218,7 +220,8 @@ def test_rare_assignments_preserve_fitted_counts_and_high_moi_spa_tails(monkeypa
         assert expected_tail.valid.all() and actual_tail.valid.all()
         assert not expected_tail.used_fallback.any() and not actual_tail.used_fallback.any()
         assert np.min(expected_tail.log_p_value) < -10
-        np.testing.assert_allclose(actual_tail.observed_sum, expected_tail.observed_sum, rtol=0, atol=0)
+        # The identical observed counts can be summed in a different order on GPU.
+        np.testing.assert_allclose(actual_tail.observed_sum, expected_tail.observed_sum, rtol=0, atol=1e-13)
         # |delta log(p)| < 1e-3 bounds the relative p-value change to about 0.1%.
         np.testing.assert_allclose(actual_tail.log_p_value, expected_tail.log_p_value, rtol=0, atol=1e-3)
     finally:

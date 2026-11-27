@@ -8,6 +8,17 @@ and this project adheres to [Semantic Versioning][].
 [keep a changelog]: https://keepachangelog.com/en/1.0.0/
 [semantic versioning]: https://semver.org/spec/v2.0.0.html
 
+## Unreleased
+
+- Baseline polishing retries failed genes in float64. Strict testing withholds results for unresolved and zero-baseline-count genes and records their names in run metadata.
+
+- With `--report-low-information` or an explicit `--crt-min-informative-cells` threshold, `observed_nonzero`, `expected_nonzero` and `low_information` replace their `crt_`-prefixed names. Fitted MuData exports preserve these columns from new and older bundles when available.
+
+- The main effect table records one primary p-value and BH adjustments across the screen, within each element, and across an optional prespecified cis list. Use `--cis-pairs` to supply the cis family. The existing method-specific columns remain available.
+- Relative (scaled) guide-efficiency fits support stage-two gene blocking and retain guide-by-gene estimates across blocks.
+- The default output is a self-contained `fitted.h5mu` containing the input assays, fit, and result tables. Use `--output-format bundle` for the compact bundle or `--output-format legacy` for scripts that consume the earlier directory layout.
+- Added executable Gasperini high-MOI and Replogle low-MOI analysis tutorials with compact real inputs. Each saves the fitted baseline used by its companion power-grid notebook to estimate enhancer–gene or TF-regulon recovery.
+
 ## [2.0.0rc12] - 2026-09-24
 
 ### Changed
