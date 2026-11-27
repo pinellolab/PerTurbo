@@ -370,6 +370,24 @@ def test_the_gene_chunk_size_does_not_change_the_answer() -> None:
     np.testing.assert_array_equal(split.p_value, whole.p_value)
 
 
+def test_strict_withholding_preserves_other_genes_and_excludes_missing_p_from_bh():
+    controls, chunk, theta, strata = _simulate_screen()
+    baseline = prepare_crt_baseline(controls, _fitted_control_fit(controls, theta))
+    config = dict(control_data=controls, num_resamples=99, strata=strata, seed=5)
+    full = run_crt_for_chunk(baseline, chunk, **config)
+    masked = dataclasses.replace(baseline, withheld_genes=(baseline.gene_names[2],))
+    result = run_crt_for_chunk(masked, chunk, **config)
+    retained = np.arange(len(baseline.gene_names)) != 2
+    np.testing.assert_array_equal(result.p_value[:, retained], full.p_value[:, retained])
+    assert np.isnan(result.p_value[:, 2]).all()
+    assert np.isnan(result.observed_score[:, 2]).all()
+    accumulator = crt_module.CRTAccumulator(result.target_names, result.gene_names)
+    accumulator.absorb(result)
+    q = accumulator.finalize()["crt_q_value"]
+    assert np.isnan(q[:, 2]).all()
+    assert np.isfinite(q[:, retained]).any()
+
+
 def test_a_targets_result_does_not_depend_on_which_chunk_it_landed_in() -> None:
     """The property the name-keyed seeding exists to protect, end to end.
 
@@ -653,8 +671,8 @@ def _displaced_control_fit(control_data: PerTurboData, theta: np.ndarray, shift:
 def test_polishing_moves_a_displaced_baseline_onto_the_null_mode() -> None:
     control_data, _, theta, _ = _simulate_screen()
     displaced = _displaced_control_fit(control_data, theta)
-    with pytest.raises(ValueError, match="not at the control-cell null mode"):
-        prepare_crt_baseline(control_data, displaced)
+    with pytest.warns(RuntimeWarning, match="Strict mode withholds"):
+        assert prepare_crt_baseline(control_data, displaced).withheld_genes
 
     baseline = prepare_crt_baseline(control_data, displaced, polish=True)
     assert baseline.pre_polish_check is not None and not baseline.pre_polish_check.ok
@@ -852,3 +870,45 @@ def test_shared_coefficients_must_match_the_nuisance_columns() -> None:
     baseline = prepare_crt_baseline(control_data, _fitted_control_fit(control_data, theta))
     with pytest.raises(ValueError, match="one coefficient per nuisance column"):
         _saddlepoint_log_p(baseline, chunk_data, control_data, np.zeros(7))
+
+
+@pytest.mark.parametrize("solver_fails", [False, True])
+def test_polish_retries_only_failed_genes_and_keeps_strict_gate(monkeypatch, solver_fails):
+    from perturbo._internal import score_resampling
+
+    batch = np.repeat([0, 1], 50)
+    design = np.column_stack((np.ones(100), batch))
+    counts = np.zeros((100, 3))
+    counts[-3:, 0] = 1
+    counts[:, 1] = 1
+    standard = crt_module.ControlNuisance(
+        counts=counts, nuisance_design=design,
+        coefficients=np.zeros((2, 3)), offsets=np.zeros((100, 3)),
+        dispersion=np.ones(3), nuisance_names=("intercept", "batch"),
+        gene_names=("sparse", "passing", "zero"),
+    )
+    monkeypatch.setattr(crt_module, "assemble_control_nuisance", lambda *_: standard)
+    monkeypatch.setattr(crt_module, "polish_baseline_to_null_mode", lambda n, **kw: n)
+    original_solver = score_resampling.fit_batched_nb_null
+    attempted = []
+
+    def solve(y, **kwargs):
+        np.testing.assert_array_equal(y, counts[:, :1])
+        assert kwargs["offsets"].shape == (100, 1)
+        attempted.append(True)
+        if solver_fails:
+            raise np.linalg.LinAlgError("singular")
+        return original_solver(y, **kwargs)
+
+    monkeypatch.setattr(score_resampling, "fit_batched_nb_null", solve)
+    if solver_fails:
+        with pytest.warns(RuntimeWarning, match="sparse"):
+            assert prepare_crt_baseline(None, None, polish=True).withheld_genes == ("sparse",)
+    else:
+        result = prepare_crt_baseline(None, None, polish=True)
+        assert result.null_check.ok
+        assert result.null_check.degenerate.tolist() == [False, False, True]
+        np.testing.assert_array_equal(result.nuisance.coefficients[:, 1:], standard.coefficients[:, 1:])
+        recomputed = check_baseline_is_null_mode(result.nuisance)
+        np.testing.assert_allclose(result.null_check.newton_step, recomputed.newton_step)
+    assert attempted == [True]
